@@ -1,3 +1,4 @@
+S
 <!-- ============================================================================
      LOCK REGISTRY — v25_audit9_20260909 — DO NOT REVERT
      Format in code:  /* LOCKED PERMANENTLY | issue-N | contract: <one line> */
@@ -5726,12 +5727,43 @@ function updateTeamUIFromStats(side, stats) {
     });
   }
 
-  if (stats.homeScoredList && stats.homeScoredList.length >= 2) {
-    const elScoredHome = document.getElementById(prefix + "FTScoredHome");
-    const elAllowedHome = document.getElementById(prefix + "FTAllowedHome");
-    if (elScoredHome) elScoredHome.value = stats.homeScoredList.slice(0, 10).join(",");
-    if (elAllowedHome) elAllowedHome.value = stats.homeAllowedList.slice(0, 10).join(",");
-  }
+  /* LOCKED PERMANENTLY | NEW-AUD-02 | contract: home fixture → home boxes; away fixture → away boxes. Never park away-team venue in the home box. */
+  (function fillVenueBoxesByRole() {
+    const role = typeof getFixtureSideRole === "function" ? getFixtureSideRole(side) : "";
+    const elSH = document.getElementById(prefix + "FTScoredHome");
+    const elAH = document.getElementById(prefix + "FTAllowedHome");
+    const elSA = document.getElementById(prefix + "FTScoredAway");
+    const elAA = document.getElementById(prefix + "FTAllowedAway");
+    const sec = document.getElementById(side === "A" ? "aVenueSplitSection" : "bVenueSplitSection");
+    function show(el, on) {
+      if (el && el.parentElement) el.parentElement.style.display = on ? "block" : "none";
+    }
+    function setBox(el, arr) {
+      if (!el) return;
+      el.value = Array.isArray(arr) && arr.length ? arr.slice(0, 10).join(",") : "";
+    }
+    if (role === "away") {
+      if (sec) sec.style.display = "block";
+      show(elSH, false);
+      show(elAH, false);
+      show(elSA, true);
+      show(elAA, true);
+      setBox(elSH, []);
+      setBox(elAH, []);
+      setBox(elSA, stats.awayScoredList);
+      setBox(elAA, stats.awayAllowedList);
+    } else if (role === "home") {
+      if (sec) sec.style.display = "block";
+      show(elSH, true);
+      show(elAH, true);
+      show(elSA, false);
+      show(elAA, false);
+      setBox(elSA, []);
+      setBox(elAA, []);
+      setBox(elSH, stats.homeScoredList);
+      setBox(elAH, stats.homeAllowedList);
+    }
+  })();
 
   if (stats.h1ScoredList?.length >= 2) {
     setVal(prefix + "1HScored", stats.h1ScoredList.slice(0, 10).join(","));
@@ -21942,6 +21974,16 @@ function distributionWinProbability(meanEdge, leagueVolLimit, volRatio) {
   const z = Math.abs(meanEdge) / sd;
   return clampNumber(_normalCdf(z), 0.02, 0.98);
 }
+function getDistributionWinProbabilityForPick(p, leagueKey) {
+  /* LOCKED PERMANENTLY | NEW-AUD-03 | contract: CDF winProb is kept even on NO PLAY. All leagues. Grade stays NaN. Ticket stays NO PLAY. */
+  if (!p || !isFinite(Number(p.edge))) return null;
+  const mk = p.marketKey || "ft";
+  const volLimit =
+    typeof getMarketVolLimit === "function" ? getMarketVolLimit(leagueKey || p.league || "", mk) || 12 : 12;
+  const vol = Number(p.volatility);
+  const volRatio = isFinite(vol) && volLimit > 0 ? vol / volLimit : 0.5;
+  return distributionWinProbability(Number(p.edge), volLimit, volRatio);
+}
 
 const CONFIDENCE_EDGE_PIVOT = 0.06;
 function buildConfidenceFeatures(pickOrArgs) {
@@ -31550,6 +31592,14 @@ async function runEngine() {
     applyLeagueTrustToPicks(finalPicksForDisplay, league);
 
     finalPicksForDisplay.forEach((p) => {
+      if (!p) return;
+      const dist = typeof getDistributionWinProbabilityForPick === "function"
+        ? getDistributionWinProbabilityForPick(p, league)
+        : null;
+      if (Number.isFinite(dist)) p.winProbability = dist;
+    });
+
+    finalPicksForDisplay.forEach((p) => {
       if (memoryFlags[p.marketKey]) p.usedMemory = true;
     });
 
@@ -32486,14 +32536,71 @@ async function runEngine() {
         })),
       },
 
+      auditProvenance: {
+        /* LOCKED PERMANENTLY | NEW-AUD-01 | contract: dump labels venue/H2H/quarter blend so audits do not re-file locked design */
+        venueContext: {
+          homeTeam: (fixtureMeta && fixtureMeta.homeTeam) || "",
+          awayTeam: (fixtureMeta && fixtureMeta.awayTeam) || "",
+          homeTeamVenueSample: "home",
+          awayTeamVenueSample: "away",
+        },
+        venueSelection: (function () {
+          const sideA = typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "";
+          const sideB = typeof getFixtureSideRole === "function" ? getFixtureSideRole("B") : "";
+          const nameA = document.getElementById("teamAName")?.value?.trim() || "";
+          const nameB = document.getElementById("teamBName")?.value?.trim() || "";
+          return {
+            A: {
+              team: nameA,
+              fixtureSide: sideA || "unknown",
+              selectedVenue: sideA === "home" || sideA === "away" ? sideA : "unknown",
+            },
+            B: {
+              team: nameB,
+              fixtureSide: sideB || "unknown",
+              selectedVenue: sideB === "home" || sideB === "away" ? sideB : "unknown",
+            },
+            rule: "home team uses home games; away team uses away games",
+          };
+        })(),
+        venueDataProvenance: {
+          homeTeam: "home_games",
+          awayTeam: "away_games",
+          overallVsVenue: "venue uses location-appropriate sample",
+        },
+        h2hProvenance:
+          (typeof document !== "undefined" && document.getElementById("useFTH2H") && document.getElementById("useFTH2H").checked)
+            ? "manual_input_boxes"
+            : "none",
+        quarterReconciliation: {
+          mode: "anchor_blend",
+          blendWeight:
+            typeof MODEL_TUNING !== "undefined" && MODEL_TUNING && isFinite(MODEL_TUNING.quarterAnchorBlendWeight)
+              ? MODEL_TUNING.quarterAnchorBlendWeight
+              : 0.7,
+          conservesToFT: false,
+        },
+      },
       reproducibility: {
         modelGradeA_Threshold: _aud_gradeThresholds.aThresh,
         modelGradeB_Threshold: _aud_gradeThresholds.bThresh,
         modelGradeC_Threshold: _aud_gradeThresholds.cThresh,
-        calculatedWinProbabilities: finalPicksForDisplay.map((p) => ({
-          market: p.marketKey,
-          winProbability: p.winProbability || null,
-        })),
+        calculatedWinProbabilities: finalPicksForDisplay.map((p) => {
+          const wp = Number(p && p.winProbability);
+          const noPlay = !p || p.pick === "NO PLAY";
+          let status = "ok";
+          if (Number.isFinite(wp) && noPlay) status = "distribution_retained_no_play";
+          else if (Number.isFinite(wp)) status = "ok";
+          else if (noPlay) status = "suppressed_no_play";
+          else if (typeof isConfidenceModelFitted === "function" && !isConfidenceModelFitted(league))
+            status = "logistic_unfitted";
+          else status = "distribution_probability_unavailable";
+          return {
+            market: p && p.marketKey,
+            winProbability: Number.isFinite(wp) ? wp : null,
+            winProbabilityStatus: status,
+          };
+        }),
       },
     };
 
