@@ -1,3 +1,4 @@
+A
 <!-- ============================================================================
      LOCK REGISTRY — v25_audit10_20260913 — DO NOT REVERT
      Format in code:  /* LOCKED PERMANENTLY | issue-N | contract: <one line> */
@@ -38994,7 +38995,12 @@ const EngineAuditor = (function () {
           "Confirm edge unit is points everywhere.",
           { severity: String(v2) === "NO PLAY" ? "HIGH" : "INFO", ruleId: "UNIT_TRAP_POINTS_EDGE",
             inputs: { edge: 6.5, line: 160 }, observed: v2, calculationPath: "getPick" });
-      } catch (_e) {}
+      } catch (_e) {
+        forensicAssert(false, "Unit trap: genuine points edge probe threw", String(_e && _e.message || _e),
+          "A production getPick probe that throws cannot be treated as a passing unit-consistency result.",
+          "Fix getPick runtime compatibility or the forensic call signature before sealing.",
+          { severity: "HIGH", ruleId: "UNIT_TRAP_POINTS_EDGE_THROW", bankrollRisk: "HIGH" });
+      }
     }
     if (typeof resolveConfidenceGradeFromWinProbability === "function") {
       let g65;
@@ -39589,11 +39595,13 @@ const EngineAuditor = (function () {
     }
     if (typeof resolveConfidenceGradeFromWinProbability === "function") {
       const probs = [0.55, 0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90];
+      let trainServeGradeThrew = false;
       const grades = probs.map(function (p) {
-        try { return resolveConfidenceGradeFromWinProbability(p); } catch (_e) { return "THREW"; }
+        try { return resolveConfidenceGradeFromWinProbability(p); }
+        catch (_e) { trainServeGradeThrew = true; return "THREW"; }
       });
       const rank = { A: 4, B: 3, C: 2, D: 1, F: 0, NaN: -1 };
-      let mono = true;
+      let mono = !trainServeGradeThrew;
       for (let i = 1; i < grades.length; i++) {
         const r0 = rank[grades[i - 1]] != null ? rank[grades[i - 1]] : -1;
         const r1 = rank[grades[i]] != null ? rank[grades[i]] : -1;
@@ -39815,7 +39823,12 @@ const EngineAuditor = (function () {
             "getPick must accept positional (edge, line, league, marketKey, context) and return OVER/UNDER/NO PLAY.",
             "Call getPick(edge, line, league, marketKey, context) — not an options object.",
             { severity: sideOk ? "INFO" : "HIGH", ruleId: "DIMENSIONAL_GETPICK_SIG", observed: pickSide });
-        } catch (_e) {}
+        } catch (_e) {
+          forensicAssert(false, "Dimensional: getPick production signature probe threw", String(_e && _e.message || _e),
+            "A thrown production getPick probe leaves dimensional compatibility unproven and must not permit a PASS.",
+            "Fix getPick runtime compatibility or the forensic adapter before sealing.",
+            { severity: "HIGH", ruleId: "DIMENSIONAL_GETPICK_THROW", bankrollRisk: "HIGH" });
+        }
       }
       _forensicState.layerStatus.DIMENSIONAL = forensicLayerResult("DIMENSIONAL");
     } catch (e) {
@@ -39897,6 +39910,7 @@ const EngineAuditor = (function () {
       const ranks = { A: 5, B: 4, C: 3, D: 2, F: 1, "NO PLAY": 0, N: 0, NA: 0, "—": 0, "": 0 };
       let prev = -1;
       let ok = true;
+      let probeThrew = false;
       const seq = [];
       probs.forEach(function (p) {
         let g;
@@ -39904,7 +39918,8 @@ const EngineAuditor = (function () {
           g = gradeFn(p);
           if (g && typeof g === "object") g = g.grade || g.confidenceGrade || g.label;
         } catch (_e) {
-          g = null;
+          probeThrew = true;
+          g = "THREW";
         }
         const gs = String(g == null ? "" : g).toUpperCase().replace(/[^A-F]/g, "").charAt(0) || String(g || "");
         const r = ranks[gs] != null ? ranks[gs] : ranks[String(g)] != null ? ranks[String(g)] : -1;
@@ -39914,6 +39929,7 @@ const EngineAuditor = (function () {
           prev = Math.max(prev, r);
         }
       });
+      ok = ok && !probeThrew;
       if (ok) _forensicState.invariantsPassed = (_forensicState.invariantsPassed || 0) + 1;
       forensicAssert(ok, "Confidence grade monotonic in win probability",
         seq.join(" | "),
@@ -40009,24 +40025,49 @@ const EngineAuditor = (function () {
       .filter(Boolean)));
     const consumers = [];
     const fnList = _forensicState.functions || [];
+    const auditorStart = Number(_forensicState.auditorStartLine || 1e9);
+    const auditorEnd = Number(_forensicState.auditorEndLine || -1);
+    function lineOf(pos) {
+      return src.slice(0, pos).split("\n").length;
+    }
+    function isAuditorPos(pos) {
+      const ln = lineOf(pos);
+      return ln >= auditorStart && ln <= auditorEnd;
+    }
     keys.forEach(function (key) {
-      const needle = 'getParam("' + key + '"';
-      const needle2 = "getParam('" + key + "'";
+      const re = new RegExp("getParam\\(\\s*[\\\"']" + key.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&") + "[\\\"']", "g");
       const hits = [];
-      fnList.forEach(function (f) {
-        const body = src.slice(Math.max(0, Number(f.start) || 0), Math.max(0, Number(f.end) || 0));
-        if (body.indexOf(needle) >= 0 || body.indexOf(needle2) >= 0) hits.push(f.name);
-      });
+      let m;
+      while ((m = re.exec(src))) {
+        const pos = m.index;
+        if (isAuditorPos(pos)) continue;
+        const containing = fnList.find(function (f) {
+          const a = Math.max(0, Number(f.start) || 0);
+          const b = Math.max(0, Number(f.end) || 0);
+          return pos >= a && pos < b;
+        });
+        if (containing && !forensicFunctionIsAuditor(containing, auditorStart, auditorEnd)) {
+          if (!hits.includes(containing.name)) hits.push(containing.name);
+          continue;
+        }
+        /* Object getters/accessors are production consumers too, but are not
+           necessarily represented in the function inventory. Record their
+           concrete source location instead of falsely marking them unresolved. */
+        const before = src.slice(Math.max(0, pos - 220), pos);
+        if (/\bget\s+[A-Za-z_$][\w$]*\s*\(\s*\)\s*\{[\s\S]*$/.test(before)) {
+          hits.push("<object-getter>@" + lineOf(pos));
+        }
+      }
       consumers.push({ key: key, count: hits.length, functions: hits });
     });
     const unresolved = consumers.filter(function (x) { return x.count === 0; });
     const passed = consumers.length > 0 && unresolved.length === 0;
     _forensicState.invariantsTested = (_forensicState.invariantsTested || 0) + 1;
     forensicAssert(passed, "Every getParam config key has a production consumer",
-      "Literal getParam keys=" + consumers.length + "; unresolved=" + unresolved.map(function (x) { return x.key; }).join(",") ,
-      "A tunable is only wired when its read occurs inside a concrete function consumer; identifier presence alone is insufficient.",
+      "Literal getParam keys=" + consumers.length + "; unresolved=" + unresolved.map(function (x) { return x.key; }).join(","),
+      "A tunable is only wired when its read occurs inside a concrete production function or production object accessor; identifier presence alone is insufficient.",
       "Wire each unresolved key into its intended production formula or remove the dead key.",
-      { ruleId: "CONFIG_CONSUMER_MAP", severity: passed ? "INFO" : "MEDIUM", consumers: consumers, unresolved: unresolved.map(function (x) { return x.key; }) });
+      { ruleId: "CONFIG_CONSUMER_MAP", severity: passed ? "INFO" : "HIGH", consumers: consumers, unresolved: unresolved.map(function (x) { return x.key; }) });
     if (passed) _forensicState.invariantsPassed = (_forensicState.invariantsPassed || 0) + 1;
     _forensicState.layerStatus.CONFIG_WIRING = passed ? "PASSED" : "FAILED";
   }
