@@ -1,6 +1,5 @@
-S
 <!-- ============================================================================
-     LOCK REGISTRY — v25_audit9_20260909 — DO NOT REVERT
+     LOCK REGISTRY — v25_audit10_20260913 — DO NOT REVERT
      Format in code:  /* LOCKED PERMANENTLY | issue-N | contract: <one line> */
      Meaning: operator-accepted fix. Later models must NOT re-open, "improve",
      or restore the old behavior unless the operator explicitly unlocks it.
@@ -4582,7 +4581,7 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v25_audit9_20260909"; /* LOCKED PERMANENTLY issue-16 build id */
+const APP_BUILD_VERSION = "v25_audit10_20260913"; /* LOCKED PERMANENTLY issue-16 build id */
 const MARKET_SEMANTICS = {
   /* LOCKED PERMANENTLY issue-1/2: FT last-10 and FT settle both include OT. Period markets stay regulation. */
   total: "Both teams combined. ft includes OT. h1=Q1+Q2 (or period 1 if regulationPeriods=2). h2=Q3+Q4 both teams, OT excluded.",
@@ -5554,13 +5553,12 @@ function updateTeamUIFromStats(side, stats) {
 
   setVal(prefix + "FTScored", display10S.join(","));
   setVal(prefix + "FTAllowed", display10A.join(","));
-  if (!display10S.length) {
-    ["1HScored","1HAllowed","2HScored","2HAllowed",
-     "Q1Scored","Q1Allowed","Q2Scored","Q2Allowed",
-     "Q3Scored","Q3Allowed","Q4Scored","Q4Allowed"].forEach(function (suf) {
-      setVal(prefix + suf, "");
-    });
-  }
+  /* Clear prior period UI on every refresh. New data below repopulates only valid series. */
+  ["1HScored","1HAllowed","2HScored","2HAllowed",
+   "Q1Scored","Q1Allowed","Q2Scored","Q2Allowed",
+   "Q3Scored","Q3Allowed","Q4Scored","Q4Allowed"].forEach(function (suf) {
+    setVal(prefix + suf, "");
+  });
 
   /* LOCKED PERMANENTLY | NEW-AUD-02 | contract: home fixture → home boxes; away fixture → away boxes. Never park away-team venue in the home box. */
   (function fillVenueBoxesByRole() {
@@ -5622,6 +5620,23 @@ function updateTeamUIFromStats(side, stats) {
 
   if (!AppState.context.data[side]) AppState.context.data[side] = {};
   if (!AppState.context.data[side].overall) AppState.context.data[side].overall = {};
+  /* Clear stale period/venue state before applying this fixture's new snapshot. */
+  AppState.context.data[side].venue = {};
+  ["h1","h2","q1","q2","q3","q4"].forEach(function (mk) {
+    AppState.context.data[side].overall[mk + "Scored10"] = [];
+    AppState.context.data[side].overall[mk + "Allowed10"] = [];
+    AppState.context.data[side].overall[mk + "ScoredDates10"] = [];
+    AppState.context.data[side].overall[mk + "AllowedDates10"] = [];
+  });
+  AppState.context.data[side].q1Scored = [];
+  AppState.context.data[side].q2Scored = [];
+  AppState.context.data[side].q3Scored = [];
+  AppState.context.data[side].q4Scored = [];
+  AppState.context.data[side].q1Allowed = [];
+  AppState.context.data[side].q2Allowed = [];
+  AppState.context.data[side].q3Allowed = [];
+  AppState.context.data[side].q4Allowed = [];
+  AppState.context.data[side].quarterSpreads = null;
   AppState.context.data[side].overall.ftScored10 = stats.scoredList;
   AppState.context.data[side].overall.ftAllowed10 = stats.allowedList;
   AppState.context.data[side].overall.scored10 = stats.scoredList;
@@ -6287,19 +6302,38 @@ function extractH2HFromPastedEvents() {
           bQ3: _twoP ? NaN : (Number.isFinite(oQ3) ? oQ3 : NaN),
           aQ4: _twoP ? NaN : (Number.isFinite(mQ4) ? mQ4 : NaN),
           bQ4: _twoP ? NaN : (Number.isFinite(oQ4) ? oQ4 : NaN),
-          hasQ: !_twoP && Number.isFinite(mQ1) && Number.isFinite(mQ2),
+          hasH1: Number.isFinite(mQ1) && Number.isFinite(oQ1),
+          hasQ: !_twoP && Number.isFinite(mQ1) && Number.isFinite(mQ2) && Number.isFinite(oQ1) && Number.isFinite(oQ2),
         }); /* LOCKED PERMANENTLY | E-006a | contract: 2-period H2H uses period1 as H1 only; never alias halves onto Q slots */
       }
     });
 
     newEntries.sort((a, b) => b.ts - a.ts);
+    if (newEntries.length < 2) {
+      /* LOCKED PERMANENTLY | N-07 | contract: <2 qualifying H2H matches clears cache AND the H2H fields/checkboxes */
+      window.__h2hEntryCache = [];
+      const h2hTag = document.getElementById("h2hAutoTag");
+      if (h2hTag) h2hTag.style.display = "none";
+      [
+        "aFTH2H","bFTH2H","a1HH2H","b1HH2H",
+        "aQ1H2H","bQ1H2H","aQ2H2H","bQ2H2H","aQ3H2H","bQ3H2H","aQ4H2H","bQ4H2H",
+      ].forEach(function (id) {
+        const el = document.getElementById(id);
+        if (el) el.value = "";
+      });
+      ["useFTH2H","use1HH2H","useQ1H2H","useQ2H2H","useQ3H2H","useQ4H2H"].forEach(function (id) {
+        const cb = document.getElementById(id);
+        if (cb) cb.checked = false;
+      });
+      return;
+    }
     window.__h2hEntryCache = newEntries.slice(0, 5);
 
     const merged = window.__h2hEntryCache;
     const h2hA = merged.map((e) => e.aFT);
     const h2hB = merged.map((e) => e.bFT);
-    const h2hA1H = merged.filter((e) => e.hasQ).map((e) => e.aH1);
-    const h2hB1H = merged.filter((e) => e.hasQ).map((e) => e.bH1);
+    const h2hA1H = merged.filter((e) => e.hasH1).map((e) => e.aH1);
+    const h2hB1H = merged.filter((e) => e.hasH1).map((e) => e.bH1);
     const h2hAQ1 = merged.filter((e) => e.hasQ).map((e) => e.aQ1);
     const h2hBQ1 = merged.filter((e) => e.hasQ).map((e) => e.bQ1);
     const h2hAQ2 = merged.filter((e) => e.hasQ).map((e) => e.aQ2);
@@ -6381,7 +6415,7 @@ function getDynamicWeights(sampleTier, volatility, league) {
 
   const volRatio = isFinite(Number(volatility)) ? clampNumber(Number(volatility), 0, 2.5) : 0.5;
   const volShrink = volRatio * 0.3;
-  const shrink = clampNumber(sampleShrink + volShrink + leagueShrink, 0, 0.95);
+  const shrink = clampNumber(sampleShrink + volShrink, 0, 0.95); /* league-wide shrink is not an independent live parameter; do not read an undeclared value. */
   return {
     teamWeight: base.teamWeight - (base.teamWeight - 0.5) * shrink,
     oppWeight: base.oppWeight - (base.oppWeight - 0.5) * shrink,
@@ -21568,9 +21602,6 @@ function getConfidenceWinProbability(
       } else if (_resolvedScope !== "version_mismatch" && models[leagueGroup]) {
         coeff = models[leagueGroup];
         _resolvedScope = leagueGroup;
-      } else if (models[tierKey]) {
-        coeff = models[tierKey];
-        _resolvedScope = tierKey;
       } else {
         coeff = models["global"] || {};
         _resolvedScope = "global";
@@ -21691,9 +21722,6 @@ function isConfidenceCoeffFitted(league) {
     } else if (models[leagueGroup]) {
       coeff = models[leagueGroup];
       _resolvedScope = leagueGroup;
-    } else if (models[tierKey]) {
-      coeff = models[tierKey];
-      _resolvedScope = tierKey;
     } else {
       coeff = models["global"];
       _resolvedScope = "global";
@@ -29764,6 +29792,11 @@ async function runEngine() {
         const _qH2hDivergence =
           isFinite(avgH2HA) && isFinite(avgH2HB) ? Math.abs(_qH2hTotal - _qModelTotal) : 0;
         const _qH2hFactor = isFinite(config?.h2hFactor) ? Number(config.h2hFactor) : 1.0;
+        const _qPaceA10 = avgOrNaN(ctxAQ.pace10);
+        const _qPaceB10 = avgOrNaN(ctxBQ.pace10);
+        const _qPaceGapRisk = Number.isFinite(_qPaceA10) && Number.isFinite(_qPaceB10)
+          ? Math.abs(_qPaceA10 - _qPaceB10) > 6
+          : false;
         const hw = getH2HWeight(
           decayH2HA.length,
           decayH2HB.length,
@@ -29779,8 +29812,7 @@ async function runEngine() {
             injMultB: injB,
             volRatio: qVolRatio,
             blowoutGap: Math.abs(projA - projB),
-            paceGapRisk:
-              Math.abs((avgOrNaN(ctxAQ.pace10) || 74) - (avgOrNaN(ctxBQ.pace10) || 74)) > 6,
+            paceGapRisk: _qPaceGapRisk,
           },
         );
         projA = isFinite(avgH2HA) ? projA * (1 - hw) + avgH2HA * hw : projA;
@@ -29810,7 +29842,7 @@ async function runEngine() {
         projectionOnly: qProjectionOnly,
         trap: qTrap,
 
-        paceGapRisk: Math.abs((avgOrNaN(ctxAQ.pace10) || 74) - (avgOrNaN(ctxBQ.pace10) || 74)) > 6,
+        paceGapRisk: _qPaceGapRisk,
         blowoutGap: Math.abs(projA - projB),
 
         marketKey: qKey,
@@ -29820,8 +29852,7 @@ async function runEngine() {
         league,
       });
 
-      const qPaceGapRisk =
-        Math.abs((avgOrNaN(ctxAQ.pace10) || 74) - (avgOrNaN(ctxBQ.pace10) || 74)) > 6;
+      const qPaceGapRisk = _qPaceGapRisk;
 
       return {
         proj: qProj,
@@ -37961,7 +37992,8 @@ const EngineAuditor = (function () {
     const productLineCount = Math.max(0, Number(_forensicState.productLines) || 0);
     const functionLines = productFns.reduce((n, f) => n + f.lines, 0);
     const coverage = productLineCount ? Math.min(100, (functionLines / productLineCount) * 100) : 0;
-    const productSource = markerStart >= 0 ? raw.slice(0, markerStart) : raw;
+    const _staticMarkerStart = text.indexOf(_AUDITOR_SELF_START);
+    const productSource = _staticMarkerStart >= 0 ? text.slice(0, _staticMarkerStart) : text;
     const declaredFns = Array.from(productSource.matchAll(/(?:^|[;\n}])\s*(?:async\s+)?function\s+([A-Za-z_$][\w$]*)\s*\(/g)).map(m => m[1]);
     const declaredArrows = Array.from(productSource.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?(?:\([^\n]*\)|[A-Za-z_$][\w$]*)\s*=>\s*{/g)).map(m => m[1]);
     const expectedFunctionNames = new Set(declaredFns.concat(declaredArrows));
@@ -38025,7 +38057,7 @@ const EngineAuditor = (function () {
             { ruleId: "EXEC_EMPTY_NONFINITE", functionName: f.name, observed: r, calculationPath: f.name });
         }
       } catch (_e) {
-        proven++;
+        /* A thrown probe is a failed/unproven execution, never proof. */
       }
     });
     _forensicState.dynamicFunctionTests = tested;
@@ -39406,8 +39438,6 @@ const EngineAuditor = (function () {
       return f && !forensicFunctionIsAuditor(f, _forensicState.auditorStartLine || 1e9, _forensicState.auditorEndLine || -1);
     });
     const edges = Array.isArray(_forensicState.callEdges) ? _forensicState.callEdges : [];
-    const called = new Set(edges.map(function (e) { return e.to; }));
-    const callers = new Set(edges.map(function (e) { return e.from; }));
     const roots = new Set(["runEngine"]);
     const rootRe = /(?:addEventListener\s*\([^,]+,|on(?:click|change|input|submit)\s*=)\s*(?:withErrorBoundary\s*\(\s*)?([A-Za-z_$][\w$]*)/g;
     let rm;
@@ -39421,7 +39451,7 @@ const EngineAuditor = (function () {
       });
     }
     fns.forEach(function (f) {
-      if (f.name === "runEngine" || reachable.has(f.name) || called.has(f.name) || callers.has(f.name) || f.lines <= 5) return;
+      if (f.name === "runEngine" || reachable.has(f.name) || f.lines <= 5) return;
       const escaped = f.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const refs = (textSrc.match(new RegExp("\\b" + escaped + "\\b", "g")) || []).length;
       if (refs <= 1) {
@@ -39926,7 +39956,7 @@ const EngineAuditor = (function () {
       const needle2 = "getParam('" + key + "'";
       const hits = [];
       fnList.forEach(function (f) {
-        const body = src.slice(Math.max(0, f.startOffset || 0), Math.max(0, f.endOffset || 0));
+        const body = src.slice(Math.max(0, Number(f.start) || 0), Math.max(0, Number(f.end) || 0));
         if (body.indexOf(needle) >= 0 || body.indexOf(needle2) >= 0) hits.push(f.name);
       });
       consumers.push({ key: key, count: hits.length, functions: hits });
@@ -40529,7 +40559,7 @@ const EngineAuditor = (function () {
     const inventoryOk = !!_forensicState.functionInventoryComplete && !!_forensicState.callGraphInventoryComplete;
     const asOfOk = Number(_forensicState.asOfProofFail || 0) === 0 && Number(_forensicState.asOfProofPass || 0) > 0;
 
-    let proofOk = !hasCrit && asOfOk && coverageOk && staticOk && inventoryOk && mandatoryLayersRan && !!_forensicState.branchCoverageProven;
+    let proofOk = !hasCrit && failedProof.length === 0 && asOfOk && coverageOk && staticOk && inventoryOk && mandatoryLayersRan && !!_forensicState.branchCoverageProven;
     const branchProofOk = !!_forensicState.branchCoverageProven;
     _forensicState.proofPercent = coverageScore;
     /* LOCKED PERMANENTLY | issue-21 | contract: SKIPPED layers cannot SEAL. They also cannot tank Engine. */
