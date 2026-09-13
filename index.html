@@ -1,4 +1,3 @@
-A
 <!-- ============================================================================
      LOCK REGISTRY — v25_audit10_20260913 — DO NOT REVERT
      Format in code:  /* LOCKED PERMANENTLY | issue-N | contract: <one line> */
@@ -37665,17 +37664,81 @@ const EngineAuditor = (function () {
 
   function forensicFindMatchingBrace(src, openIndex) {
     /* LOCKED PERMANENTLY | AUD-6 | contract: function spans must be matched from the
-       declaration's own brace; one malformed regex elsewhere must not poison the
-       entire program inventory. */
+       declaration's own brace; one malformed literal elsewhere must not poison the
+       entire program inventory. Template literals are skipped as complete lexical
+       units, including ${...} expressions and nested template literals. */
     let depth = 0;
-    let quote = null, template = false, lineComment = false, blockComment = false, regex = false;
+    let quote = null, lineComment = false, blockComment = false, regex = false;
     let prevToken = null;
+
+    function skipTemplate(startIndex) {
+      let i = startIndex + 1;
+      let exprDepth = 0;
+      let exprQuote = null, exprLineComment = false, exprBlockComment = false, exprRegex = false;
+      let exprPrevToken = null;
+      for (; i < src.length; i++) {
+        const c = src[i], n = src[i + 1];
+        if (!exprDepth) {
+          if (c === "\\") { i++; continue; }
+          if (c === "`") return i;
+          if (c === "$" && n === "{") { exprDepth = 1; i++; continue; }
+          continue;
+        }
+        if (exprLineComment) { if (c === "\n") exprLineComment = false; continue; }
+        if (exprBlockComment) { if (c === "*" && n === "/") { exprBlockComment = false; i++; } continue; }
+        if (exprQuote) { if (c === "\\") { i++; continue; } if (c === exprQuote) exprQuote = null; continue; }
+        if (exprRegex) {
+          if (c === "\\") { i++; continue; }
+          if (c === "[") {
+            let j = i + 1;
+            while (j < src.length) {
+              if (src[j] === "\\") { j += 2; continue; }
+              if (src[j] === "]") { j++; break; }
+              j++;
+            }
+            i = j - 1; continue;
+          }
+          if (c === "/") {
+            exprRegex = false;
+            while (i + 1 < src.length && /[a-z]/i.test(src[i + 1])) i++;
+            exprPrevToken = "regex";
+          }
+          continue;
+        }
+        if (c === "/" && n === "/") { exprLineComment = true; i++; continue; }
+        if (c === "/" && n === "*") { exprBlockComment = true; i++; continue; }
+        if (c === '"' || c === "'") { exprQuote = c; continue; }
+        if (c === "`") { i = skipTemplate(i); continue; }
+        if (c === "/") {
+          const regexStart = exprPrevToken == null ||
+            ["(", "[", "{", "=", ":", ",", ";", "!", "&&", "||", "??", "?", "+", "-", "*", "%", "<", ">", "^", "~", "return", "throw", "case", "=>"].includes(exprPrevToken);
+          if (regexStart) { exprRegex = true; continue; }
+          exprPrevToken = "/"; continue;
+        }
+        if (c === "{") { exprDepth++; exprPrevToken = "{"; continue; }
+        if (c === "}") { exprDepth--; exprPrevToken = "}"; continue; }
+        if (/\s/.test(c)) continue;
+        if (/[A-Za-z_$]/.test(c)) {
+          let j = i + 1;
+          while (j < src.length && /[A-Za-z0-9_$]/.test(src[j])) j++;
+          const word = src.slice(i, j);
+          exprPrevToken = ["return", "throw", "case"].includes(word) ? word : "id";
+          i = j - 1; continue;
+        }
+        if (c === "&" && n === "&") { exprPrevToken = "&&"; i++; continue; }
+        if (c === "|" && n === "|") { exprPrevToken = "||"; i++; continue; }
+        if (c === "?" && n === "?") { exprPrevToken = "??"; i++; continue; }
+        if (c === "=" && n === ">") { exprPrevToken = "=>"; i++; continue; }
+        exprPrevToken = c;
+      }
+      return src.length - 1;
+    }
+
     for (let i = openIndex; i < src.length; i++) {
       const c = src[i], n = src[i + 1];
       if (lineComment) { if (c === "\n") lineComment = false; continue; }
       if (blockComment) { if (c === "*" && n === "/") { blockComment = false; i++; } continue; }
       if (quote) { if (c === "\\") { i++; continue; } if (c === quote) quote = null; continue; }
-      if (template) { if (c === "\\") { i++; continue; } if (c === "`") template = false; continue; }
       if (regex) {
         if (c === "\\") { i++; continue; }
         if (c === "[") {
@@ -37696,10 +37759,11 @@ const EngineAuditor = (function () {
       }
       if (c === "/" && n === "/") { lineComment = true; i++; continue; }
       if (c === "/" && n === "*") { blockComment = true; i++; continue; }
-      if (c === "\"" || c === "'") { quote = c; continue; }
-      if (c === "`") { template = true; continue; }
+      if (c === '"' || c === "'") { quote = c; continue; }
+      if (c === "`") { i = skipTemplate(i); continue; }
       if (c === "/") {
-        const regexStart = prevToken == null || ["(", "[", "{", "=", ":", ",", ";", "!", "&&", "||", "??", "?", "+", "-", "*", "%", "<", ">", "^", "~", "return", "throw", "case", "=>"].includes(prevToken);
+        const regexStart = prevToken == null ||
+          ["(", "[", "{", "=", ":", ",", ";", "!", "&&", "||", "??", "?", "+", "-", "*", "%", "<", ">", "^", "~", "return", "throw", "case", "=>"].includes(prevToken);
         if (regexStart) { regex = true; continue; }
         prevToken = "/"; continue;
       }
@@ -37715,8 +37779,7 @@ const EngineAuditor = (function () {
         while (j < src.length && /[A-Za-z0-9_$]/.test(src[j])) j++;
         const word = src.slice(i, j);
         prevToken = ["return", "throw", "case"].includes(word) ? word : "id";
-        i = j - 1;
-        continue;
+        i = j - 1; continue;
       }
       if (c === "&" && n === "&") { prevToken = "&&"; i++; continue; }
       if (c === "|" && n === "|") { prevToken = "||"; i++; continue; }
@@ -39108,7 +39171,7 @@ const EngineAuditor = (function () {
           "Run settlement parity against stored production settlements or explicitly keep this proof UNPROVEN until settled records exist.",
           null, "", { ruleId: "SETTLEMENT_PARITY_NO_COVERAGE", status: "UNPROVEN", bankrollRisk: "CRITICAL" });
       } else {
-        forensicAssert(parityPro,
+        forensicAssert(parityProven,
           "Tracker settlement parity vs independent oracle",
           "Checked " + checked + " settled picks; mismatches=" + mismatches,
           "Engine settlement and independent market settlement must match for bankroll integrity.",
@@ -39199,6 +39262,74 @@ const EngineAuditor = (function () {
     _forensicState.layerStatus.TEMPORAL_LEAKAGE = issues ? "FAILED" : (temporalRuntime === "PASSED" ? "PASSED" : "UNPROVEN");
   }
 
+  function forensicReplayProjectionForSnapshot(p, snap) {
+    /* LOCKED PERMANENTLY | AUD-REPLAY-MARKET | contract: production replay must
+       compare each stored pick against the projection for its own marketKey, never
+       blindly against FT total. */
+    const marketKey = String((snap && snap.marketKey) || (p && p.marketKey) || "").toLowerCase();
+    const league = snap && snap.league != null ? snap.league : p && p.league;
+    const parsed = snap && snap.parsed;
+    const lines = snap && snap.lines;
+    if (!parsed || !lines || !marketKey) return { supported: false, reason: "missing market snapshot" };
+    const injMultA = Number.isFinite(Number(snap.injMultA)) ? Number(snap.injMultA) : 1;
+    const injMultB = Number.isFinite(Number(snap.injMultB)) ? Number(snap.injMultB) : 1;
+    const config = snap.configSnapshot || {};
+    const contextData = snap.contextData || snap.context || null;
+    if (marketKey === "ft" || marketKey === "ft_total") {
+      const calc = computeFTProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.ftProj, adapter: "computeFTProjection.ftProj" };
+    }
+    if (marketKey === "team_a") {
+      const calc = computeFTProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.projAFT, adapter: "computeFTProjection.projAFT" };
+    }
+    if (marketKey === "team_b") {
+      const calc = computeFTProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.projBFT, adapter: "computeFTProjection.projBFT" };
+    }
+    if (marketKey === "h1" || marketKey === "h1_total") {
+      const calc = compute1HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.h1Proj, adapter: "compute1HProjection.h1Proj" };
+    }
+    if (marketKey === "h1_team_a") {
+      const calc = compute1HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.projA1H, adapter: "compute1HProjection.projA1H" };
+    }
+    if (marketKey === "h1_team_b") {
+      const calc = compute1HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.projB1H, adapter: "compute1HProjection.projB1H" };
+    }
+    if (marketKey === "h2" || marketKey === "h2_total") {
+      const calc = compute2HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.h2Proj, adapter: "compute2HProjection.h2Proj" };
+    }
+    if (marketKey === "h2_team_a") {
+      const calc = compute2HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.projA2H, adapter: "compute2HProjection.projA2H" };
+    }
+    if (marketKey === "h2_team_b") {
+      const calc = compute2HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: calc && calc.projB2H, adapter: "compute2HProjection.projB2H" };
+    }
+    if (/^q[1-4]$/.test(marketKey)) {
+      const projection = computeQuarterTunerProjection(marketKey, parsed, league, injMultA, injMultB, contextData);
+      return { supported: true, projection, adapter: "computeQuarterTunerProjection(" + marketKey + ")" };
+    }
+    if (marketKey === "winner" || marketKey === "handicap") {
+      const calc = computeFTProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: computeMarginProjection(calc && calc.projAFT, calc && calc.projBFT), adapter: "computeFTProjection→computeMarginProjection" };
+    }
+    if (marketKey === "handicap_h1") {
+      const calc = compute1HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: computeMarginProjection(calc && calc.projA1H, calc && calc.projB1H), adapter: "compute1HProjection→computeMarginProjection" };
+    }
+    if (marketKey === "handicap_h2") {
+      const calc = compute2HProjection({ league, parsed, lines, injMultA, injMultB, config, contextData });
+      return { supported: true, projection: computeMarginProjection(calc && calc.projA2H, calc && calc.projB2H), adapter: "compute2HProjection→computeMarginProjection" };
+    }
+    return { supported: false, reason: "unsupported marketKey=" + marketKey };
+  }
+
   function forensicLayerLiveReplayParity() {
     _forensicState.layerStatus = _forensicState.layerStatus || {};
     if (typeof buildToyInputs !== "function") {
@@ -39279,16 +39410,30 @@ const EngineAuditor = (function () {
           contextData: snap.contextData || null,
         };
         try {
-          const replayOut = fn(args);
+          const originalGetParamForReplay = typeof window !== "undefined" ? window.getParam : null;
+          if (typeof window !== "undefined" && originalGetParamForReplay && snap.paramRegistryValues && typeof snap.paramRegistryValues === "object") {
+            window.getParam = function (key, lg, market) {
+              if (Object.prototype.hasOwnProperty.call(snap.paramRegistryValues, key)) return snap.paramRegistryValues[key];
+              return originalGetParamForReplay(key, lg, market);
+            };
+          }
+          const replay = forensicReplayProjectionForSnapshot(p, snap);
+          if (!replay || !replay.supported) {
+            productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + ":UNSUPPORTED:" + String(replay && replay.reason || "unknown"));
+            return;
+          }
           const storedProj = Number(p.projection);
-          const replayProj = Number(replayOut && replayOut.ftProj);
-          if (!Number.isFinite(storedProj) || !Number.isFinite(replayProj)) return;
-          productionSnapshotChecked++;
-          if (Math.abs(storedProj - replayProj) > 1e-7) {
-            productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + ":" + storedProj + "≠" + replayProj);
+          const replayProj = Number(replay.projection);
+          if (Number.isFinite(storedProj) && Number.isFinite(replayProj)) {
+            productionSnapshotChecked++;
+            if (Math.abs(storedProj - replayProj) > 1e-7) {
+              productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + "[" + String(snap.marketKey || p.marketKey || "") + "]:" + storedProj + "≠" + replayProj + " via " + replay.adapter);
+            }
           }
         } catch (eSnap) {
-          productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + ":THREW");
+          productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + ":THREW:" + String(eSnap && eSnap.message || eSnap));
+        } finally {
+          if (typeof window !== "undefined" && typeof originalGetParamForReplay === "function") window.getParam = originalGetParamForReplay;
         }
       });
     } catch (eProdSnap) {
@@ -40162,7 +40307,7 @@ const EngineAuditor = (function () {
       _forensicState.layerStatus.CONF_CALIBRATION = mono ? "PASSED" : "FAILED";
     } else {
       forensicAdd("INFO", "Confidence calibration: insufficient settled sample",
-        "Need ≥2 grades with ≥5 settled picks each for empirical calibration. rates=" + rates.length,
+        "Need ≥2 grades with n≥20 settled picks each for empirical calibration. eligibleRates=" + rates.length + "; observedGrades=" + Object.keys(byGrade).map(function (g) { return g + "=" + byGrade[g].n; }).join(" | "),
         "Empirical calibration is deferred until tracker has enough settled volume.",
         "Continue collecting settled picks; structural grade monotonicity is tested separately.",
         null, "", { ruleId: "CONF_CAL_SKIP_SAMPLE" });
