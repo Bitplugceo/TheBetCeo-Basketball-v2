@@ -1,4 +1,3 @@
-S
 <!-- ============================================================================
      LOCK REGISTRY — v25_audit10_20260913 — DO NOT REVERT
      Format in code:  /* LOCKED PERMANENTLY | issue-N | contract: <one line> */
@@ -21,7 +20,7 @@ S
      14 Tuner quarters use computeQuarterTunerProjection (points path).
      15 nba_summer is ESPN auto-fetch, not manual.
      16 New APP_BUILD_VERSION takes over PWA worker (see sw.js SKIP_WAITING).
-     17 Face ID lock uses the platform authenticator when supported; local unlock remains device/browser scoped.
+     17 PIN theater PARKED — do not "fix" into real auth here.
      18 Worker header is public, not a secret.
      19 Unknown SofaScore sport is dropped.
      20 Invalid as-of keeps the event list.
@@ -42,8 +41,8 @@ S
      36 Intel signal is points, clamped ±8.
      37 getPick line<=0 is totals-only. Handicap uses getMarginPick.
      38 weightedRecentAverage forwards league+market.
-     39 Face ID credential replaces the PIN hash; credential remains local to the platform authenticator.
-     40 Fatal screen z-index above lock overlay.
+     39 PIN hash PARKED.
+     40 Fatal screen z-index above PIN overlay.
      41 Relock label LEAVE.
      42 System dark mode LEAVE.
      43 Boot: parsed flag != runEngine defined.
@@ -305,7 +304,7 @@ html {
   background: #e41827;
 }
 body {
-  background: #e41827;
+  background: #f4f4f5;
 }
 .app-header {
   position: relative;
@@ -3005,9 +3004,10 @@ body.dark-mode .tracker-analytics-section-head {
 <div id="engineLockOverlay">
   <div class="engine-lock-card">
     <div class="engine-lock-title">🔒 TheBetCeo ⚡</div>
-    <div class="engine-lock-sub">Unlock with Face ID</div>
-    <div class="engine-lock-sub" style="font-size:10px;opacity:.7;margin-top:6px;">Uses the iPhone's platform authenticator. No PIN is stored by the engine.</div><!-- LOCKED PERMANENTLY issue-17/39: Face ID platform-authenticator lock; local browser/PWA scope only. -->
-    <button type="button" class="engine-lock-btn" id="engineLockBtn">Use Face ID</button>
+    <div class="engine-lock-sub">Enter PIN to unlock</div>
+    <div class="engine-lock-sub" style="font-size:10px;opacity:.7;margin-top:6px;">Local lock only — not security. Anyone with this file has the engine.</div><!-- LOCKED PERMANENTLY issue-17/39 parked: PIN theater left as-is by operator. -->
+    <input type="tel" inputmode="numeric" autocomplete="off" maxlength="6" id="engineLockInput" class="engine-lock-input" placeholder="••••" aria-label="Engine access PIN">
+    <button type="button" class="engine-lock-btn" id="engineLockBtn">Unlock</button>
     <div class="engine-lock-error" id="engineLockError"></div>
   </div>
 </div>
@@ -4316,129 +4316,15 @@ body.dark-mode .tracker-analytics-section-head {
 <script>
 (function () {
 /* ============================================================================
-   SECTION 6 — Face ID lock
+   SECTION 6 — PIN lock
    ======================================================================== */
-  var FACE_CREDENTIAL_KEY = "engineFaceCredentialId";
-  var FACE_LOCK_VERSION_KEY = "engineLockVersion";
-  var FACE_LOCK_VERSION = "faceid-v1";
-  var UNLOCK_TS_KEY = "engineUnlockedAt";
-  var SESSION_TTL_MS = 12 * 60 * 60 * 1000;
-  var overlay = document.getElementById("engineLockOverlay");
-  var lockButton = document.getElementById("engineLockBtn");
-  var errorBox = document.getElementById("engineLockError");
-
-  function _bytesToBase64Url(bytes) {
-    var binary = "";
-    for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  }
-
-  function _base64UrlToBytes(value) {
-    var padded = value.replace(/-/g, "+").replace(/_/g, "/");
-    while (padded.length % 4) padded += "=";
-    var binary = atob(padded);
-    var bytes = new Uint8Array(binary.length);
-    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-  }
-
-  function _randomBytes(length) {
-    var bytes = new Uint8Array(length);
-    crypto.getRandomValues(bytes);
-    return bytes;
-  }
-
-  function _markUnlocked() {
-    localStorage.setItem(FACE_LOCK_VERSION_KEY, FACE_LOCK_VERSION);
-    localStorage.setItem("engineUnlocked", "yes");
-    localStorage.setItem(UNLOCK_TS_KEY, String(Date.now()));
-    overlay.classList.add("hidden");
-    errorBox.textContent = "";
-  }
-
-  async function _assertFaceIDAvailable() {
-    if (!window.isSecureContext || !navigator.credentials || !window.PublicKeyCredential) {
-      throw new Error("Face ID requires the HTTPS PWA / a supported secure browser");
-    }
-    if (typeof PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === "function") {
-      var available = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
-      if (!available) throw new Error("Face ID is not available on this device");
-    }
-  }
-
-  async function _createFaceIDCredential() {
-    var credential = await navigator.credentials.create({
-      publicKey: {
-        challenge: _randomBytes(32),
-        rp: { name: "TheBetCeo", id: location.hostname },
-        user: { id: _randomBytes(16), name: "TheBetCeo", displayName: "TheBetCeo" },
-        pubKeyCredParams: [
-          { type: "public-key", alg: -7 },
-          { type: "public-key", alg: -257 }
-        ],
-        authenticatorSelection: {
-          authenticatorAttachment: "platform",
-          userVerification: "required",
-          residentKey: "preferred"
-        },
-        timeout: 60000,
-        attestation: "none"
-      }
-    });
-    if (!credential || !credential.rawId) throw new Error("Face ID setup was cancelled");
-    var credentialId = _bytesToBase64Url(new Uint8Array(credential.rawId));
-    localStorage.setItem(FACE_CREDENTIAL_KEY, credentialId);
-    return credentialId;
-  }
-
-  async function _authenticateWithFaceID(credentialId) {
-    var assertion = await navigator.credentials.get({
-      publicKey: {
-        challenge: _randomBytes(32),
-        rpId: location.hostname,
-        allowCredentials: [{ type: "public-key", id: _base64UrlToBytes(credentialId) }],
-        userVerification: "required",
-        timeout: 60000
-      }
-    });
-    if (!assertion) throw new Error("Face ID did not return an authentication result");
-    return assertion;
-  }
-
-  async function tryUnlockWithFaceID() {
-    errorBox.textContent = "";
-    lockButton.disabled = true;
-    try {
-      await _assertFaceIDAvailable();
-      var credentialId = localStorage.getItem(FACE_CREDENTIAL_KEY);
-      if (!credentialId) {
-        await _createFaceIDCredential();
-        _markUnlocked();
-        return;
-      }
-      await _authenticateWithFaceID(credentialId);
-      _markUnlocked();
-    } catch (err) {
-      var message = String(err && err.message ? err.message : err);
-      if (message.includes("NotAllowedError")) {
-        errorBox.textContent = "Face ID cancelled or unavailable";
-      } else if (message.includes("SecurityError")) {
-        errorBox.textContent = "Face ID requires the installed HTTPS PWA";
-      } else {
-        errorBox.textContent = message || "Face ID unlock failed";
-      }
-    } finally {
-      lockButton.disabled = false;
-    }
-  }
-
-  if (localStorage.getItem(FACE_LOCK_VERSION_KEY) !== FACE_LOCK_VERSION) {
-    localStorage.removeItem("engineUnlocked");
-    localStorage.removeItem(UNLOCK_TS_KEY);
-    localStorage.setItem(FACE_LOCK_VERSION_KEY, FACE_LOCK_VERSION);
-  }
-
-  var unlockedAt = parseInt(localStorage.getItem(UNLOCK_TS_KEY) || "0", 10);
+  const ENGINE_LOCK_PIN_HASH = "dc69839a54b801d7badf5c5d5a64ad5800f49c2cb4cca4f99a1767940240b711";
+  const ENGINE_LOCK_SALT = "bb_engine_lock_v1";
+  const overlay = document.getElementById("engineLockOverlay");
+  const LOCKOUT_KEY = "engineLockFails";
+  const UNLOCK_TS_KEY = "engineUnlockedAt";
+  const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+  const unlockedAt = parseInt(localStorage.getItem(UNLOCK_TS_KEY) || "0", 10);
   if (
     localStorage.getItem("engineUnlocked") === "yes" &&
     unlockedAt &&
@@ -4449,14 +4335,55 @@ body.dark-mode .tracker-analytics-section-head {
     localStorage.removeItem("engineUnlocked");
     localStorage.removeItem(UNLOCK_TS_KEY);
   }
-
-  if (lockButton) {
-    lockButton.addEventListener("click", tryUnlockWithFaceID);
-    lockButton.textContent = localStorage.getItem(FACE_CREDENTIAL_KEY)
-      ? "Use Face ID"
-      : "Set Up Face ID";
+  async function _sha256Hex(str) {
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
+    return Array.from(new Uint8Array(buf))
+      .map(function (b) {
+        return b.toString(16).padStart(2, "0");
+      })
+      .join("");
   }
+  async function tryUnlock() {
+    const val = document.getElementById("engineLockInput").value;
+    const err = document.getElementById("engineLockError");
+    let failState = { n: 0, until: 0 };
+    try {
+      failState = JSON.parse(localStorage.getItem(LOCKOUT_KEY) || '{"n":0,"until":0}');
+    } catch (_e) {}
+    if (failState.until && Date.now() < failState.until) {
+      const secs = Math.ceil((failState.until - Date.now()) / 1000);
+      err.textContent = "Locked out " + secs + "s — too many attempts";
+      return;
+    }
+    if (!window.crypto || !window.crypto.subtle) {
+      err.textContent = "Secure crypto unavailable — open in HTTPS / modern browser";
+      return;
+    }
+    const salted = await _sha256Hex(ENGINE_LOCK_SALT + ":" + val);
+    if (salted === ENGINE_LOCK_PIN_HASH) {
+      localStorage.setItem("engineUnlocked", "yes");
+      localStorage.setItem(UNLOCK_TS_KEY, String(Date.now()));
+      localStorage.removeItem(LOCKOUT_KEY);
+      overlay.classList.add("hidden");
+      err.textContent = "";
+    } else {
+      failState.n = (failState.n || 0) + 1;
+      const backoff = Math.min(300000, 1000 * Math.pow(2, Math.min(8, failState.n)));
+      if (failState.n >= 5) failState.until = Date.now() + backoff;
+      try {
+        localStorage.setItem(LOCKOUT_KEY, JSON.stringify(failState));
+      } catch (_e2) {}
+      err.textContent =
+        failState.n >= 5 ? "Wrong PIN — locked " + Math.ceil(backoff / 1000) + "s" : "Wrong PIN";
+      document.getElementById("engineLockInput").value = "";
+    }
+  }
+  document.getElementById("engineLockBtn").addEventListener("click", tryUnlock);
+  document.getElementById("engineLockInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") tryUnlock();
+  });
 })();
+
 </script>
 
 
@@ -4669,7 +4596,7 @@ const STANDALONE_BUILD_MARKER = "bb_engine_standalone_build";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
 /* LOCKED PERMANENTLY issue-18: this header is not real auth. Anyone with the HTML can call the worker. */
 const WORKER_SHARED_SECRET = (function () {
-  var a = [
+  const a = [
     "da4d",
     "8291",
     "5079",
@@ -12959,13 +12886,13 @@ function renderTrackerDebugPanel() {
 const ENGINE_DEBUG_LIMIT = 180;
 let g_engineDebugLog = [];
 
-var g_trackerSaveFailureCount = 0;
-var g_fetchInputErrors = [];
-var g_fetchAuditIssues = [];
-var g_engineAlertNeedsReview = false;
-var g_engineAlertLastLine = "";
+let g_trackerSaveFailureCount = 0;
+let g_fetchInputErrors = [];
+let g_fetchAuditIssues = [];
+let g_engineAlertNeedsReview = false;
+let g_engineAlertLastLine = "";
 
-var AppState = {
+const AppState = {
   debug: {
     get engineLog() {
       return g_engineDebugLog;
@@ -13952,37 +13879,6 @@ function _avgFiniteSeries(arr) {
   if (!xs.length) return NaN;
   return xs.reduce(function (a, b) { return a + b; }, 0) / xs.length;
 }
-function fillEspnMatchupFields(aStats, bStats) {
-  const setIfEmpty = function (id, val, digits) {
-    const el = document.getElementById(id);
-    if (!el || !Number.isFinite(val)) return false;
-    if (String(el.value || "").trim() !== "") return false;
-    el.value = Number(val).toFixed(digits);
-    el.dataset.espnAutofill = "1";
-    return true;
-  };
-  let n = 0;
-  if (setIfEmpty("matchPaintA", _avgFiniteSeries(aStats && aStats.paintScored), 1)) n++;
-  if (setIfEmpty("matchPaintAllowB", _avgFiniteSeries(bStats && bStats.paintAllowed), 1)) n++;
-  if (setIfEmpty("matchPaintB", _avgFiniteSeries(bStats && bStats.paintScored), 1)) n++;
-  if (setIfEmpty("matchPaintAllowA", _avgFiniteSeries(aStats && aStats.paintAllowed), 1)) n++;
-  if (setIfEmpty("match3paA", _avgFiniteSeries(aStats && aStats.threePa), 1)) n++;
-  if (setIfEmpty("match3pDefB", _avgFiniteSeries(bStats && bStats.threePctAllowed), 1)) n++;
-  if (setIfEmpty("match3paB", _avgFiniteSeries(bStats && bStats.threePa), 1)) n++;
-  if (setIfEmpty("match3pDefA", _avgFiniteSeries(aStats && aStats.threePctAllowed), 1)) n++;
-  if (setIfEmpty("matchFbA", _avgFiniteSeries(aStats && aStats.fbScored), 1)) n++;
-  if (setIfEmpty("matchFbAllowB", _avgFiniteSeries(bStats && bStats.fbAllowed), 1)) n++;
-  if (setIfEmpty("matchFbB", _avgFiniteSeries(bStats && bStats.fbScored), 1)) n++;
-  if (setIfEmpty("matchFbAllowA", _avgFiniteSeries(aStats && aStats.fbAllowed), 1)) n++;
-  if (typeof engineDebug === "function") {
-    engineDebug("ESPN matchup autofill", {
-      filled: n,
-      aPaintN: (aStats && aStats.paintScored && aStats.paintScored.length) || 0,
-      bPaintN: (bStats && bStats.paintScored && bStats.paintScored.length) || 0,
-    });
-  }
-  return n;
-}
 
 function _extractTeamBoxStatMap(boxTeam) {
   const sMap = {};
@@ -14338,8 +14234,8 @@ async function proxyFetch(url, timeoutMs = 12000) {
   }
 
   try {
-    var _uCheck = String(url || "");
-    var _allowedHost =
+    const _uCheck = String(url || "");
+    const _allowedHost =
       /site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app/i.test(_uCheck);
     if (!_allowedHost && /https?:\/\//i.test(_uCheck)) {
       engineDebug("proxyFetch blocked non-allowlisted host", { request: fetchLabel });
@@ -14370,10 +14266,10 @@ async function proxyFetch(url, timeoutMs = 12000) {
       }
     } catch (_noteErr) {}
     try {
-      var _uDirect = String(url || "");
-      var _espnDirect =
+      const _uDirect = String(url || "");
+      const _espnDirect =
         /site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com/i.test(_uDirect);
-      var _sofaDirect = /api\.sofascore\.com|api\.sofascore\.app/i.test(_uDirect);
+      const _sofaDirect = /api\.sofascore\.com|api\.sofascore\.app/i.test(_uDirect);
       if (!_espnDirect && !_sofaDirect) {
         throw workerErr;
       }
@@ -14543,19 +14439,8 @@ function last10SeriesFieldIds() {
     "a2HScored","a2HAllowed","b2HScored","b2HAllowed",
   ];
 }
-function last10OverallFieldIds() {
-  return [
-    "aFTScored","aFTAllowed","bFTScored","bFTAllowed",
-  ];
-}
 function isVenueSplitLast10Field(id) {
   return /Home$|Away$/.test(String(id || ""));
-}
-
-function countLast10Commas(raw) {
-  return String(raw || "").replace(/\s+/g, "").split(",").length
-    ? String(raw || "").replace(/[^,]/g, "").length
-    : 0;
 }
 
 function auditLast10SeriesInputs() {
@@ -21046,9 +20931,9 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
   };
   if (typeof engineDebug === "function") engineDebug("MATH_TESTS", report);
   try {
-    var panel = document.getElementById("mathTestsPanel");
+    const panel = document.getElementById("mathTestsPanel");
     if (panel) {
-      var lines = [];
+      const lines = [];
       lines.push(
         report.ok
           ? "✅ MATH TESTS PASSED"
@@ -21818,21 +21703,6 @@ function isConfidenceCoeffFitted(league) {
   }
 }
 
-function getMarketECE(league, marketKey) {
-  try {
-    const raw = localStorage.getItem("BB_MARKET_ECE");
-    if (!raw) return null;
-    const map = JSON.parse(raw);
-    const lk = String(league || "").toLowerCase();
-    const mk = String(marketKey || "ft").toLowerCase();
-    const entry = map[lk + ":" + mk] || map[mk] || map[lk] || null;
-    if (entry && Number.isFinite(Number(entry.ece)))
-      return { ece: Number(entry.ece), n: Number(entry.n) || 0 };
-  } catch (e) {
-  }
-  return null;
-}
-
 function isConfidenceModelFitted(league) {
   try {
     const stored = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
@@ -22385,28 +22255,6 @@ function getCrossSignalAgreement(side, marketKey, parsed) {
 }
 
 
-function _v24Num(id) {
-  const el = document.getElementById(id);
-  if (!el) return NaN;
-  const n = parseFloat(String(el.value || "").replace(",", "."));
-  return Number.isFinite(n) ? n : NaN;
-}
-function _v24ParseMinutesMap(id) {
-  const raw = String(document.getElementById(id)?.value || "");
-  const map = {};
-  raw.split(/\n|;/).forEach((line) => {
-    const m = String(line || "").trim().match(/^(.+?)[\s:=]+(\d+(?:\.\d+)?)\s*$/);
-    if (!m) return;
-    map[m[1].trim().toLowerCase()] = Number(m[2]);
-  });
-  return map;
-}
-function _v24NameCovered(playerName, map) {
-  const n = String(playerName || "").trim().toLowerCase();
-  if (!n || !map || !Object.keys(map).length) return false;
-  if (map[n] != null) return true;
-  return Object.keys(map).some((k) => n.includes(k) || k.includes(n));
-}
 function getV24MinutesGate() {
   /* LOCKED PERMANENTLY | issue-33 | contract: no manual minutes boxes. Unknown Q/DTD or failed injury fetch blocks winner+handicap. */
   const injA = (typeof AppState !== "undefined" && AppState.injuries && AppState.injuries.A) || {};
@@ -22521,15 +22369,6 @@ function renderQualityPaceCard() {
   const pace = pA != null && pB != null ? (pA + pB) / 2 : pA != null ? pA : pB;
   const nameA = (document.getElementById("teamAName") && document.getElementById("teamAName").value) || "Team A";
   const nameB = (document.getElementById("teamBName") && document.getElementById("teamBName").value) || "Team B";
-  /* SECURITY: team names originate from manual/fetched external data. The names
-     below are inserted into innerHTML, so escape at the sink rather than trusting
-     upstream normalization. */
-  const safeNameA = typeof escapeHtml === "function" ? escapeHtml(nameA) : String(nameA).replace(/[&<>"']/g, function (ch) {
-    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch];
-  });
-  const safeNameB = typeof escapeHtml === "function" ? escapeHtml(nameB) : String(nameB).replace(/[&<>"']/g, function (ch) {
-    return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[ch];
-  });
   if (oA == null && oB == null && pA == null && pB == null) {
     el.textContent = "No ORTG/pace series on this fetch. Last-10 points still run.";
     return;
@@ -22551,11 +22390,11 @@ function renderQualityPaceCard() {
     );
   };
   el.innerHTML =
-    "<div><strong>" + safeNameA + "</strong> — ORtg " + fmt(oA, 1) + " · DRtg " + fmt(dA, 1) +
+    "<div><strong>" + escapeHtml(nameA) + "</strong> — ORtg " + fmt(oA, 1) + " · DRtg " + fmt(dA, 1) +
     " · Net " + (netA == null ? "—" : (netA > 0 ? "+" : "") + fmt(netA, 1)) +
     " · Pace " + fmt(pA, 1) + "</div>" +
     afterOutsLine(multA) +
-    "<div><strong>" + safeNameB + "</strong> — ORtg " + fmt(oB, 1) + " · DRtg " + fmt(dB, 1) +
+    "<div><strong>" + escapeHtml(nameB) + "</strong> — ORtg " + fmt(oB, 1) + " · DRtg " + fmt(dB, 1) +
     " · Net " + (netB == null ? "—" : (netB > 0 ? "+" : "") + fmt(netB, 1)) +
     " · Pace " + fmt(pB, 1) + "</div>" +
     afterOutsLine(multB) +
@@ -33416,40 +33255,6 @@ const AFDB = (function () {
     }
   }
 
-  function snapDOM() {
-    const ids = [
-      "leagueSelect",
-      "teamAName",
-      "teamBName",
-      "aFTScored",
-      "aFTAllowed",
-      "a1HScored",
-      "a1HAllowed",
-      "bFTScored",
-      "bFTAllowed",
-      "b1HScored",
-      "b1HAllowed",
-      "aFTH2H",
-      "bFTH2H",
-      "a1HH2H",
-      "b1HH2H",
-      "ftMarket",
-      "h1Market",
-      "teamAMarket",
-      "teamBMarket",
-    ];
-    const snap = {};
-    ids.forEach((id) => {
-      const el = document.getElementById(id);
-      snap[id] = el ? el.value || "(empty)" : "\u26d4 NOT FOUND";
-    });
-    if (typeof selectedTeamIds !== "undefined") snap["_teamIds"] = JSON.stringify(selectedTeamIds);
-    snap["_league"] =
-      (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) ||
-      "(none)";
-    return snap;
-  }
-
   function _render() {
     const panel = document.getElementById("afdbPanel");
     if (!panel) return;
@@ -34375,59 +34180,90 @@ const EngineAuditor = (function () {
 
     tally();
     pass();
-    const faceLockUi = !!(
-      document.getElementById("engineLockOverlay") &&
-      document.getElementById("engineLockBtn")
-    );
-    const faceLockSource = /FACE_CREDENTIAL_KEY|tryUnlockWithFaceID|PublicKeyCredential|authenticatorAttachment\s*:\s*["']platform["']/i.test(
-      src || ""
-    );
-    if (faceLockUi && faceLockSource) {
+    if (typeof ENGINE_LOCK_PIN_HASH !== "undefined" && ENGINE_LOCK_PIN_HASH) {
+      const looksHashed = /^[a-f0-9]{64}$/i.test(String(ENGINE_LOCK_PIN_HASH));
+      if (!looksHashed) {
+        add(
+          "CRITICAL",
+          AREA,
+          "Engine lock PIN appears to be stored unhashed",
+          "ENGINE_LOCK_PIN_HASH does not look like a 64-hex-character SHA-256 digest.",
+          "If the PIN is stored in plaintext (or a weak encoding) in the page source, anyone with view-source access has the PIN with no effort at all.",
+          "Store only a salted SHA-256 (or stronger) hash client-side, as a proper 64-char hex digest, never the raw PIN.",
+          "ENGINE_LOCK_PIN_HASH constant",
+        );
+      } else {
+        add(
+          "INFO",
+          AREA,
+          "Engine lock PIN is stored as a salted hash",
+          "ENGINE_LOCK_PIN_HASH is a 64-character hex digest, consistent with a SHA-256 hash rather than a plaintext PIN.",
+          "Reduces (but does not eliminate — see below) casual recovery of the PIN from view-source.",
+          "No action needed here specifically.",
+          "ENGINE_LOCK_PIN_HASH constant",
+        );
+      }
       add(
         "INFO",
         AREA,
-        "Face ID platform-authenticator lock detected",
-        "The lock UI and Face ID/WebAuthn platform-authenticator flow are present in this build.",
-        "The lock is local to the PWA/browser origin; it is not server-side access control.",
-        "No action needed for local privacy gating.",
-        "FACE_CREDENTIAL_KEY / tryUnlockWithFaceID / engineLockOverlay"
+        "Client-side PIN lock is a deterrent only (not server auth)",
+        "The PIN check (tryUnlock) runs entirely in client-side JavaScript, comparing against a hash that ships in the page.",
+        "Any client-side gate — hashed or not — is bypassable by anyone who can read/modify JS in the browser (disable the script, patch the comparison, or brute-force the hash offline since there is no server-side rate limit). This is a deterrent/privacy screen, not real authentication.",
+        'If this needs to be a real access control (not just "keep it off casual view"), the check must happen server-side, where the client cannot inspect or bypass the logic. Document this limitation for anyone relying on it as a security boundary.',
+        "tryUnlock()",
       );
     } else {
-      add(
-        "HIGH",
-        AREA,
-        "Face ID lock implementation not proven",
-        "The expected Face ID lock UI and platform-authenticator source markers were not both found.",
-        "The engine may fall back to an unintended or missing access gate.",
-        "Restore the Face ID platform-authenticator lock before relying on the lock screen.",
-        "FACE_CREDENTIAL_KEY / tryUnlockWithFaceID / engineLockOverlay"
+      const full = getFullPageSource() || "";
+      const hashInSrc = /ENGINE_LOCK_PIN_HASH\s*=\s*["'][a-f0-9]{64}["']/i.test(full);
+      const lockUi = !!(
+        document.getElementById("engineLockOverlay") && document.getElementById("engineLockBtn")
       );
+      if (hashInSrc || lockUi) {
+        add(
+          "INFO",
+          AREA,
+          "Engine lock PIN present (scoped IIFE / UI)",
+          "PIN hash and/or lock overlay found in page source/DOM even though ENGINE_LOCK_PIN_HASH is not a window global.",
+          "Client-side only — deterrent, not server auth.",
+          "No action needed for presence.",
+          "ENGINE_LOCK_PIN_HASH / engineLockOverlay",
+        );
+      } else {
+        add(
+          "INFO",
+          AREA,
+          "No PIN lock constant found",
+          "ENGINE_LOCK_PIN_HASH is not defined in this build.",
+          "Not applicable if a PIN lock is not part of this deployment.",
+          "Not applicable.",
+          "ENGINE_LOCK_PIN_HASH constant",
+        );
+      }
     }
 
     tally();
     pass();
     if (src) {
-      const faceBody = extractFunctionBody(src, "tryUnlockWithFaceID");
-      const hasPlatformAuthenticator = /authenticatorAttachment\s*:\s*["']platform["']/.test(src);
-      if (faceBody && hasPlatformAuthenticator) {
+      const lockBody = extractFunctionBody(src, "tryUnlock");
+      if (lockBody && /backoff|failState\.n\s*>=/.test(lockBody)) {
         add(
           "INFO",
           AREA,
-          "Face ID lock has a platform-authenticator flow",
-          "tryUnlockWithFaceID() is present and the source requests the platform authenticator with required user verification.",
-          "On supported iPhones this routes the local biometric prompt through the platform authenticator, normally Face ID when configured.",
+          "PIN entry has a failed-attempt backoff",
+          "tryUnlock() references a failure counter/backoff on repeated wrong PINs.",
+          "Slows down naive brute-forcing directly against the UI (though not against someone reading the hash out of source and brute-forcing offline).",
           "No action needed.",
-          "tryUnlockWithFaceID() / authenticatorAttachment",
+          "tryUnlock()",
         );
-      } else {
+      } else if (lockBody) {
         add(
-          "HIGH",
+          "LOW",
           AREA,
-          "Face ID platform-authenticator flow not proven",
-          "The Face ID unlock function or required platform-authenticator configuration was not found.",
-          "The lock screen may not invoke biometric authentication as intended.",
-          "Restore the platform-authenticator Face ID flow before relying on the lock screen.",
-          "tryUnlockWithFaceID() / authenticatorAttachment",
+          "PIN entry backoff not detected",
+          "tryUnlock() body did not match the expected failure-counter/backoff pattern.",
+          "Without any UI-level throttling, repeated wrong-PIN attempts through the input field are unthrottled (though this is a minor concern given the PIN check is client-side regardless).",
+          "Confirm whether a backoff was intentionally removed; if not, re-add a short delay/lockout after N wrong attempts.",
+          "tryUnlock()",
         );
       }
     }
@@ -36730,7 +36566,7 @@ const EngineAuditor = (function () {
   function auditFeatureWalkthrough() {
     const AREA = "FEATURE_WALKTHROUGH";
     const features = [
-      { name: "Engine Face ID lock", fn: "tryUnlockWithFaceID", critical: false },
+      { name: "Engine PIN lock", fn: "tryUnlock", critical: false },
       { name: "ESPN auto-fetch (league slugs)", fn: "getEspnLeagueSlug", critical: true },
       { name: "ESPN/Worker proxy fetch", fn: "fetchJson", critical: true },
       { name: "SofaScore player search", fn: "searchSofascorePlayer", critical: false },
@@ -36793,7 +36629,7 @@ const EngineAuditor = (function () {
             exists = false;
         } catch (_e) {}
       }
-      if (!exists && f.fn === "tryUnlockWithFaceID") {
+      if (!exists && f.fn === "tryUnlock") {
         exists = !!(
           document.getElementById("engineLockOverlay") && document.getElementById("engineLockBtn")
         );
@@ -37059,12 +36895,12 @@ const EngineAuditor = (function () {
 
   function _stripStringsAndCommentsStateful(line, state) {
     if (!state) state = { inBlockComment: false, inString: null };
-    var out = "";
-    var n = line.length;
-    var i = 0;
+    let out = "";
+    const n = line.length;
+    let i = 0;
     while (i < n) {
-      var ch = line[i];
-      var next = i + 1 < n ? line[i + 1] : "";
+      let ch = line[i];
+      let next = i + 1 < n ? line[i + 1] : "";
       if (state.inBlockComment) {
         if (ch === "*" && next === "/") {
           out += "  ";
@@ -37137,12 +36973,12 @@ const EngineAuditor = (function () {
    *  id-bearing call mentioned only inside a comment must not be picked up as live. */
   function _stripCommentsOnlyStateful(line, state) {
     if (!state) state = { inBlockComment: false, inString: null };
-    var out = "";
-    var n = line.length;
-    var i = 0;
+    let out = "";
+    const n = line.length;
+    let i = 0;
     while (i < n) {
-      var ch = line[i];
-      var next = i + 1 < n ? line[i + 1] : "";
+      let ch = line[i];
+      let next = i + 1 < n ? line[i + 1] : "";
       if (state.inBlockComment) {
         if (ch === "*" && next === "/") {
           out += "  ";
@@ -37197,10 +37033,10 @@ const EngineAuditor = (function () {
 
   function _scanLine(line, lineNo, acc) {
     if (!acc._stripState) acc._stripState = { inBlockComment: false, inString: null };
-    var stripped = _stripStringsAndCommentsStateful(line, acc._stripState);
+    const stripped = _stripStringsAndCommentsStateful(line, acc._stripState);
     acc._stripState = stripped.state;
-    var code = stripped.code;
-    var trimmed = line.trim();
+    const code = stripped.code;
+    const trimmed = line.trim();
     if (!trimmed || !code.trim()) return;
 
     if (/(?:^|[^\w.$])eval\s*\(/.test(code) && !/\.eval\s*\(/.test(code)) {
@@ -37216,10 +37052,10 @@ const EngineAuditor = (function () {
       acc.consoleLogs.push(lineNo);
     }
     if (!acc._commentStripState) acc._commentStripState = { inBlockComment: false, inString: null };
-    var idScan = _stripCommentsOnlyStateful(line, acc._commentStripState);
+    const idScan = _stripCommentsOnlyStateful(line, acc._commentStripState);
     acc._commentStripState = idScan.state;
-    var ge = /getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
-    var m;
+    const ge = /getElementById\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+    let m;
     while ((m = ge.exec(idScan.code)) !== null) {
       if (!acc.gebIds[m[1]]) acc.gebIds[m[1]] = [];
       if (acc.gebIds[m[1]].length < 3) acc.gebIds[m[1]].push(lineNo);
@@ -41859,9 +41695,9 @@ window.trackerDebug = function (msg, extra) {
 };
 
 document.addEventListener("DOMContentLoaded", function () {
-  var _afdbAttempts = 0;
+  let _afdbAttempts = 0;
   (function _tryPatchAfdb() {
-    var _allReady =
+    const _allReady =
       typeof proxyFetch === "function" &&
       typeof fetchESPN === "function" &&
       typeof fetchScheduleCore === "function" &&
