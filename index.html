@@ -1,3 +1,4 @@
+M
 <!-- ============================================================================
      LOCK REGISTRY — v25_audit10_20260913 — DO NOT REVERT
      Format in code:  /* LOCKED PERMANENTLY | issue-N | contract: <one line> */
@@ -4205,6 +4206,15 @@ body.dark-mode .tracker-analytics-section-head {
           title="Copy tracker data as JSON"
         >
           🧾
+        </button>
+        <button
+          type="button"
+          id="trackerRecoverKeyBtn"
+          class="tracker-insights-btn"
+          title="Recover picks from an old tracked key or device"
+          onclick="runLegacyTrackerKeyRecovery()"
+        >
+          🗝️
         </button>
         <span
           class="engine-battery"
@@ -15462,6 +15472,113 @@ async function forceTrackerSaveNow() {
   } catch (err) {
     console.error("[BB Engine] forceTrackerSaveNow failed", err);
   }
+}
+
+async function getAllLegacyTrackerLocalKeys() {
+  const keys = new Set();
+  try {
+    const db = await initBBDatabase();
+    const idbKeys = await new Promise((resolve, reject) => {
+      const tx = db.transaction(BB_STORE_NAME, "readonly");
+      const req = tx.objectStore(BB_STORE_NAME).getAllKeys();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => reject(req.error);
+    });
+    idbKeys.forEach((k) => {
+      if (typeof k === "string" && k.startsWith(TRACKER_LOCAL_STATE_PREFIX)) keys.add(k);
+    });
+  } catch (err) {
+    engineDebug("legacy key scan: IndexedDB read failed", { error: err?.message || String(err) });
+  }
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(TRACKER_LOCAL_STATE_PREFIX)) keys.add(k);
+    }
+  } catch (err) {
+    engineDebug("legacy key scan: localStorage read failed", { error: err?.message || String(err) });
+  }
+  const currentKey = getTrackerLocalStateStableKey();
+  keys.delete(currentKey);
+  return [...keys];
+}
+
+async function fetchTrackerStateForKey(explicitKey) {
+  if (!explicitKey) return null;
+  try {
+    const joiner = TRACKER_API_URL.includes("?") ? "&" : "?";
+    const url = TRACKER_API_URL + `${joiner}user=${encodeURIComponent(explicitKey)}`;
+    const res = await fetch(url, {
+      method: "GET",
+      mode: "cors",
+      credentials: "omit",
+      cache: "no-store",
+      headers: getTrackerHeaders(false),
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    return data?.state || null;
+  } catch (err) {
+    engineDebug("legacy key fetch failed", { key: explicitKey, error: err?.message || String(err) });
+    return null;
+  }
+}
+
+async function runLegacyTrackerKeyRecovery() {
+  const before = getTrackerStateLocalScore(AppState.tracker.state);
+  let mergedAny = false;
+
+  const localKeys = await getAllLegacyTrackerLocalKeys();
+  for (const key of localKeys) {
+    try {
+      const raw = await readAsyncStorage(key);
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+      if (parsed) {
+        AppState.tracker.state = mergeTrackerStates(AppState.tracker.state, parsed);
+        mergedAny = true;
+      }
+    } catch (err) {
+      engineDebug("legacy local bucket merge failed", { key, error: err?.message || String(err) });
+    }
+  }
+
+  const oldKey = window.prompt(
+    "Optional: paste an old tracked key you used before (leave blank to skip):",
+    "",
+  );
+  if (oldKey && oldKey.trim()) {
+    const serverState = await fetchTrackerStateForKey(oldKey.trim());
+    if (serverState) {
+      AppState.tracker.state = mergeTrackerStates(AppState.tracker.state, serverState);
+      mergedAny = true;
+    } else {
+      window.alert("No data found on the server for that key, or the request failed.");
+    }
+  }
+
+  if (!mergedAny) {
+    window.alert("No other tracked-picks buckets were found to recover.");
+    return;
+  }
+
+  normalizeTrackerState(AppState.tracker.state);
+  await saveTrackerStateToLocal();
+  await forceTrackerSaveNow();
+  rebuildTrackerDerivedState();
+  renderTrackedPicks();
+
+  const after = getTrackerStateLocalScore(AppState.tracker.state);
+  window.alert(
+    "Recovery complete.\nBefore: " +
+      before.totalCount +
+      " picks (" +
+      before.settledCount +
+      " settled)\nAfter: " +
+      after.totalCount +
+      " picks (" +
+      after.settledCount +
+      " settled)",
+  );
 }
 
 function withTrackerCacheBust(url) {
@@ -32515,6 +32632,12 @@ document.addEventListener("DOMContentLoaded", () => {
         }, 1500);
       };
       copyTextToClipboard(json, setFb);
+    });
+
+  const trackerRecoverKeyBtn = document.getElementById("trackerRecoverKeyBtn");
+  if (trackerRecoverKeyBtn)
+    trackerRecoverKeyBtn.addEventListener("click", function () {
+      runLegacyTrackerKeyRecovery();
     });
 
   const trackerHeadTitle = document.getElementById("trackerHeadTitle");
