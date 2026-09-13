@@ -1,4 +1,3 @@
-F
 <!-- ============================================================================
      LOCK REGISTRY — v25_audit10_20260913 — DO NOT REVERT
      Format in code:  /* LOCKED PERMANENTLY | issue-N | contract: <one line> */
@@ -4304,11 +4303,12 @@ body.dark-mode .tracker-analytics-section-head {
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
   "
 >
   <div
     id="auditorPanel"
-    style="width: 100%; min-height: 100%; height: auto; display: flex; flex-direction: column; overflow: visible"
+    style="width: 100%; min-height: 100%; height: auto; display: block; overflow: visible"
   ></div>
 </div>
 
@@ -10273,7 +10273,7 @@ function getLearnedRecencyWeights(league, marketSilo) {
     });
   }
   try {
-    const configured = getParam("recencyWeights", league);
+    const configured = getParam("recencyWeights", league, marketSilo || "ft");
     if (Array.isArray(configured) && configured.length) return configured.slice(0, 10);
   } catch (e) {
     engineDebug("recencyWeights param load failed", { error: e?.message || String(e), league });
@@ -27262,7 +27262,7 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
   const weights =
     (typeof getParam === "function"
       ?
-        getParam("recencyWeights", _h2hRoot.league || "")
+        getParam("recencyWeights", _h2hRoot.league || "", marketKey || "ft")
       : null) || MODEL_TUNING.recencyWeights;
   const fixtureHomeId = String(fixtureMeta?.homeId || "");
 
@@ -27825,6 +27825,8 @@ function getTrackedInputSource(marketKey = "ft") {
   return unique[0] || "unknown";
 }
 
+let _trackedPickFallbackSeq = 0;
+
 function buildTrackedPickPayload({
   pickRow,
   isLock,
@@ -28066,7 +28068,7 @@ function buildTrackedPickPayload({
         contextData: contextDataSnapshot,
         configSnapshot: {
           recencyWeights:
-            (typeof getParam === "function" && getParam("recencyWeights", league)) ||
+            (typeof getParam === "function" && getParam("recencyWeights", league, pickRow.marketKey)) ||
             MODEL_TUNING.recencyWeights,
           h2hFactor:
             Number(
@@ -28321,7 +28323,7 @@ function buildTrackedPickPayload({
     pickId:
       typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID()
-        : `pick_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        : `pick_${String(fixtureMeta.eventId || "noevent")}_${String(marketKey || "market")}_${++_trackedPickFallbackSeq}`,
     snapshot: snapshot,
     eventId: fixtureMeta.eventId || "",
     eventDate: fixtureMeta.eventDate || "",
@@ -39092,13 +39094,22 @@ const EngineAuditor = (function () {
         checked++;
         if (indep !== status) mismatches++;
       });
-      forensicAssert(mismatches === 0,
-        "Tracker settlement parity vs independent oracle",
-        "Checked " + checked + " settled picks; mismatches=" + mismatches,
-        "Engine settlement and independent market settlement must match for bankroll integrity.",
-        "Diff engineResultStatus vs independentSettle for each mismatched signature.",
-        { severity: mismatches ? "CRITICAL" : "INFO", ruleId: "SETTLEMENT_PARITY_TRACKER",
-          expected: 0, observed: mismatches, bankrollRisk: "CRITICAL" });
+      const parityProven = checked > 0 && mismatches === 0;
+      if (!checked) {
+        forensicAdd("HIGH", "Tracker settlement parity unproven — no settled production picks",
+          "Checked 0 settled picks; mismatches=0. Zero observations cannot prove settlement parity.",
+          "A clean parity result requires at least one real settled production record; otherwise the auditor would PASS vacuously.",
+          "Run settlement parity against stored production settlements or explicitly keep this proof UNPROVEN until settled records exist.",
+          null, "", { ruleId: "SETTLEMENT_PARITY_NO_COVERAGE", status: "UNPROVEN", bankrollRisk: "CRITICAL" });
+      } else {
+        forensicAssert(parityPro,
+          "Tracker settlement parity vs independent oracle",
+          "Checked " + checked + " settled picks; mismatches=" + mismatches,
+          "Engine settlement and independent market settlement must match for bankroll integrity.",
+          "Diff engineResultStatus vs independentSettle for each mismatched signature.",
+          { severity: mismatches ? "CRITICAL" : "INFO", ruleId: "SETTLEMENT_PARITY_TRACKER",
+            expected: 0, observed: mismatches, bankrollRisk: "CRITICAL" });
+      }
     } catch (e) {
       forensicAssert(false, "Settlement parity tracker scan threw", String(e && e.message || e),
         "Could not cross-check stored picks.", "Ensure tracker accessors are available.",
@@ -39173,12 +39184,13 @@ const EngineAuditor = (function () {
       }
     });
     forensicAdd(issues ? "HIGH" : "INFO", "Temporal leakage layer executed",
-      "Static+synthetic temporal policy scan completed. issues=" + issues,
+      "Static+synthetic temporal policy scan completed. issues=" + issues + ". Static vocabulary is not sufficient proof of temporal safety.",
       "For a game on date D, nothing after D may enter projection, H2H, calibration, or confidence features.",
-      "Ensure every historical series is filtered with eventDate/asOf before aggregation; add runtime tests per series builder.",
+      "Use the end-to-end runtime temporal proof for the verdict; keep this layer UNPROVEN unless that proof passes.",
       null, "", { ruleId: "TEMPORAL_LAYER_RAN", bankrollRisk: issues ? "CRITICAL" : "LOW" });
     _forensicState.layerStatus = _forensicState.layerStatus || {};
-    _forensicState.layerStatus.TEMPORAL_LEAKAGE = issues ? "FAILED" : "PASSED";
+    const temporalRuntime = _forensicState.layerStatus.TEMPORAL_PROOF;
+    _forensicState.layerStatus.TEMPORAL_LEAKAGE = issues ? "FAILED" : (temporalRuntime === "PASSED" ? "PASSED" : "UNPROVEN");
   }
 
   function forensicLayerLiveReplayParity() {
@@ -39242,6 +39254,58 @@ const EngineAuditor = (function () {
       { severity: ok ? "INFO" : "CRITICAL", ruleId: "LIVE_REPLAY_SNAPSHOT", expected: pa, observed: pb,
         calculationPath: "computeFTProjection", bankrollRisk: "CRITICAL",
         reproducibleTestCase: "JSON clone args → computeFTProjection twice" });
+    let productionSnapshotChecked = 0;
+    let productionSnapshotMismatches = [];
+    try {
+      const tracked = typeof getAllTrackedPicksForReport === "function" ? (getAllTrackedPicksForReport() || []) : [];
+      (Array.isArray(tracked) ? tracked : []).forEach(function (p) {
+        const snap = p && p.snapshot;
+        if (!snap || !snap.parsed || !snap.lines) return;
+        const args = {
+          league: snap.league || p.league,
+          parsed: snap.parsed,
+          lines: snap.lines,
+          injMultA: Number.isFinite(Number(snap.injMultA)) ? Number(snap.injMultA) : 1,
+          injMultB: Number.isFinite(Number(snap.injMultB)) ? Number(snap.injMultB) : 1,
+          injFetchFailedA: !!snap.injFetchFailedA,
+          injFetchFailedB: !!snap.injFetchFailedB,
+          config: snap.configSnapshot || {},
+          contextData: snap.contextData || null,
+        };
+        try {
+          const replayOut = fn(args);
+          const storedProj = Number(p.projection);
+          const replayProj = Number(replayOut && replayOut.ftProj);
+          if (!Number.isFinite(storedProj) || !Number.isFinite(replayProj)) return;
+          productionSnapshotChecked++;
+          if (Math.abs(storedProj - replayProj) > 1e-7) {
+            productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + ":" + storedProj + "≠" + replayProj);
+          }
+        } catch (eSnap) {
+          productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + ":THREW");
+        }
+      });
+    } catch (eProdSnap) {
+      productionSnapshotMismatches.push("snapshot-scan:" + String(eProdSnap && eProdSnap.message || eProdSnap));
+    }
+    const productionReplayProven = productionSnapshotChecked > 0 && productionSnapshotMismatches.length === 0;
+    if (productionSnapshotChecked > 0 || productionSnapshotMismatches.length) {
+      forensicAssert(productionReplayProven,
+        "Production snapshot replay parity",
+        "Checked " + productionSnapshotChecked + " stored production snapshots; mismatches=" + productionSnapshotMismatches.length +
+          (productionSnapshotMismatches.length ? " " + productionSnapshotMismatches.slice(0, 5).join(", ") : ""),
+        "Toy-input determinism does not prove that persisted production snapshots replay identically.",
+        "Replay every available stored production snapshot through the production projection adapter and reconcile stored projection values.",
+        { severity: productionReplayProven ? "INFO" : "HIGH", ruleId: "LIVE_REPLAY_PRODUCTION_SNAPSHOT",
+          checked: productionSnapshotChecked, mismatches: productionSnapshotMismatches, bankrollRisk: "CRITICAL" });
+    } else {
+      forensicAdd("HIGH", "Production snapshot replay unproven — no usable stored snapshots",
+        "No stored production snapshot contained the minimum replay inputs required for computeFTProjection.",
+        "Toy replay alone cannot establish live→snapshot→production replay parity.",
+        "Persist complete production snapshots and replay them through the production projection adapter before sealing.",
+        null, "", { ruleId: "LIVE_REPLAY_PRODUCTION_NO_COVERAGE", status: "UNPROVEN", bankrollRisk: "CRITICAL" });
+    }
+
     if (typeof getPick === "function") {
       const p1 = getPick(8, 160, "nba", "ft_total", {});
       const p2 = getPick(8, 160, "nba", "ft_total", {});
@@ -40289,7 +40353,10 @@ const EngineAuditor = (function () {
 
     const functions = forensicInventoryFunctions(raw);
     _forensicState.functions = functions;
-    _forensicState.callEdges = forensicCallGraph(raw, functions);
+    const productFunctionsForGraph = functions.filter(function (f) {
+      return !forensicFunctionIsAuditor(f, auditStartLine || 1e9, auditEndLine || -1);
+    });
+    _forensicState.callEdges = forensicCallGraph(raw, productFunctionsForGraph);
 
     let scanState = { inBlockComment: false, inString: null };
     const calcSites = [];
@@ -41409,7 +41476,7 @@ const EngineAuditor = (function () {
     panel.innerHTML =
       summaryHtml +
       roadmapHtml +
-      '<div style="flex:1;overflow-y:auto;background:#0a0a0a;">' +
+      '<div style="background:#0a0a0a;overflow:visible;">' +
       (bodyHtml ||
         '<div style="color:#555;font-size:12px;text-align:center;padding:30px;font-weight:bold;">No findings.</div>') +
       "</div>";
