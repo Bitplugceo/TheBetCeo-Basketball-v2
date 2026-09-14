@@ -1,4 +1,3 @@
-Q
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3532,20 +3531,20 @@ const BB_LOCK_REGISTRY = Object.freeze([
         <label id="ftMarketLabel">FT Total</label
         ><input id="ftMarket" placeholder="150.5 - 160.5" aria-label="FT Total" />
       </div>
-      <div id="h1MarketSection">
-        <label>1H Total</label
-        ><input id="h1Market" placeholder="75.5 - 85.5" aria-label="75.5 - 85.5" />
+      <div id="handicapMarketSection">
+        <label id="handicapMarketLabel">Handicap (Home, signed)</label>
+        <input id="handicapMarket" placeholder="-4.5" aria-label="Handicap (Home, signed)" />
       </div>
     </div>
 
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px">
+      <div id="h1MarketSection">
+        <label>1H Total</label
+        ><input id="h1Market" placeholder="75.5 - 85.5" aria-label="75.5 - 85.5" />
+      </div>
       <div id="h2MarketSection">
         <label>2H Total</label
         ><input id="h2Market" placeholder="75.5 - 85.5" aria-label="75.5 - 85.5" />
-      </div>
-      <div id="handicapMarketSection">
-        <label id="handicapMarketLabel">Handicap (Home, signed)</label>
-        <input id="handicapMarket" placeholder="-4.5" aria-label="Handicap (Home, signed)" />
       </div>
     </div>
 
@@ -7846,12 +7845,6 @@ function applyConfidenceModelProposal() {
     return false;
   }
   try {
-    if (typeof TRACKER_POLICY !== "undefined" && TRACKER_POLICY && TRACKER_POLICY.advisoryOnly === false) {
-      engineDebug("Confidence promote blocked: tracker not advisory-only");
-      return false;
-    }
-  } catch (_tErr) {}
-  try {
     const liveBundle = {
       coeff: proposal.coeff,
       platt: proposal.platt,
@@ -9192,14 +9185,6 @@ function computeQuarterProjection({
       const ctxAQ = _ctxRoot.A || {};
       const ctxBQ = _ctxRoot.B || {};
 
-      const _gateAdvAQ = getPeriodAdvancedSeries(ctxAQ, qKey);
-      const _gateAdvBQ = getPeriodAdvancedSeries(ctxBQ, qKey);
-      const hasAdvancedQ =
-        _gateAdvAQ.source === qKey && _gateAdvBQ.source === qKey &&
-        getSampleTier(_gateAdvAQ.ortg, _gateAdvBQ.ortg) !== "insufficient" &&
-        Number.isFinite(avgOrNaN(_gateAdvAQ.ortg)) && Number.isFinite(avgOrNaN(_gateAdvAQ.drtg)) &&
-        Number.isFinite(avgOrNaN(_gateAdvBQ.ortg)) && Number.isFinite(avgOrNaN(_gateAdvBQ.drtg));
-
       const leaguePaceBaseQ =
         LEAGUE_PACE_BASES[league] ||
         LEAGUE_PACE_BASES.default ||
@@ -9210,7 +9195,11 @@ function computeQuarterProjection({
           ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown) ||
         110;
 
-      const isEspnLeagueQ = Object.prototype.hasOwnProperty.call(ESPN_LEAGUE_SLUGS, league);
+      const isEspnLeagueQ = typeof isUsEspnLeague === "function"
+        ? isUsEspnLeague(league)
+        : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+            String(league || "").toLowerCase(),
+          );
 
       let projA, projB;
       const _dynWeightsQ = getDynamicWeights(
@@ -9268,7 +9257,7 @@ function computeQuarterProjection({
         const hasNativeAdvQ =
           isFinite(ortgA_q) && isFinite(drtgA_q) && isFinite(ortgB_q) && isFinite(drtgB_q);
 
-        if (hasNativeAdvQ) {
+        if (isEspnLeagueQ && hasNativeAdvQ) {
           const projRatingAQ = ortgA_q + drtgB_q - leagueRatingBaseQ;
           const projRatingBQ = ortgB_q + drtgA_q - leagueRatingBaseQ;
           const projA_adv = (synPaceQ * projRatingAQ) / qDivisor;
@@ -10551,10 +10540,8 @@ function getLearnedRecencyWeights(league, marketSilo) {
 }
 
 const TRACKER_POLICY = {
-  advisoryOnly: true,
-  dailyWatchlistOnly: false,
   reviewCheckpointSettled: 50,
-  policyVersion: "soft_tracker_advisory_v3",
+  policyVersion: "tracker_live_v4",
 };
 
 const TRACKER_SOFT_EFFECTS = {
@@ -10569,7 +10556,6 @@ const TRACKER_SOFT_EFFECTS = {
 };
 
 const PHASE2_CONTROL = {
-  mode: "live",
   trackerFeedbackLive: true,
   teamMemoryLive: true,
 };
@@ -10587,10 +10573,6 @@ const PHASE2_ACTIVATION_RULES = {
   },
 };
 
-function isPhase2ShadowMode() {
-  return PHASE2_CONTROL.mode === "shadow";
-}
-
 function getPhase2ActivationState() {
   const derived = AppState.tracker.derived || defaultTrackerDerivedState();
   const settled = Number(derived?.settledPicks || 0);
@@ -10607,8 +10589,6 @@ function getPhase2ActivationState() {
     : [];
 
   const learningEnabled = !!TRACKER_LEARNING_ENABLED;
-  const forcedShadow = PHASE2_CONTROL.mode === "shadow";
-  const forcedLive = PHASE2_CONTROL.mode === "live";
 
   const trackerReady =
     settled >= PHASE2_ACTIVATION_RULES.trackerFeedback.minSettled &&
@@ -10620,29 +10600,12 @@ function getPhase2ActivationState() {
     teamSignals.length >= PHASE2_ACTIVATION_RULES.teamMemory.minTeamSignals &&
     matchupSignals.length >= PHASE2_ACTIVATION_RULES.teamMemory.minMatchupSignals;
 
-  const trackerFeedbackLive =
-    learningEnabled &&
-    !forcedShadow &&
-    !!PHASE2_CONTROL.trackerFeedbackLive &&
-    (forcedLive || trackerReady);
-
-  const teamMemoryLive =
-    learningEnabled &&
-    !forcedShadow &&
-    !!PHASE2_CONTROL.teamMemoryLive &&
-    (forcedLive || teamReady);
+  const trackerFeedbackLive = learningEnabled && !!PHASE2_CONTROL.trackerFeedbackLive;
+  const teamMemoryLive = learningEnabled && !!PHASE2_CONTROL.teamMemoryLive;
 
   return {
-    phase2Mode: !learningEnabled
-      ? "frozen"
-      : forcedShadow
-        ? "shadow"
-        : forcedLive
-          ? "live"
-          : "auto",
+    phase2Mode: learningEnabled ? "live" : "frozen",
     settled,
-    advisoryOnly: !!TRACKER_POLICY.advisoryOnly,
-    dailyWatchlistOnly: !!TRACKER_POLICY.dailyWatchlistOnly,
     reviewCheckpointSettled: Number(
       TRACKER_POLICY.reviewCheckpointSettled ||
         PHASE2_ACTIVATION_RULES.trackerFeedback.minSettled ||
@@ -12381,7 +12344,6 @@ const TRACKER_LEARNING_ENABLED = true;
 
 const TRACKER_LEGACY_BUILD_KEYS = [
   "tracker_cleanup_v11_soft_live",
-  "tracker_cleanup_v10_advisory",
   "tracker_cleanup_v9",
   "tracker_cleanup_v8",
   "tracker_cleanup_v7",
@@ -15098,10 +15060,7 @@ function ensureTrackedPickKeys(pick = {}) {
     next.confidenceGrade || next.confidence || next?.diagnostics?.confidenceGrade || "",
   ).toUpperCase();
   next.originalConfidenceGrade = String(
-    next.originalConfidenceGrade ||
-      next?.diagnostics?.shadowTrackerFeedback?.originalConfidence ||
-      next.confidenceGrade ||
-      "",
+    next.originalConfidenceGrade || next.confidenceGrade || "",
   ).toUpperCase();
   next.projection = isFinite(Number(next.projection))
     ? Number(next.projection)
@@ -15150,9 +15109,6 @@ function ensureTrackedPickKeys(pick = {}) {
   next.trackerSoftInfluence =
     next.trackerSoftInfluence || next?.diagnostics?.trackerSoftInfluence || null;
   next.trackerFeedback = next.trackerFeedback || next?.diagnostics?.trackerFeedback || null;
-  next.shadowTrackerFeedback =
-    next.shadowTrackerFeedback || next?.diagnostics?.shadowTrackerFeedback || null;
-
   next.lockRestricted = !!next.lockRestricted;
   next.trackerImpactKey =
     next.trackerImpactKey ||
@@ -15218,17 +15174,12 @@ function getTrackedPickEdgeBucketLabel(key = "") {
 
 function getTrackerImpactKeyFromPickLike(pick = {}) {
   const action = String(pick?.trackerSoftInfluence?.action || "").toLowerCase();
-  const advisoryOnly =
-    !!pick?.trackerSoftInfluence?.advisoryOnly ||
-    String(pick?.shadowTrackerFeedback?.mode || "").toLowerCase() === "advisory";
 
-  if (action === "no_play" || action === "shadow_no_play") return "blocked";
+  if (action === "no_play") return "blocked";
   if (action.includes("downgrade")) return "downgraded";
   if (action.includes("boost")) return "boosted";
   if (action.includes("lock_restrict") || pick?.lockRestricted) return "restricted";
-  if (advisoryOnly && (pick?.trackerFeedback || pick?.teamMemory || pick?.shadowTrackerFeedback))
-    return "shadow";
-  if (pick?.trackerFeedback || pick?.teamMemory || pick?.shadowTrackerFeedback) return "observed";
+  if (pick?.trackerFeedback || pick?.teamMemory) return "observed";
   return "none";
 }
 
@@ -15238,7 +15189,6 @@ function getTrackerImpactLabel(key = "") {
   if (clean === "downgraded") return "Downgraded";
   if (clean === "boosted") return "Boosted";
   if (clean === "restricted") return "Lock restricted";
-  if (clean === "shadow") return "Shadow only";
   if (clean === "observed") return "Observed";
   return "No tracker change";
 }
@@ -15522,7 +15472,7 @@ function repairMisclassifiedNoPlayTrackedPicks(activeList, archivedList) {
     });
   });
   if (repaired > 0) {
-    engineDebug("Repaired mis-tagged NO PLAY tracked picks (smart-line/advisory sync bug)", {
+    engineDebug("Repaired mis-tagged NO PLAY tracked picks (smart-line tracker sync bug)", {
       repaired,
     });
   }
@@ -16668,7 +16618,6 @@ function archiveExpiredTrackedPicks() {
     delete lean.diagnostics;
     delete lean.massacre;
     delete lean.trackerFeedback;
-    delete lean.shadowTrackerFeedback;
     delete lean.teamMemory;
     delete lean.intelligence;
     delete lean.shadowIntelligence;
@@ -19166,11 +19115,6 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
   const profile = buildTrackerFeedbackProfile();
   if (!profile || !profile.totalSettled) return;
 
-  const activation = phase2Activation || getPhase2ActivationState();
-  const advisoryOnly =
-    !!TRACKER_POLICY.advisoryOnly ||
-    (!activation?.trackerFeedbackLive && !activation?.teamMemoryLive);
-
   const mildMode = settled < Number(TRACKER_SOFT_EFFECTS.minSettledFull || 100);
 
   picks.forEach((p) => {
@@ -19183,7 +19127,7 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
     const edgePct = Math.abs(p.edge / p.line);
     let confidenceShift = 0;
     let lockRestricted = false;
-    let hypotheticalNoPlay = false;
+    let trackerNoPlay = false;
     const reasons = [];
 
     const posteriorWinProb = getTrackerPosteriorWinProbFromSnapshot(p.league, p.marketKey, side);
@@ -19200,14 +19144,13 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
         factor: effectiveFactor,
         rawEdge: p.edge,
         adjustedEdge,
-        advisoryOnly,
         mildMode,
       };
 
       if (posteriorWinProb >= 0.62) {
-        reasons.push("tracker strong market (not applied — visibility only)");
+        reasons.push("tracker strong market");
       } else if (posteriorWinProb <= 0.44) {
-        reasons.push("tracker weak market (not applied — visibility only)");
+        reasons.push("tracker weak market");
       }
 
       if (
@@ -19215,50 +19158,24 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
         posteriorWinProb <= 0.4 &&
         edgePct < Number(TRACKER_SOFT_EFFECTS.weakEdgeNoPlayPct || 0.055)
       ) {
-        hypotheticalNoPlay = true;
+        trackerNoPlay = true;
         lockRestricted = true;
-        reasons.push("tracker no-play caution");
+        reasons.push("tracker no-play block");
       }
     }
 
-    if (advisoryOnly) {
-      // Advisory path: write diagnostic/tracker metadata only.
-      // Must NEVER mutate fields that influence production lock eligibility.
-      p.trackerSoftInfluence = {
-        applied: true,
-        advisoryOnly: true,
-        action: hypotheticalNoPlay
-          ? "shadow_no_play"
-          : confidenceShift > 0
-            ? "shadow_boost"
-            : confidenceShift < 0
-              ? "shadow_downgrade"
-              : lockRestricted
-                ? "shadow_lock_restrict"
-                : "shadow_keep",
-        confidenceShift,
-        lockRestricted: !!lockRestricted,
-        hypotheticalNoPlay: !!hypotheticalNoPlay,
-        reasons,
-      };
-      // Intentionally do NOT set p.lockRestricted when advisoryOnly.
-      return;
-    }
-
-    if (hypotheticalNoPlay) {
+    if (trackerNoPlay) {
       p.pick = "NO PLAY";
       p.confidence = "—";
       p.note = reasons.includes("team no-play caution")
-        ? "Tracker caution — weak team signal"
-        : "Tracker caution — weak market signal";
+        ? "Tracker block — weak team signal"
+        : "Tracker block — weak market signal";
       p.lockRestricted = true;
       p.trackerSoftInfluence = {
         applied: true,
-        advisoryOnly: false,
         action: "no_play",
         confidenceShift,
         lockRestricted: true,
-        hypotheticalNoPlay: true,
         reasons,
       };
       return;
@@ -19275,7 +19192,6 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
     p.lockRestricted = !!lockRestricted;
     p.trackerSoftInfluence = {
       applied: true,
-      advisoryOnly: false,
       action:
         confidenceShift > 0
           ? "boost"
@@ -19286,12 +19202,10 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
               : "keep",
       confidenceShift,
       lockRestricted,
-      hypotheticalNoPlay: false,
       reasons,
     };
   });
 }
-
 function getTrackedLeagueApiBase(league) {
   const l = String(league || "").toLowerCase();
   const slug = getEspnLeagueSlug(l);
@@ -20910,7 +20824,6 @@ function addTrackedPicks(newPicks) {
       delete p.diagnostics;
       delete p.massacre;
       delete p.trackerFeedback;
-      delete p.shadowTrackerFeedback;
       delete p.teamMemory;
     }
     if (!p.signature) p.signature = makeTrackedSignature(p);
@@ -22720,7 +22633,20 @@ function getV24MatchupAdjust() {
 }
 function renderQualityPaceCard() {
   const el = document.getElementById("qualityPaceBody");
+  const section = document.getElementById("v24CardSection");
+  const league =
+    (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
+  const isEspnQualityPace = typeof isUsEspnLeague === "function"
+    ? isUsEspnLeague(league)
+    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+        String(league || "").toLowerCase(),
+      );
+  if (section) section.style.display = isEspnQualityPace ? "" : "none";
   if (!el) return;
+  if (!isEspnQualityPace) {
+    el.textContent = "";
+    return;
+  }
   const avg = function (arr) {
     const xs = (Array.isArray(arr) ? arr : []).map(Number).filter(function (n) {
       return Number.isFinite(n) && n > 0;
@@ -26111,16 +26037,13 @@ function getPickExplanationFactors(p, isLock) {
   }
 
   const tsi = p.trackerSoftInfluence;
-  if (tsi && tsi.applied && tsi.action && tsi.action !== "keep" && tsi.action !== "shadow_keep") {
+  if (tsi && tsi.applied && tsi.action && tsi.action !== "keep") {
     const actionLabel =
       {
         boost: "Tracker history boosted this grade",
         downgrade: "Tracker history downgraded this grade",
         no_play: "Tracker history blocked this pick",
         lock_restrict: "Tracker history restricted this pick from being the Lock",
-        shadow_boost: "Tracker history would boost this grade (shadow mode)",
-        shadow_downgrade: "Tracker history would downgrade this grade (shadow mode)",
-        shadow_no_play: "Tracker history would block this pick (shadow mode)",
       }[tsi.action] || "Tracker influence: " + tsi.action;
     factors.push(`📊 ${actionLabel}${tsi.reasons?.length ? " — " + tsi.reasons.join(", ") : ""}.`);
   }
@@ -26282,7 +26205,11 @@ function computeFTProjection({
   const aVenueDiag = combineVenueDiag(aScoredBlendFT.diag, aAllowedBlendFT.diag);
   const bVenueDiag = combineVenueDiag(bScoredBlendFT.diag, bAllowedBlendFT.diag);
 
-  const isEspnLeague = Object.prototype.hasOwnProperty.call(ESPN_LEAGUE_SLUGS, league);
+  const isEspnLeague = typeof isUsEspnLeague === "function"
+    ? isUsEspnLeague(league)
+    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+        String(league || "").toLowerCase(),
+      );
 
   const _hasNamedPace = Object.prototype.hasOwnProperty.call(LEAGUE_PACE_BASES, league);
   const _hasNamedRating = Object.prototype.hasOwnProperty.call(LEAGUE_RATING_BASES, league);
@@ -26750,7 +26677,11 @@ function compute1HProjection({
   if (isFinite(aAllowed)) aAllowed = anchorProjection(aAllowed, sampleSize, leagueBase1H);
   if (isFinite(bAllowed)) bAllowed = anchorProjection(bAllowed, sampleSize, leagueBase1H);
 
-  const isEspnLeague = Object.prototype.hasOwnProperty.call(ESPN_LEAGUE_SLUGS, league);
+  const isEspnLeague = typeof isUsEspnLeague === "function"
+    ? isUsEspnLeague(league)
+    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+        String(league || "").toLowerCase(),
+      );
   const leaguePaceBase = LEAGUE_PACE_BASES[league] || LEAGUE_PACE_BASES.default || 74;
   const leagueRatingBase =
     LEAGUE_RATING_BASES[league] ||
@@ -27117,7 +27048,11 @@ function compute2HProjection({
   if (isFinite(aAllowed)) aAllowed = anchorProjection(aAllowed, sampleSize, leagueBase2H);
   if (isFinite(bAllowed)) bAllowed = anchorProjection(bAllowed, sampleSize, leagueBase2H);
 
-  const isEspnLeague = Object.prototype.hasOwnProperty.call(ESPN_LEAGUE_SLUGS, league);
+  const isEspnLeague = typeof isUsEspnLeague === "function"
+    ? isUsEspnLeague(league)
+    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+        String(league || "").toLowerCase(),
+      );
   const leaguePaceBase = LEAGUE_PACE_BASES[league] || LEAGUE_PACE_BASES.default || 74;
   const leagueRatingBase =
     LEAGUE_RATING_BASES[league] ||
@@ -27136,6 +27071,7 @@ function compute2HProjection({
       ? getPeriodAdvancedSeries(ctxB, "h2")
       : { pace: [], source: "none" };
   const _usePeriod2Pace =
+    isEspnLeague &&
     _advA2early.source === "h2" &&
     _advB2early.source === "h2" &&
     (_advA2early.pace || []).length >= 5 &&
@@ -27223,7 +27159,7 @@ function compute2HProjection({
       isFinite(paceForAdv) &&
       paceForAdv > 0;
 
-    if (hasNativeAdv2H) {
+    if (isEspnLeague && hasNativeAdv2H) {
       const _betaO2 = Math.min(1.5, Math.max(0.25, Number((typeof getParam === "function" ? getParam("advBetaOffense", league) : null) ?? 1.0)));
       const _betaD2 = Math.min(1.5, Math.max(0.25, Number((typeof getParam === "function" ? getParam("advBetaDefense", league) : null) ?? 1.0)));
       const projectedRatingA =
@@ -28631,7 +28567,7 @@ function buildTrackedPickPayload({
       fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—" ? fixtureMeta.awayTeam : "Team B",
       pickRow.line,
     ),
-    originalPredictionText: pickRow.shadowTrackerFeedback?.originalPick || pickRow.pick,
+    originalPredictionText: pickRow.pick,
     inputSource: getTrackedInputSource(marketKey),
     edge: trackedEdge,
 
@@ -28650,13 +28586,10 @@ function buildTrackedPickPayload({
     trackerImpactLabel,
     trackerSoftInfluence: pickRow.trackerSoftInfluence || null,
     trackerFeedback: pickRow.trackerFeedback || null,
-    shadowTrackerFeedback: pickRow.shadowTrackerFeedback || null,
 
     lockRestricted: !!pickRow.lockRestricted,
     confidenceGrade: grade,
-    originalConfidenceGrade: String(
-      pickRow.shadowTrackerFeedback?.originalConfidence || grade || "",
-    ).toUpperCase(),
+    originalConfidenceGrade: String(grade || "").toUpperCase(),
     modelVersion: getCurrentModelVersion(),
     configFingerprint: getLiveConfigFingerprint(league),
     isLock,
@@ -28684,15 +28617,13 @@ function buildTrackedPickPayload({
     isShadow: isTrackableNoPlay ? true : !fixtureMeta.eventId,
     diagnostics: {
       ...(diagnostics || {}),
-      phase2Mode:
-        diagnostics?.phase2Activation?.phase2Mode || (isPhase2ShadowMode() ? "shadow" : "live"),
+      phase2Mode: diagnostics?.phase2Activation?.phase2Mode || "live",
       phase2Activation: diagnostics?.phase2Activation || null,
       trackerImpactKey,
       trackerImpactLabel,
       trackerSoftInfluence: pickRow.trackerSoftInfluence || null,
       trackerFeedback: pickRow.trackerFeedback || null,
-      shadowTrackerFeedback: pickRow.shadowTrackerFeedback || null,
-    },
+      },
     createdAt: nowIso,
   };
 
@@ -32076,15 +32007,10 @@ async function runEngine() {
 
       trackerSoftImpacts: {
         settledTrackedCount: _aud_settledPicks,
-        advisoryOnly:
-          !!TRACKER_POLICY.advisoryOnly ||
-          (phase2Activation
-            ? !phase2Activation.trackerFeedbackLive && !phase2Activation.teamMemoryLive
-            : true),
+        active: true,
         picksAnalyzed: finalPicksForDisplay.map((p) => ({
           market: p.marketKey,
           side: getPickSideFromText(p.pick),
-          originalPick: p.shadowTrackerFeedback?.originalPick || p.pick,
           influence: p.trackerSoftInfluence || "None",
         })),
       },
@@ -32473,15 +32399,14 @@ function onLeagueChange() {
 
   const h2MarketEl = document.getElementById("h2MarketSection");
   const h2Input = document.getElementById("h2Market");
-  const _h2SeriesA = String(document.getElementById("a2HScored")?.value || "").trim();
-  const _h2SeriesB = String(document.getElementById("b2HScored")?.value || "").trim();
-  const _q3A = String(document.getElementById("aQ3Scored")?.value || "").trim();
-  const _q4A = String(document.getElementById("aQ4Scored")?.value || "").trim();
-  const _h2SeriesReady = (_h2SeriesA && _h2SeriesB) || (_q3A && _q4A);
-  if (h2MarketEl) h2MarketEl.style.display = leagueVal && !isWnba && _h2SeriesReady ? "block" : "none";
+  // 2H Total is a standard market for every league except WNBA/WNBA Preseason.
+  // Do not gate visibility on whether 2H history has already been populated; the
+  // market line must be available for manual entry and the engine will decide
+  // whether the resulting play has sufficient data.
+  if (h2MarketEl) h2MarketEl.style.display = leagueVal && !isWnba ? "block" : "none";
   if (h2Input) {
-    h2Input.disabled = !_h2SeriesReady;
-    if (!_h2SeriesReady) h2Input.value = "";
+    h2Input.disabled = !!isWnba || !leagueVal;
+    if (isWnba || !leagueVal) h2Input.value = "";
   }
   const handicapFullEl = document.getElementById("handicapMarketSection");
   if (handicapFullEl) handicapFullEl.style.display = leagueVal && !isWnba ? "block" : "none";
