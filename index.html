@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -16884,6 +16883,7 @@ function renderTrackedPicks() {
   // settlement tracking is not broken.
   const visiblePicks = Array.from(uniquePicksMap.values())
     .filter(isTrackedPickVisibleOnPage)
+    .filter((p) => getAllowedMarketsForLeague(p && p.league).has(p && p.marketKey))
     .filter((p) => {
       const status = String(p?.resultStatus || "pending").toLowerCase();
       if (status !== "pending") return true;
@@ -28670,6 +28670,17 @@ function suppressCorrelatedHalfPlays(picks) {
   return picks;
 }
 
+function getAllowedMarketsForLeague(league) {
+  const key = String(league || "").toLowerCase();
+  if (key === "wnba" || key === "wnba_pre") {
+    return new Set(["ft", "h1", "team_a", "team_b", "q1", "q2", "q3", "q4", "winner", "handicap_h1", "handicap_h2"]);
+  }
+  if (key === "ncaa" || key === "ncaaw") {
+    return new Set(["ft", "handicap", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner"]);
+  }
+  return new Set(["ft", "handicap", "h1", "h2", "team_a", "team_b", "q1", "q2", "q3", "q4", "h1_team_a", "h1_team_b", "winner"]);
+}
+
 function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diagnostics }) {
   suppressCorrelatedHalfPlays(finalPicks);
   const tracked = [];
@@ -28677,7 +28688,12 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
   table.innerHTML =
     "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
 
-  finalPicks.forEach((p, idx) => {
+  const outputAllowedMarkets = getAllowedMarketsForLeague(league);
+  const leagueFinalPicks = (Array.isArray(finalPicks) ? finalPicks : []).filter((p) =>
+    outputAllowedMarkets.has(p && p.marketKey),
+  );
+
+  leagueFinalPicks.forEach((p, idx) => {
     const isLock = idx === lockIdx && p.pick !== "NO PLAY" && p.pick !== "NaN";
     const isNoPlay = p.pick === "NO PLAY" || p.pick === "NaN" || !p.pick;
     const isLean =
@@ -29193,6 +29209,8 @@ async function runEngine() {
 
   const leagueSelectEl = document.getElementById("leagueSelect");
   const currentLeagueForRun = leagueSelectEl ? leagueSelectEl.value : "";
+  // Authoritative league for this run. Keep this initialized before any market logic.
+  const league = currentLeagueForRun;
 
   if (AppState.context.data.league && AppState.context.data.league !== currentLeagueForRun) {
     
@@ -29376,9 +29394,24 @@ async function runEngine() {
     table.innerHTML =
       "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
 
-    const league = document.getElementById("leagueSelect")?.value || "";
     const isNba = league === "nba";
     const isNbaOrNcaa = typeof isUsEspnLeague === "function" ? isUsEspnLeague(league) : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(league);
+
+    const isWnbaRun = league === "wnba" || league === "wnba_pre";
+    const isNbaFamilyRun = ["nba", "nba_gl", "nba_summer"].includes(league);
+    const isNcaaRun = league === "ncaa" || league === "ncaaw";
+    // Single source of truth for markets that may produce a pick/result for this league.
+    const leagueAllowedMarkets = getAllowedMarketsForLeague(league);
+    const marketAllowedForLeague = (marketKey) => leagueAllowedMarkets.has(marketKey);
+    const disabledMarketResult = (marketKey, line = NaN) => ({
+      marketKey, line, proj: NaN, edge: NaN, pick: "NO PLAY", confidence: "NaN",
+      tier: "unsupported", sampleTier: "unsupported", note: "Market not assigned to this league",
+      fullModel: false, projectionOnly: true, hasH2H: false, volatility: NaN,
+    });
+    const getPickForLeague = (edge, line, marketKey, context = {}) =>
+      marketAllowedForLeague(marketKey) ? getPick(edge, line, league, marketKey, context) : "NO PLAY";
+    const getMarginPickForLeague = (edge, marketKey) =>
+      marketAllowedForLeague(marketKey) ? getMarginPick(edge, league, marketKey) : "NO PLAY";
 
     if (!league) {
       engineDebug("run blocked missing league");
@@ -29659,7 +29692,7 @@ async function runEngine() {
     });
 
     g_currentLiveComputeMarket = "ft";
-    let ftPick = getPick(ftCalc.ftEdge, ftLine, league, "ft", {
+    let ftPick = getPickForLeague(ftCalc.ftEdge, ftLine, "ft", {
       aSc: ftCalc.aS,
       bSc: ftCalc.bS,
       aScScores: ftCalc.aScores,
@@ -29667,7 +29700,7 @@ async function runEngine() {
       blowoutGap: ftCalc.blowoutGap,
     });
     g_currentLiveComputeMarket = "h1";
-    let h1Pick = getPick(h1Calc.h1Edge, h1Line, league, "h1", {
+    let h1Pick = getPickForLeague(h1Calc.h1Edge, h1Line, "h1", {
       aSc: h1Calc.aS1,
       bSc: h1Calc.bS1,
       blowoutGap: (Number.isFinite(h1Calc.projA1H) && Number.isFinite(h1Calc.projB1H) ? Math.abs(h1Calc.projA1H - h1Calc.projB1H) : NaN),
@@ -29675,18 +29708,18 @@ async function runEngine() {
 
     g_currentLiveComputeMarket = "h2";
     const h2Line = finalLines.h2Line;
-    let h2Pick = getPick(h2Calc.h2Edge, h2Line, league, "h2", {
+    let h2Pick = getPickForLeague(h2Calc.h2Edge, h2Line, "h2", {
       aSc: h2Calc.aS2,
       bSc: h2Calc.bS2,
       blowoutGap: (Number.isFinite(h2Calc.projA2H) && Number.isFinite(h2Calc.projB2H) ? Math.abs(h2Calc.projA2H - h2Calc.projB2H) : NaN),
     });
     g_currentLiveComputeMarket = "team_a";
-    let aPick = getPick(ftCalc.aEdge, aLine, league, "team_a", {
+    let aPick = getPickForLeague(ftCalc.aEdge, aLine, "team_a", {
       teamSc: ftCalc.aS,
       blowoutGap: ftCalc.blowoutGap,
     });
     g_currentLiveComputeMarket = "team_b";
-    let bPick = getPick(ftCalc.bEdge, bLine, league, "team_b", {
+    let bPick = getPickForLeague(ftCalc.bEdge, bLine, "team_b", {
       teamSc: ftCalc.bS,
       blowoutGap: ftCalc.blowoutGap,
     });
@@ -29695,13 +29728,13 @@ async function runEngine() {
     const combinedMarginVolFT = computeCombinedMarginVolatility(ftCalc.aVol, ftCalc.bVol);
     const winnerEdge = marginProjectionFT;
     g_currentLiveComputeMarket = "winner";
-    let winnerPick = getMarginPick(winnerEdge, league, "winner");
+    let winnerPick = getMarginPickForLeague(winnerEdge, "winner");
     const handicapEdge =
-      isFinite(marginProjectionFT) && isFinite(finalLines.handicapLine)
+      marketAllowedForLeague("handicap") && isFinite(marginProjectionFT) && isFinite(finalLines.handicapLine)
         ? marginProjectionFT + finalLines.handicapLine
         : NaN;
     g_currentLiveComputeMarket = "handicap";
-    let handicapPick = getMarginPick(handicapEdge, league, "handicap");
+    let handicapPick = getMarginPickForLeague(handicapEdge, "handicap");
 
     const marginProjectionH1 = computeMarginProjection(h1Calc.projA1H, h1Calc.projB1H);
     const _h1VolLimitForMargin = getMarketVolLimit(league, "h1");
@@ -29710,11 +29743,11 @@ async function runEngine() {
       (h1Calc.bVol1 || 0) * _h1VolLimitForMargin,
     );
     const handicapH1Edge =
-      isFinite(marginProjectionH1) && isFinite(finalLines.handicapH1Line)
+      marketAllowedForLeague("handicap_h1") && isFinite(marginProjectionH1) && isFinite(finalLines.handicapH1Line)
         ? marginProjectionH1 + finalLines.handicapH1Line
         : NaN;
     g_currentLiveComputeMarket = "handicap_h1";
-    let handicapH1Pick = getMarginPick(handicapH1Edge, league, "handicap_h1");
+    let handicapH1Pick = getMarginPickForLeague(handicapH1Edge, "handicap_h1");
     const marginProjectionH2 = computeMarginProjection(h2Calc.projA2H, h2Calc.projB2H);
     const _h2VolLimitForMargin = getMarketVolLimit(league, "h2");
     const combinedMarginVolH2 = computeCombinedMarginVolatility(
@@ -29722,11 +29755,11 @@ async function runEngine() {
       (h2Calc.bVol2 || 0) * _h2VolLimitForMargin,
     );
     const handicapH2Edge =
-      isFinite(marginProjectionH2) && isFinite(finalLines.handicapH2Line)
+      marketAllowedForLeague("handicap_h2") && isFinite(marginProjectionH2) && isFinite(finalLines.handicapH2Line)
         ? marginProjectionH2 + finalLines.handicapH2Line
         : NaN;
     g_currentLiveComputeMarket = "handicap_h2";
-    let handicapH2Pick = getMarginPick(handicapH2Edge, league, "handicap_h2");
+    let handicapH2Pick = getMarginPickForLeague(handicapH2Edge, "handicap_h2");
 
     function handicapLineWasTyped(id) {
       const raw = String(document.getElementById(id)?.value || "").trim();
@@ -29744,16 +29777,16 @@ async function runEngine() {
 
     g_currentLiveComputeMarket = "ft";
     const h1aEdge =
-      isFinite(h1Calc.projA1H) && isFinite(finalLines.h1aLine) && finalLines.h1aLine > 0
+      marketAllowedForLeague("h1_team_a") && isFinite(h1Calc.projA1H) && isFinite(finalLines.h1aLine) && finalLines.h1aLine > 0
         ? h1Calc.projA1H - finalLines.h1aLine
         : NaN;
     const h1bEdge =
-      isFinite(h1Calc.projB1H) && isFinite(finalLines.h1bLine) && finalLines.h1bLine > 0
+      marketAllowedForLeague("h1_team_b") && isFinite(h1Calc.projB1H) && isFinite(finalLines.h1bLine) && finalLines.h1bLine > 0
         ? h1Calc.projB1H - finalLines.h1bLine
         : NaN;
 
-    let h1aPick = getPick(h1aEdge, finalLines.h1aLine, league, "h1_team_a", { teamSc: h1Calc.aS1 }); 
-    let h1bPick = getPick(h1bEdge, finalLines.h1bLine, league, "h1_team_b", { teamSc: h1Calc.bS1 }); 
+    let h1aPick = getPickForLeague(h1aEdge, finalLines.h1aLine, "h1_team_a", { teamSc: h1Calc.aS1 }); 
+    let h1bPick = getPickForLeague(h1bEdge, finalLines.h1bLine, "h1_team_b", { teamSc: h1Calc.bS1 }); 
 
     const hasLevel2 =
       AppState.context.data.A.ortg10?.length >= 1 && AppState.context.data.B.ortg10?.length >= 1;
@@ -29804,34 +29837,42 @@ async function runEngine() {
       });
     };
 
-    const q1 = computeQ(
-      "q1",
-      parseMarketLine(document.getElementById("q1Market")?.value),
-      g_injA.scoringMult,
-      g_injB.scoringMult,
-      { h2hFactor: ftConfigOverride?.h2hFactor },
-    );
-    const q2 = computeQ(
-      "q2",
-      parseMarketLine(document.getElementById("q2Market")?.value),
-      g_injA.scoringMult,
-      g_injB.scoringMult,
-      { h2hFactor: ftConfigOverride?.h2hFactor },
-    );
-    const q3 = computeQ(
-      "q3",
-      parseMarketLine(document.getElementById("q3Market")?.value),
-      g_injA.scoringMult,
-      g_injB.scoringMult,
-      { h2hFactor: ftConfigOverride?.h2hFactor },
-    );
-    const q4 = computeQ(
-      "q4",
-      parseMarketLine(document.getElementById("q4Market")?.value),
-      g_injA.scoringMult,
-      g_injB.scoringMult,
-      { h2hFactor: ftConfigOverride?.h2hFactor },
-    );
+    const q1 = marketAllowedForLeague("q1")
+      ? computeQ(
+          "q1",
+          parseMarketLine(document.getElementById("q1Market")?.value),
+          g_injA.scoringMult,
+          g_injB.scoringMult,
+          { h2hFactor: ftConfigOverride?.h2hFactor },
+        )
+      : disabledMarketResult("q1", NaN);
+    const q2 = marketAllowedForLeague("q2")
+      ? computeQ(
+          "q2",
+          parseMarketLine(document.getElementById("q2Market")?.value),
+          g_injA.scoringMult,
+          g_injB.scoringMult,
+          { h2hFactor: ftConfigOverride?.h2hFactor },
+        )
+      : disabledMarketResult("q2", NaN);
+    const q3 = marketAllowedForLeague("q3")
+      ? computeQ(
+          "q3",
+          parseMarketLine(document.getElementById("q3Market")?.value),
+          g_injA.scoringMult,
+          g_injB.scoringMult,
+          { h2hFactor: ftConfigOverride?.h2hFactor },
+        )
+      : disabledMarketResult("q3", NaN);
+    const q4 = marketAllowedForLeague("q4")
+      ? computeQ(
+          "q4",
+          parseMarketLine(document.getElementById("q4Market")?.value),
+          g_injA.scoringMult,
+          g_injB.scoringMult,
+          { h2hFactor: ftConfigOverride?.h2hFactor },
+        )
+      : disabledMarketResult("q4", NaN);
 
     if (isFinite(_h2ReconH2) && _h2ReconH2 > 0 && q3 && q4) {
       const qSum = (isFinite(q3.proj) ? q3.proj : 0) + (isFinite(q4.proj) ? q4.proj : 0);
@@ -30395,7 +30436,7 @@ async function runEngine() {
       "h1_team_a",
       h1aVolatilityForConf,
     ); 
-    const h1aConfidence = getConfidenceGrade({
+    const h1aConfidence = marketAllowedForLeague("h1_team_a") ? getConfidenceGrade({
       pick: h1aPick,
       note: h1Note,
       line: finalLines.h1aLine,
@@ -30413,7 +30454,7 @@ async function runEngine() {
       marketKey: "h1_team_a", 
 
       league,
-    });
+    }) : "NaN";
 
     const h1bVolatilityForConf = h1Calc.bVol1 * getMarketVolLimit(league, "h1");
     const h1bTrap = detectTrap(
@@ -30424,7 +30465,7 @@ async function runEngine() {
       "h1_team_b",
       h1bVolatilityForConf,
     ); 
-    const h1bConfidence = getConfidenceGrade({
+    const h1bConfidence = marketAllowedForLeague("h1_team_b") ? getConfidenceGrade({
       pick: h1bPick,
       note: h1Note,
       line: finalLines.h1bLine,
@@ -30442,7 +30483,7 @@ async function runEngine() {
       marketKey: "h1_team_b", 
 
       league,
-    });
+    }) : "NaN";
 
     const phase2Activation =
       typeof getPhase2ActivationState === "function" ? getPhase2ActivationState() : null;
@@ -30520,7 +30561,7 @@ async function runEngine() {
       getMarketVolLimit(league, "ft"),
       finalLines.handicapLine,
     );
-    const handicapConfidence = getMarginConfidenceGrade({
+    const handicapConfidence = marketAllowedForLeague("handicap") ? getMarginConfidenceGrade({
       pick: handicapPick,
       marginEdgePct: handicapMarginInputs.marginEdgePct,
       marginVolRatio: handicapMarginInputs.marginVolRatio,
@@ -30531,7 +30572,7 @@ async function runEngine() {
       league,
       marginEdgePts: handicapEdge,
       volLimitPts: getMarketVolLimit(league, "ft"),
-    });
+    }) : "NaN";
 
     const handicapH1MarginInputs = getMarginConfidenceInputs(
       handicapH1Edge,
@@ -30548,7 +30589,7 @@ async function runEngine() {
       _h1VolLimitForMargin,
       finalLines.handicapH1Line,
     );
-    const handicapH1Confidence = getMarginConfidenceGrade({
+    const handicapH1Confidence = marketAllowedForLeague("handicap_h1") ? getMarginConfidenceGrade({
       pick: handicapH1Pick,
       marginEdgePct: handicapH1MarginInputs.marginEdgePct,
       marginVolRatio: handicapH1MarginInputs.marginVolRatio,
@@ -30559,7 +30600,7 @@ async function runEngine() {
       league,
       marginEdgePts: handicapH1Edge,
       volLimitPts: _h1VolLimitForMargin,
-    });
+    }) : "NaN";
     const handicapH2MarginInputs = getMarginConfidenceInputs(
       handicapH2Edge,
       h2Calc.h2Proj,
@@ -30575,7 +30616,7 @@ async function runEngine() {
       _h2VolLimitForMargin,
       finalLines.handicapH2Line,
     );
-    const handicapH2Confidence = getMarginConfidenceGrade({
+    const handicapH2Confidence = marketAllowedForLeague("handicap_h2") ? getMarginConfidenceGrade({
       pick: handicapH2Pick,
       marginEdgePct: handicapH2MarginInputs.marginEdgePct,
       marginVolRatio: handicapH2MarginInputs.marginVolRatio,
@@ -30586,7 +30627,7 @@ async function runEngine() {
       league,
       marginEdgePts: handicapH2Edge,
       volLimitPts: _h2VolLimitForMargin,
-    });
+    }) : "NaN";
 
     const picks = [
       {
@@ -30975,53 +31016,40 @@ async function runEngine() {
       });
     }
 
-    const isWnbaRun = league === "wnba" || league === "wnba_pre";
     const isManualLeagueRun = !isNbaOrNcaa;
 
-    
-    const engineAllowedMarkets = new Set([
-      "ft",
-      "h1",
-      "h2",
-      "team_a",
-      "team_b",
-      "q1",
-      "q2",
-      "q3",
-      "q4",
-      "h1_team_a",
-      "h1_team_b",
-      "winner",
-      "handicap",
-      "handicap_h1",
-      "handicap_h2",
-    ]);
+    // Final defensive barrier: output, tracker and display can only receive assigned markets.
+    const finalPicks = picks.filter((p) => marketAllowedForLeague(p && p.marketKey));
 
-    const finalPicks = picks.filter((p) => {
-      if (!engineAllowedMarkets.has(p && p.marketKey)) return false;
-      // Locked product rule: WNBA/ WNBA-preseason must not expose a full-game handicap.
-      if (isWnbaRun && p.marketKey === "handicap") return false;
-      return true;
-    });
-
-    const mktOrderMap = {
-      ft: 1,
-      h1: 2,
-      h2: 2.5,
-      team_a: 3,
-      team_b: 4,
-      q1: 5,
-      q2: 6,
-      q3: 7,
-      q4: 8,
-      h1_team_a: 9,
-      h1_team_b: 10,
-
-      winner: 1.5,
-      handicap: 4.5,
-      handicap_h1: 4.6,
-      handicap_h2: 4.7,
-    };
+    const mktOrderMap = isWnbaRun
+      ? {
+          ft: 1,
+          h1: 2,
+          team_a: 3,
+          team_b: 4,
+          q1: 5,
+          q2: 6,
+          q3: 7,
+          q4: 8,
+          winner: 9,
+          handicap_h1: 10,
+          handicap_h2: 11,
+        }
+      : {
+          ft: 1,
+          handicap: 2,
+          h1: 3,
+          h2: 4,
+          team_a: 5,
+          team_b: 6,
+          q1: 7,
+          q2: 8,
+          q3: 9,
+          q4: 10,
+          h1_team_a: 11,
+          h1_team_b: 12,
+          winner: 13,
+        };
     finalPicks.sort((a, b) => (mktOrderMap[a.marketKey] || 99) - (mktOrderMap[b.marketKey] || 99));
 
     const rawMarketInputs = getRawMarketInputMap();
