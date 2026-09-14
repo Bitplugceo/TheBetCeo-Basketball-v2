@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3538,7 +3537,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
       </div>
     </div>
 
-    <div id="h1h2MarketRow" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px">
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px">
       <div id="h1MarketSection">
         <label>1H Total</label
         ><input id="h1Market" placeholder="75.5 - 85.5" aria-label="75.5 - 85.5" />
@@ -15773,8 +15772,24 @@ async function fetchTrackerJson(url, options = {}, timeoutMs = TRACKER_NETWORK_T
   }
 }
 
-// Pending tracked picks are retained internally so live picks can settle normally.
-// The tracker display filters non-live pending rows; it does not delete them.
+window.primeTrackerStateForRun = async function primeTrackerStateForRun() {
+  const localState = await loadTrackerStateFromLocal();
+
+  if (localState) {
+    normalizeTrackerState(localState);
+  } else {
+    g_trackerState = createEmptyTrackerState();
+    rebuildTrackerDerivedState();
+  }
+
+  renderTrackedPicks();
+
+  await hydrateTrackedPicks(true);
+
+
+  g_trackerSaveFailureCount = 0;
+}
+
 function clearTrackerFollowupRefresh() {
   if (g_trackerFollowupTimer) {
     clearTimeout(g_trackerFollowupTimer);
@@ -16811,7 +16826,7 @@ async function openTrackerModal() {
   modal.setAttribute("aria-hidden", "false");
   updateTrackerInsightsButton();
   syncTrackerModalView();
-  await primeTrackerStateForRun();
+  await window.primeTrackerStateForRun();
   refreshTrackerInBackground(false);
   scheduleLiveClockPoll();
   startLiveClockTicker();
@@ -16921,7 +16936,7 @@ function renderTrackedPicks() {
   renderTrackerDebugPanel();
 
   const stats = g_trackerState.stats || { total: 0, settled: 0, wins: 0, losses: 0, pushes: 0 };
-  const liveCount = active.filter(
+  const liveCount = displayPicks.filter(
     (p) =>
       String(p?.resultStatus || "pending").toLowerCase() === "pending" &&
       p?.eventId &&
@@ -32384,23 +32399,6 @@ function onLeagueChange() {
 
   const h2MarketEl = document.getElementById("h2MarketSection");
   const h2Input = document.getElementById("h2Market");
-  const ftH1MarketRow = document.getElementById("ftH1MarketRow");
-  const h1h2MarketRow = document.getElementById("h1h2MarketRow");
-  if (ftH1MarketRow && h1h2MarketRow && h1MarketEl) {
-    if (isWnba) {
-      // WNBA: FT Total and 1H Total share the first row, side by side.
-      ftH1MarketRow.appendChild(h1MarketEl);
-      ftH1MarketRow.style.display = "grid";
-      ftH1MarketRow.style.gridTemplateColumns = "1fr 1fr";
-      h1h2MarketRow.style.display = "none";
-    } else {
-      // All other leagues: restore the standard FT/Handicap row, then 1H/2H row.
-      h1h2MarketRow.appendChild(h1MarketEl);
-      h1h2MarketRow.style.display = "grid";
-      ftH1MarketRow.style.display = "grid";
-      ftH1MarketRow.style.gridTemplateColumns = "1fr 1fr";
-    }
-  }
   // 2H Total is a standard market for every league except WNBA/WNBA Preseason.
   // Do not gate visibility on whether 2H history has already been populated; the
   // market line must be available for manual entry and the engine will decide
