@@ -16892,7 +16892,18 @@ function renderTrackedPicks() {
     }
   });
 
-  const visiblePicks = Array.from(uniquePicksMap.values()).filter(isTrackedPickVisibleOnPage);
+  // Tracker UI policy: never display non-live pending picks. A pending pick is
+  // visible only while the live-game feed confirms that the event is currently live.
+  // This keeps the tracker focused on live action and settled results without exposing
+  // the historical pending backlog. Pending records remain stored internally so live
+  // settlement tracking is not broken.
+  const visiblePicks = Array.from(uniquePicksMap.values())
+    .filter(isTrackedPickVisibleOnPage)
+    .filter((p) => {
+      const status = String(p?.resultStatus || "pending").toLowerCase();
+      if (status !== "pending") return true;
+      return !!(p?.eventId && g_liveGameStatus.has(p.eventId));
+    });
 
   window.__trackerRenderLimit = window.__trackerRenderLimit || 50;
   const displayPicks = visiblePicks
@@ -16941,11 +16952,14 @@ function renderTrackedPicks() {
   renderTrackerDebugPanel();
 
   const stats = g_trackerState.stats || { total: 0, settled: 0, wins: 0, losses: 0, pushes: 0 };
-  const pendingCount = active.filter(
-    (p) => String(p?.resultStatus || "pending").toLowerCase() === "pending",
+  const liveCount = displayPicks.filter(
+    (p) =>
+      String(p?.resultStatus || "pending").toLowerCase() === "pending" &&
+      p?.eventId &&
+      g_liveGameStatus.has(p.eventId),
   ).length;
 
-  summaryEl.innerHTML = `${displayPicks.length} live • ${pendingCount} pending • ${stats.wins} wins • ${stats.losses} losses`;
+  summaryEl.innerHTML = `${liveCount} live • ${stats.wins} wins • ${stats.losses} losses`;
 
   try {
     const _qfStats = getQuarterFormBacktestStats();
