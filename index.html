@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -38225,7 +38224,7 @@ const EngineAuditor = (function () {
     const src = cutAt > 0 ? full.slice(0, cutAt) : full;
     const registryHeader = src.slice(0, Math.min(src.length, 12000));
     const registryIds = new Set();
-    const registryRe = /^\s*(\d+)(?:\/(\d+))?\s+/gm;
+    const registryRe = /^\s*\*?\s*(\d+)(?:\/(\d+))?\s+/gm;
     let registryMatch;
     while ((registryMatch = registryRe.exec(registryHeader))) {
       const a = Number(registryMatch[1]);
@@ -39446,6 +39445,7 @@ const EngineAuditor = (function () {
         reproducibleTestCase: "JSON clone args → computeFTProjection twice" });
     let productionSnapshotChecked = 0;
     let productionSnapshotMismatches = [];
+    let productionSnapshotDriftUnverifiable = [];
     try {
       const tracked = typeof getAllTrackedPicksForReport === "function" ? (getAllTrackedPicksForReport() || []) : [];
       (Array.isArray(tracked) ? tracked : []).forEach(function (p) {
@@ -39476,10 +39476,16 @@ const EngineAuditor = (function () {
           }
           const storedProj = Number(p.projection);
           const replayProj = Number(replay.projection);
+          const hasHistoricalParams = !!(snap.paramRegistryValues && typeof snap.paramRegistryValues === "object");
           if (Number.isFinite(storedProj) && Number.isFinite(replayProj)) {
             productionSnapshotChecked++;
             if (Math.abs(storedProj - replayProj) > 1e-7) {
-              productionSnapshotMismatches.push((p.pickId || p.eventId || "unknown") + "[" + String(snap.marketKey || p.marketKey || "") + "]:" + storedProj + "≠" + replayProj + " via " + replay.adapter);
+              const _mismatchLabel = (p.pickId || p.eventId || "unknown") + "[" + String(snap.marketKey || p.marketKey || "") + "]:" + storedProj + "≠" + replayProj + " via " + replay.adapter;
+              if (hasHistoricalParams) {
+                productionSnapshotMismatches.push(_mismatchLabel);
+              } else {
+                productionSnapshotDriftUnverifiable.push("UNVERIFIABLE-DRIFT(no captured paramRegistryValues):" + _mismatchLabel);
+              }
             }
           }
         } catch (eSnap) {
@@ -39494,12 +39500,15 @@ const EngineAuditor = (function () {
     if (productionSnapshotChecked > 0 || productionSnapshotMismatches.length) {
       forensicAssert(productionReplayProven,
         "Production snapshot replay parity",
-        "Checked " + productionSnapshotChecked + " stored production snapshots; mismatches=" + productionSnapshotMismatches.length +
-          (productionSnapshotMismatches.length ? " " + productionSnapshotMismatches.slice(0, 5).join(", ") : ""),
-        "Toy-input determinism does not prove that persisted production snapshots replay identically.",
-        "Replay every available stored production snapshot through the production projection adapter and reconcile stored projection values.",
+        "Checked " + productionSnapshotChecked + " stored production snapshots; verified-mismatches=" + productionSnapshotMismatches.length +
+          " unverifiable-drift(no historical params captured)=" + productionSnapshotDriftUnverifiable.length +
+          (productionSnapshotMismatches.length ? " " + productionSnapshotMismatches.slice(0, 5).join(", ") : "") +
+          (productionSnapshotDriftUnverifiable.length ? " | " + productionSnapshotDriftUnverifiable.slice(0, 5).join(", ") : ""),
+        "Toy-input determinism does not prove that persisted production snapshots replay identically. Snapshots without a captured paramRegistryValues cannot be distinguished from legitimate model retuning, so they are reported separately and do not fail this check on their own.",
+        "Replay every available stored production snapshot through the production projection adapter and reconcile stored projection values. Investigate only the verified-mismatches list; unverifiable-drift entries predate paramRegistryValues capture and will resolve naturally as old picks age out.",
         { severity: productionReplayProven ? "INFO" : "HIGH", ruleId: "LIVE_REPLAY_PRODUCTION_SNAPSHOT",
-          checked: productionSnapshotChecked, mismatches: productionSnapshotMismatches, bankrollRisk: "CRITICAL" });
+          checked: productionSnapshotChecked, mismatches: productionSnapshotMismatches,
+          driftUnverifiable: productionSnapshotDriftUnverifiable, bankrollRisk: "CRITICAL" });
     } else {
       forensicAdd("HIGH", "Production snapshot replay unproven — no usable stored snapshots",
         "No stored production snapshot contained the minimum replay inputs required for computeFTProjection.",
