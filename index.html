@@ -4178,9 +4178,7 @@ body.dark-mode .tracker-analytics-section-head {
 
 <script>
 (function () {
-
-   SECTION 6 — PIN lock
-   ======================================================================== */
+/* SECTION 6 — PIN lock */
   const ENGINE_LOCK_PIN_HASH = "dc69839a54b801d7badf5c5d5a64ad5800f49c2cb4cca4f99a1767940240b711";
   const ENGINE_LOCK_SALT = "bb_engine_lock_v1";
   const overlay = document.getElementById("engineLockOverlay");
@@ -4254,9 +4252,7 @@ body.dark-mode .tracker-analytics-section-head {
   if (window.__BETCEO_WATCHDOG_LOADED) return;
   window.__BETCEO_WATCHDOG_LOADED = true;
   window.__BETCEO_ENGINE_BOOT_SEEN = false;
-
-   SECTION 7 — Watchdog
-   ======================================================================== */
+/* SECTION 7 — Watchdog */
   function spawnFatalTerminal(msg, file, line, col, stack) {
     if (document.getElementById("fatalGodModeTerminal")) return;
     const t = document.createElement("div");
@@ -4392,9 +4388,7 @@ body.dark-mode .tracker-analytics-section-head {
 window.__BETCEO_ENGINE_BOOT_SEEN = true;
 window.__BETCEO_ENGINE_PARSE_OK = true;
 window.__BETCEO_SESSION_ID = "sess_" + Date.now() + "_" + Math.random().toString(36).slice(2, 9);
-
-   SECTION 8 — Core helpers and SofaScore ingest
-   ======================================================================== */
+/* SECTION 8 — Core helpers and SofaScore ingest */
 function clampNumber(val, min, max) {
   const n = Number(val);
   const lo = Number(min);
@@ -4952,9 +4946,7 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
 }
 
 const _ssEventStatsCache = new Map();
-
-   SECTION 9 — SofaScore box and period stats
-   ======================================================================== */
+/* SECTION 9 — SofaScore box and period stats */
 function ssIsNcaaSofaLeague(league) {
   const lg = String(league || "").toLowerCase();
   return lg === "ncaa" || lg === "ncaaw";
@@ -5109,7 +5101,7 @@ async function ssFetchEventStatistics(eventId) {
 
   if (window.__ssSofaStatsBlocked) return null;
   if (_ssEventStatsCache.has(id)) return _ssEventStatsCache.get(id);
-  const url = "https:
+  const url = "https://api.sofascore.com/api/v1/event/" + id + "/statistics";
   let data = null;
   try {
     if (typeof proxyFetch === "function") {
@@ -8027,9 +8019,7 @@ function promoteConfigToLock(league, market, fullConfig, evalResult, opts) {
   }
   return { ok: true, meta: meta };
 }
-
-   SECTION 13 — Lock promotion and calibration
-   ======================================================================== */
+/* SECTION 13 — Lock promotion and calibration */
 function promoteSearchReport(report, opts) {
   opts = opts || {};
   if (!report || report.error || !report.best || !report.best.config) {
@@ -8254,7 +8244,8 @@ function validateLockedConfig(league, market, games, opts) {
 
   let gameList = Array.isArray(games) ? games : null;
   if (!gameList) {
-    gameList = (Array.isArray(g_historicalGamesStore) ? g_historicalGamesStore : []).filter(
+    const historicalStore = typeof g_historicalGamesStore !== "undefined" ? g_historicalGamesStore : [];
+    gameList = (Array.isArray(historicalStore) ? historicalStore : []).filter(
       function (g) {
         return String(g.league || "nba").toLowerCase() === lk;
       },
@@ -9087,24 +9078,27 @@ function computeQuarterProjection({
       );
       const qCombinedVolPts =
         Number.isFinite(qVolRatio) && Number.isFinite(volLimit) ? qVolRatio * volLimit : stdDev(aS.concat(bS));
-      const sampleSize = Math.min(aS.length, bS.length);
+      const sampleSize = Math.min(
+        aS.reduce((n,v) => n + (Number.isFinite(Number(v)) ? 1 : 0), 0),
+        bS.reduce((n,v) => n + (Number.isFinite(Number(v)) ? 1 : 0), 0),
+      );
+      const tierForGate = getSampleTier(aS, bS);
+      if (sampleSize < 5 || tierForGate === "insufficient") {
+        return { proj: NaN, edge: NaN, line: lineVal, pick: "NO PLAY", confidence: "NaN", tier: "insufficient", projA: NaN, projB: NaN, hasH2H: false, volatility: NaN, fullModel: false, projectionOnly: true, paceGapRisk: false, preAnchorProjA: NaN, preAnchorProjB: NaN, preAnchorProjTotal: NaN };
+      }
 
       const leagueBaseQ = getLeagueScoreBase(league) / 8;
 
       const ctxAQ = _ctxRoot.A || {};
       const ctxBQ = _ctxRoot.B || {};
 
+      const _gateAdvAQ = getPeriodAdvancedSeries(ctxAQ, qKey);
+      const _gateAdvBQ = getPeriodAdvancedSeries(ctxBQ, qKey);
       const hasAdvancedQ =
-        isFinite(avgOrNaN(ctxAQ.ortg10)) &&
-        isFinite(avgOrNaN(ctxAQ.drtg10)) &&
-        isFinite(avgOrNaN(ctxBQ.ortg10)) &&
-        isFinite(avgOrNaN(ctxBQ.drtg10)) &&
-        isFinite(avgOrNaN(ctxAQ.pace10)) &&
-        avgOrNaN(ctxAQ.pace10) > 0 &&
-        isFinite(avgOrNaN(ctxBQ.pace10)) &&
-        avgOrNaN(ctxBQ.pace10) > 0 &&
-        (ctxAQ.ortg10 || []).length >= 5 &&
-        (ctxBQ.ortg10 || []).length >= 5;
+        _gateAdvAQ.source === qKey && _gateAdvBQ.source === qKey &&
+        getSampleTier(_gateAdvAQ.ortg, _gateAdvBQ.ortg) !== "insufficient" &&
+        Number.isFinite(avgOrNaN(_gateAdvAQ.ortg)) && Number.isFinite(avgOrNaN(_gateAdvAQ.drtg)) &&
+        Number.isFinite(avgOrNaN(_gateAdvBQ.ortg)) && Number.isFinite(avgOrNaN(_gateAdvBQ.drtg));
 
       const leaguePaceBaseQ =
         LEAGUE_PACE_BASES[league] ||
@@ -9506,8 +9500,8 @@ function evaluatePickWithParams(pick, paramOverrides) {
     const volRatio =
       isFinite(pick.volatility) && isFinite(volLimit) && volLimit > 0
         ? Number(pick.volatility) / volLimit
-        : 0.5;
-    const sampleTier = pick.sampleTier || "thin";
+        : NaN;
+    const sampleTier = pick.sampleTier || "unknown";
     const hasH2H = pick.hasH2H || false;
     let winProbability = getConfidenceWinProbability(
       null,
@@ -10276,8 +10270,8 @@ async function runRetrospectiveAnalysis(pick) {
               const _volRatio =
                 isFinite(pick.volatility) && isFinite(pick.volLimit) && pick.volLimit > 0
                   ? Number(pick.volatility) / Number(pick.volLimit)
-                  : 0.5;
-              const _sampleTier = pick.sampleTier || "thin";
+                  : NaN;
+              const _sampleTier = pick.sampleTier || "unknown";
               const _hasH2H = pick.hasH2H || false;
               const _winProbability = getConfidenceWinProbability(
                 null,
@@ -10596,9 +10590,7 @@ function getLeagueUnderBlockRatio(league) {
 
   return map[String(league || "").toLowerCase()] || 0.82;
 }
-
-   SECTION 14 — League edge-point thresholds
-   ======================================================================== */
+/* SECTION 14 — League edge-point thresholds */
 const LEAGUE_EDGE_POINT_THRESHOLDS = {
   nba: {
     ft: 5.5,
@@ -11433,9 +11425,7 @@ const QSHAPE_MIN_GAMES = 6;
 function getTeamQuarterShapeKey(league, teamName) {
   return String(league || "unknown").toLowerCase() + "|" + normalizeTeamName(teamName || "");
 }
-
-   SECTION 15 — League fetch state and quarter-shape store
-   ======================================================================== */
+/* SECTION 15 — League fetch state and quarter-shape store */
 function loadQuarterShapeStore() {
   try {
     const parsed = safeLocalStorageJSON(QSHAPE_STORAGE_KEY, {});
@@ -11496,9 +11486,7 @@ function updateTeamQuarterShapeProfile(league, teamName, q1s, q2s, q3s, q4s, eve
   store[key] = entry;
   saveQuarterShapeStore(store);
 }
-
-   SECTION 16 — Quarter shape, spread, and form haircut
-   ======================================================================== */
+/* SECTION 16 — Quarter shape, spread, and form haircut */
 function getTeamQuarterShapeSignal(league, teamName, qKey) {
   const key = getTeamQuarterShapeKey(league, teamName);
   const store = loadQuarterShapeStore();
@@ -14146,7 +14134,7 @@ function calculateAdvancedMetrics(sMapMine, sMapOpp, ptsMine, ptsOpp, regMinutes
   const orbO = _readBoxStat(sMapOpp, ORB_ALIASES);
   const tovO = _readBoxStat(sMapOpp, TOV_ALIASES);
 
-  if (!(isFinite(ptsMine) && ptsMine > 0 && isFinite(ptsOpp) && ptsOpp > 0)) return null;
+  if (!(isFinite(ptsMine) && ptsMine >= 0 && isFinite(ptsOpp) && ptsOpp >= 0)) return null;
 
   let pace, ortg, drtg, poss;
   if (isFinite(fgaM) && fgaM > 0 && isFinite(fgaO) && fgaO > 0) {
@@ -14169,7 +14157,7 @@ function calculateAdvancedMetrics(sMapMine, sMapOpp, ptsMine, ptsOpp, regMinutes
     return null;
   }
 
-  if (!(isFinite(pace) && pace > 0 && isFinite(ortg) && ortg > 0 && isFinite(drtg) && drtg > 0))
+  if (!(isFinite(pace) && pace > 0 && isFinite(ortg) && ortg >= 0 && isFinite(drtg) && drtg >= 0))
     return null;
   if (pace < 70 || pace > 130) return null;
   if (ortg < 70 || ortg > 150 || drtg < 70 || drtg > 150) return null;
@@ -14185,7 +14173,7 @@ function calculateAdvancedMetrics(sMapMine, sMapOpp, ptsMine, ptsOpp, regMinutes
 function derivePeriodAdvanced(fullAdv, ptsMine, ptsOpp, periodFraction, league) {
   if (!fullAdv || !isFinite(periodFraction) || periodFraction <= 0 || periodFraction > 1)
     return null;
-  if (!(isFinite(ptsMine) && ptsMine > 0 && isFinite(ptsOpp) && ptsOpp > 0)) return null;
+  if (!(isFinite(ptsMine) && ptsMine >= 0 && isFinite(ptsOpp) && ptsOpp >= 0)) return null;
   const gamePoss = Number(fullAdv.possessions);
   const pace = Number(fullAdv.pace);
   if (!(isFinite(gamePoss) && gamePoss > 0 && isFinite(pace) && pace > 0)) return null;
@@ -14193,8 +14181,8 @@ function derivePeriodAdvanced(fullAdv, ptsMine, ptsOpp, periodFraction, league) 
   if (!(periodPoss > 5)) return null;
   const ortg = (100 * ptsMine) / periodPoss;
   const drtg = (100 * ptsOpp) / periodPoss;
-  if (!(isFinite(ortg) && ortg > 0 && isFinite(drtg) && drtg > 0)) return null;
-  if (ortg < 50 || ortg > 180 || drtg < 50 || drtg > 180) return null;
+  if (!(isFinite(ortg) && ortg >= 0 && isFinite(drtg) && drtg >= 0)) return null;
+  if (ortg > 180 || drtg > 180) return null;
   return {
     pace: Number(pace.toFixed(2)),
     ortg: Number(ortg.toFixed(2)),
@@ -14892,12 +14880,7 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
       dates,
       asOf,
     );
-    if (!clean.length) {
-      
-      clean = Array.isArray(series) ? series.map(Number).filter((v) => isFinite(v)) : [];
-      if (!clean.length) return NaN;
-      return weightedRecentAverage(clean, recencyWeights, league, marketKey);
-    }
+    if (!clean.length) return NaN;
     const paired = [];
     const raw = Array.isArray(series) ? series.map(Number) : [];
     if (Array.isArray(dates) && dates.length) {
@@ -14918,7 +14901,7 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
       const dateAware = weightedRecentAverageByDate(paired, recencyWeights, league, marketKey);
       if (isFinite(dateAware)) return dateAware;
     }
-    return weightedRecentAverage(clean, recencyWeights, league, marketKey);
+    return NaN;
   }
   if (dates && dates.length === clean.length) {
     const dateAware = weightedRecentAverageByDate(
@@ -19024,9 +19007,7 @@ function refreshTrackerSignalSnapshot() {
   );
   return prior;
 }
-
-   SECTION 20 — Tracker settlement
-   ======================================================================== */
+/* SECTION 20 — Tracker settlement */
 function getAllSettledTrackedPicks() {
   return getLearningTrackedPicks().filter((p) => {
     const status = String(p.resultStatus || "").toLowerCase();
@@ -19214,7 +19195,7 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
 function getTrackedLeagueApiBase(league) {
   const l = String(league || "").toLowerCase();
   const slug = getEspnLeagueSlug(l);
-  return slug ? "https:
+  return slug ? "https://site.api.espn.com/apis/site/v2/sports/basketball/" + slug : "";
 }
 
 window._espnStandingsCache = window._espnStandingsCache || {};
@@ -20864,13 +20845,9 @@ function addTrackedPicks(newPicks) {
         return;
       }
 
-      current[exactIdx] = ensureTrackedPickKeys({
-        ...existing,
-        ...p,
-        createdAt: existing.createdAt || p.createdAt,
-        signature: p.signature,
-      });
-      changed = true;
+      const resolved = resolveTrackedPick(existing, p);
+      current[exactIdx] = ensureTrackedPickKeys(resolved);
+      changed = changed || current[exactIdx] !== existing;
       return;
     }
 
@@ -21210,12 +21187,11 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
 
 function getSampleTier(...arrays) {
   if (!arrays.length) return "insufficient";
-  const lens = arrays.map((a) => (Array.isArray(a) ? a.length : 0));
-  const minLen = Math.min(...lens);
-
-  if (minLen <= 0) return "insufficient";
-  if (minLen >= 10) return "full";
-  if (minLen >= 5) return "thin";
+  const counts = arrays.map((a) => Array.isArray(a) ? a.reduce((n,v) => n + (Number.isFinite(Number(v)) ? 1 : 0), 0) : 0);
+  const minCount = Math.min(...counts);
+  if (minCount <= 0) return "insufficient";
+  if (minCount >= 10) return "full";
+  if (minCount >= 5) return "thin";
   return "insufficient";
 }
 
@@ -21511,7 +21487,7 @@ function selectLock(markets) {
       m?.confidenceGrade || m?.confidence || null,
       edgePct,
       volRatio,
-      m?.sampleTier || "thin",
+      m?.sampleTier || "unknown",
       !!m?.hasH2H,
       !!m?.trap,
       league,
@@ -21730,7 +21706,8 @@ function getDistributionWinProbabilityForPick(p, leagueKey) {
   const volLimit =
     typeof getMarketVolLimit === "function" ? getMarketVolLimit(leagueKey || p.league || "", mk) || 12 : 12;
   const vol = Number(p.volatility);
-  const volRatio = isFinite(vol) && volLimit > 0 ? vol / volLimit : 0.5;
+  if (!isFinite(vol) || !(volLimit > 0)) return null;
+  const volRatio = vol / volLimit;
   return distributionWinProbability(Number(p.edge), volLimit, volRatio);
 }
 
@@ -22015,9 +21992,7 @@ function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKe
 </script>
 
 <script>
-
-   SECTION 22 — Confidence grade and V24 layer
-   ======================================================================== */
+/* SECTION 22 — Confidence grade and V24 layer */
 function getConfidenceGrade(params) {
   const {
     pick,
@@ -22057,8 +22032,8 @@ function getConfidenceGrade(params) {
   }
 
   const edgePct = Math.abs(edge / line);
-  const volRatio =
-    isFinite(volatility) && isFinite(volLimit) && volLimit > 0 ? volatility / volLimit : 0.5;
+  if (!isFinite(volatility) || !isFinite(volLimit) || volLimit <= 0) return "NaN";
+  const volRatio = volatility / volLimit;
   const _pickSide = typeof getPickSideFromText === "function" ? getPickSideFromText(pick) : "";
   let winProb = getConfidenceWinProbability(
     null,
@@ -22295,8 +22270,8 @@ function buildTotalMarketIntelSignal(pack) {
   if (!pack) return { signal: 0 };
 
   const _fatigueB2B = getParam("fatigueB2BPenalty") ?? -2.5;
-  const restDaysA = Number(pack.restDaysA);
-  const restDaysB = Number(pack.restDaysB);
+  const restDaysA = pack.restDaysA == null || pack.restDaysA === "" ? NaN : Number(pack.restDaysA);
+  const restDaysB = pack.restDaysB == null || pack.restDaysB === "" ? NaN : Number(pack.restDaysB);
   if (Number.isFinite(restDaysA) && restDaysA < 1) signal += _fatigueB2B;
   if (Number.isFinite(restDaysB) && restDaysB < 1) signal += _fatigueB2B;
   return { signal: clampNumber(signal, -3, 3) };
@@ -22305,7 +22280,8 @@ function buildTotalMarketIntelSignal(pack) {
 function buildTeamMarketIntelSignal(pack, teamSide) {
   let signal = 0;
   if (!pack) return { signal: 0 };
-  const restDays = Number(teamSide === "A" ? pack.restDaysA : pack.restDaysB);
+  const rawRestDays = teamSide === "A" ? pack.restDaysA : pack.restDaysB;
+  const restDays = rawRestDays == null || rawRestDays === "" ? NaN : Number(rawRestDays);
 
   const _fatigueB2B = getParam("fatigueB2BPenalty") ?? -2.5;
 
@@ -22798,8 +22774,8 @@ function applyIntelligenceLayerToPicks(picks, intelligencePack, league) {
   picks.forEach((p) => {
     if (!p || p.pick === "NO PLAY") return;
     let confAdj = 0;
-    const restA = Number(intelligencePack.restDaysA);
-    const restB = Number(intelligencePack.restDaysB);
+    const restA = intelligencePack.restDaysA == null || intelligencePack.restDaysA === "" ? NaN : Number(intelligencePack.restDaysA);
+    const restB = intelligencePack.restDaysB == null || intelligencePack.restDaysB === "" ? NaN : Number(intelligencePack.restDaysB);
 
     if ((Number.isFinite(restA) && restA < 1) || (Number.isFinite(restB) && restB < 1)) {
       confAdj -= 2;
@@ -24003,6 +23979,9 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
   const threePctAllowedArr = [];
   const h2Allowed10 = [];
   const h2Scored10Dates = [];
+  const h1Allowed10Dates = [];
+  const h2Allowed10Dates = [];
+  const allowedDates10 = [];
 
   const qS = { q1: [], q2: [], q3: [], q4: [] };
   const qA = { q1: [], q2: [], q3: [], q4: [] };
@@ -24208,16 +24187,19 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
     scored10.push(game.ms);
     allowed10.push(game.os);
     scoredDates10.push(game.date || null);
+    allowedDates10.push(game.date || null);
 
     if (game.h1m !== null && game.h1o !== null) {
       h1Scored10.push(game.h1m);
       h1Allowed10.push(game.h1o);
       h1Scored10Dates.push(game.date || null);
+      h1Allowed10Dates.push(game.date || null);
     }
     if (game.h2m !== null && game.h2o !== null && Number.isFinite(game.h2m) && Number.isFinite(game.h2o)) {
       h2Scored10.push(game.h2m);
       h2Allowed10.push(game.h2o);
       h2Scored10Dates.push(game.date || null);
+      h2Allowed10Dates.push(game.date || null);
     }
 
     if (game.matchup) {
@@ -24229,18 +24211,15 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
       if (Number.isFinite(game.matchup.tpPctAllowed)) threePctAllowedArr.push(game.matchup.tpPctAllowed);
     }
     if (game.qs) {
-      qS.q1.push(game.qs.m[0]);
-      qS.q2.push(game.qs.m[1]);
-      qS.q3.push(game.qs.m[2]);
-      qS.q4.push(game.qs.m[3]);
-      qA.q1.push(game.qs.o[0]);
-      qA.q2.push(game.qs.o[1]);
-      qA.q3.push(game.qs.o[2]);
-      qA.q4.push(game.qs.o[3]);
-      qDates.q1.push(game.date || null);
-      qDates.q2.push(game.date || null);
-      qDates.q3.push(game.date || null);
-      qDates.q4.push(game.date || null);
+      for (let qi = 0; qi < 4; qi++) {
+        const m = Number(game.qs.m?.[qi]);
+        const o = Number(game.qs.o?.[qi]);
+        if (!Number.isFinite(m) || !Number.isFinite(o)) continue;
+        const key = "q" + (qi + 1);
+        qS[key].push(m);
+        qA[key].push(o);
+        qDates[key].push(game.date || null);
+      }
     }
   });
 
@@ -24253,6 +24232,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         h2Scored: h2Scored10.slice(0, 10),
         h2Allowed: h2Allowed10.slice(0, 10),
         h2ScoredDates: h2Scored10Dates.slice(0, 10),
+        h2AllowedDates: h2Allowed10Dates.slice(0, 10),
         eventIds: summaries.filter(Boolean).map((s) => s.eventId).slice(0, 10),
         q1Scored: qS.q1.slice(0, 10),
         q2Scored: qS.q2.slice(0, 10),
@@ -24272,40 +24252,40 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         drtg10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.advancedH2.drtg),
         pace10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.advancedH2.pace),
         ortg10_q1: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q1)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q1 && !s.advancedQ.q1.synthetic)
           .map((s) => s.advancedQ.q1.ortg),
         drtg10_q1: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q1)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q1 && !s.advancedQ.q1.synthetic)
           .map((s) => s.advancedQ.q1.drtg),
         pace10_q1: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q1)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q1 && !s.advancedQ.q1.synthetic)
           .map((s) => s.advancedQ.q1.pace),
         ortg10_q2: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q2)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q2 && !s.advancedQ.q2.synthetic)
           .map((s) => s.advancedQ.q2.ortg),
         drtg10_q2: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q2)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q2 && !s.advancedQ.q2.synthetic)
           .map((s) => s.advancedQ.q2.drtg),
         pace10_q2: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q2)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q2 && !s.advancedQ.q2.synthetic)
           .map((s) => s.advancedQ.q2.pace),
         ortg10_q3: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q3)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q3 && !s.advancedQ.q3.synthetic)
           .map((s) => s.advancedQ.q3.ortg),
         drtg10_q3: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q3)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q3 && !s.advancedQ.q3.synthetic)
           .map((s) => s.advancedQ.q3.drtg),
         pace10_q3: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q3)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q3 && !s.advancedQ.q3.synthetic)
           .map((s) => s.advancedQ.q3.pace),
         ortg10_q4: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q4)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q4 && !s.advancedQ.q4.synthetic)
           .map((s) => s.advancedQ.q4.ortg),
         drtg10_q4: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q4)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q4 && !s.advancedQ.q4.synthetic)
           .map((s) => s.advancedQ.q4.drtg),
         pace10_q4: summaries
-          .filter((s) => s && s.advancedQ && s.advancedQ.q4)
+          .filter((s) => s && s.advancedQ && s.advancedQ.q4 && !s.advancedQ.q4.synthetic)
           .map((s) => s.advancedQ.q4.pace),
         scored10,
         allowed10,
@@ -24317,10 +24297,14 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         threePctAllowed: threePctAllowedArr.slice(0, 10),
         scoredDates: scoredDates10.slice(0, 10),
         ftScoredDates: scoredDates10.slice(0, 10),
+        allowedDates: allowedDates10.slice(0, 10),
+        ftAllowedDates: allowedDates10.slice(0, 10),
         h1Scored10,
         h1Allowed10,
 
         h1ScoredDates: h1Scored10Dates,
+        h1AllowedDates: h1Allowed10Dates,
+        h2AllowedDates: h2Allowed10Dates,
         q1ScoredDates: qDates.q1,
         q2ScoredDates: qDates.q2,
         q3ScoredDates: qDates.q3,
@@ -25327,6 +25311,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
               ftScored10: aStats.scored10 || aStats.scored || [],
               ftAllowed10: aStats.allowed10 || aStats.allowed || [],
               ftScoredDates10: aStats.scoredDates || aStats.ftScoredDates || [],
+              ftAllowedDates10: aStats.allowedDates || aStats.ftAllowedDates || [],
             }
           : null,
         q1Scored: aStats?.q1Scored || [],
@@ -25387,6 +25372,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
               ftScored10: bStats.scored10 || bStats.scored || [],
               ftAllowed10: bStats.allowed10 || bStats.allowed || [],
               ftScoredDates10: bStats.scoredDates || bStats.ftScoredDates || [],
+              ftAllowedDates10: bStats.allowedDates || bStats.ftAllowedDates || [],
             }
           : null,
         q1Scored: bStats?.q1Scored || [],
@@ -25601,24 +25587,19 @@ function filterNumericSeriesWithParallelDates(values, dates, predictionDate) {
   if (!predictionDate) return clean;
   const cutoff = Date.parse(predictionDate);
   if (!Number.isFinite(cutoff)) return clean;
-  if (!Array.isArray(dates) || !dates.length || dates.length !== vals.length) return clean;
+  if (!Array.isArray(dates) || !dates.length || dates.length !== vals.length) return [];
   const out = [];
   for (let i = 0; i < vals.length; i++) {
     const v = Number(vals[i]);
     if (!isFinite(v)) continue;
     const d = dates[i];
-    if (d == null || d === "") {
-      out.push(v);
-      continue;
-    }
     const ts = typeof d === "number" ? d : Date.parse(d);
-    if (!Number.isFinite(ts) || ts <= cutoff) out.push(v);
+    if (!Number.isFinite(ts)) continue;
+    if (ts <= cutoff) out.push(v);
   }
   return out;
 }
-
-   SECTION 24 — Live series extract and venue
-   ======================================================================== */
+/* SECTION 24 — Live series extract and venue */
 function getFetchedSeries(side, scope, marketKey, metric, contextData = null) {
   const root =
     contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {};
@@ -26124,9 +26105,7 @@ function getMarketKeyFromName(name, marketKeyOverride) {
   if (n.startsWith("Lowest Q Total")) return "low_q_ou";
   return "other";
 }
-
-   SECTION 25 — Full-game projection
-   ======================================================================== */
+/* SECTION 25 — Full-game projection */
 function computeFTProjection({
   league,
   parsed,
@@ -26516,10 +26495,7 @@ function computeFTProjection({
 
   let _restDaysA = isFinite(config?.restDaysA) ? Number(config.restDaysA) : (Number.isFinite(Number(ctxA.restDays)) ? Number(ctxA.restDays) : null);
   let _restDaysB = isFinite(config?.restDaysB) ? Number(config.restDaysB) : (Number.isFinite(Number(ctxB.restDays)) ? Number(ctxB.restDays) : null);
-  if (_venueNeutral) {
-    _restDaysA = null;
-    _restDaysB = null;
-  }
+  // Venue neutrality does not erase known rest-day information.
   const _fatigueIntelPack = { restDaysA: _restDaysA, restDaysB: _restDaysB };
   projAFT = applyDampedIntelSignal(
     projAFT,
@@ -26589,9 +26565,7 @@ function computeFTProjection({
     ftH2HWeight: isFinite(_ftRealH2HWeight) ? _ftRealH2HWeight : 0,
   };
 }
-
-   SECTION 26 — First-half projection
-   ======================================================================== */
+/* SECTION 26 — First-half projection */
 function compute1HProjection({
   league,
   parsed,
@@ -26959,9 +26933,7 @@ function compute1HProjection({
     bVenueAdjustment: bVenueDiag1,
   };
 }
-
-   SECTION 27 — Second-half projection
-   ======================================================================== */
+/* SECTION 27 — Second-half projection */
 function compute2HProjection({
   league,
   parsed,
@@ -27616,50 +27588,20 @@ function calibrateConfidenceModel() {
   );
   if (allPicks.length < 150) return;
 
-  const _universePicks = getAllTrackedPicksForReport().filter(
-    (p) => p.modelVersion === currentVersion && isFinite(Number(p.edgePct)),
-  );
-  const _biasBucketOf = (edgePctVal) =>
-    Math.max(0, Math.min(4, Math.floor(Math.abs(Number(edgePctVal) || 0) / 5)));
-  const _settledBucketCounts = [0, 0, 0, 0, 0];
-  allPicks.forEach((p) => _settledBucketCounts[_biasBucketOf(p.edgePct)]++);
-  const _universeBucketCounts = [0, 0, 0, 0, 0];
-  _universePicks.forEach((p) => _universeBucketCounts[_biasBucketOf(p.edgePct)]++);
-  const _biasWeightByBucket = _settledBucketCounts.map((settledN, i) => {
-    if (settledN < 5 || !_universePicks.length || !allPicks.length) return 1;
-    const settledFrac = settledN / allPicks.length;
-    const universeFrac = _universeBucketCounts[i] / _universePicks.length;
-    if (settledFrac <= 0) return 1;
-    return clampNumber(universeFrac / settledFrac, 0.25, 4.0);
-  });
-  allPicks.forEach((p) => {
-    p._biasWeight = _biasWeightByBucket[_biasBucketOf(p.edgePct)];
-  });
-  try {
-    engineDebug("Settled-sample selection-bias audit", {
-      settledBucketCounts: _settledBucketCounts,
-      universeBucketCounts: _universeBucketCounts,
-      weights: _biasWeightByBucket,
-    });
-    localStorage.setItem(
-      "BB_SETTLED_BIAS_AUDIT",
-      JSON.stringify({
-        settledBucketCounts: _settledBucketCounts,
-        universeBucketCounts: _universeBucketCounts,
-        weights: _biasWeightByBucket,
-        ts: new Date().toISOString(),
-      }),
-    );
-  } catch (e) {
-    engineDebug("Settled bias audit computation/save failed", { error: e?.message || String(e) });
-  }
-
   const _chronoSorted = allPicks
     .slice()
     .sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0));
   const _calSplitIdx = Math.floor(_chronoSorted.length * 0.8);
   const fitPicks = _chronoSorted.slice(0, _calSplitIdx);
   const calPicks = _chronoSorted.slice(_calSplitIdx);
+  const _biasBucketOf = (edgePctVal) => Math.max(0, Math.min(4, Math.floor(Math.abs(Number(edgePctVal) || 0) / 5)));
+  const _settledBucketCounts = [0, 0, 0, 0, 0];
+  fitPicks.forEach((p) => _settledBucketCounts[_biasBucketOf(p.edgePct)]++);
+  const _biasWeightByBucket = _settledBucketCounts.map((n) => n >= 5 ? 1 : 1);
+  fitPicks.forEach((p) => { p._biasWeight = _biasWeightByBucket[_biasBucketOf(p.edgePct)]; });
+  try {
+    localStorage.setItem("BB_SETTLED_BIAS_AUDIT", JSON.stringify({ settledBucketCounts: _settledBucketCounts, weights: _biasWeightByBucket, fitN: fitPicks.length, holdoutN: calPicks.length, ts: new Date().toISOString() }));
+  } catch (e) {}
 
   const gradeWinRates = { A: [], B: [], C: [], D: [] };
   fitPicks.forEach((p) => {
@@ -27675,7 +27617,7 @@ function calibrateConfidenceModel() {
     if (total >= 5) thresholds[g + "WinRate"] = wins / total;
   });
 
-  const winProbs = allPicks
+  const winProbs = fitPicks
     .map((p) => {
       const edgePct = isFinite(Number(p.edgePct))
         ? Number(p.edgePct) / 100
@@ -28017,9 +27959,7 @@ function checkModelHealth(league) {
     driftThreshold: Number(driftThreshold.toFixed(3)),
   };
 }
-
-   SECTION 28 — Validation and pre-run wiring
-   ======================================================================== */
+/* SECTION 28 — Validation and pre-run wiring */
 
 function getTrackedInputSource(marketKey = "ft") {
   const bucket = marketKey === "h1" ? "h1" : marketKey === "h2" ? "h2" : "ft";
@@ -32510,9 +32450,7 @@ function onLeagueChange() {
   }
   validateFetchSection();
 }
-
-   SECTION 33 — UI controls and theme
-   ======================================================================== */
+/* SECTION 33 — UI controls and theme */
 function applySystemTheme() {
 
   try {
@@ -33270,9 +33208,7 @@ const AFDB = (function () {
     TRACKER: "\ud83d\udcca",
     VERDICT: "\ud83c\udf96\ufe0f",
   };
-
-   SECTION 34 — AFDB debug console
-   ======================================================================== */
+/* SECTION 34 — AFDB debug console */
   function esc(s) {
     return String(s || "")
       .replace(/&/g, "&amp;")
@@ -33645,9 +33581,7 @@ const AFDB = (function () {
 </script>
 
 <script>
-
-   SECTION 35 — Self-auditor core
-   ======================================================================== */
+/* SECTION 35 — Self-auditor core */
 
 const EngineAuditor = (function () {
 
@@ -37090,6 +37024,7 @@ const EngineAuditor = (function () {
     return { code: out, state: state };
   }
 
+  /*
    *  contents intact. Needed for id-bearing calls such as a getElementById lookup, where
    *  the id text itself lives inside the string and must survive the strip, while an
    *  id-bearing call mentioned only inside a comment must not be picked up as live. */
@@ -37470,7 +37405,7 @@ const EngineAuditor = (function () {
     "resolveConfidenceGradeFromWinProbability",
     "buildConfidenceFeatures",
   ];
-  const _FORENSIC_CALC_RE = /(?:Math\.(?:sqrt|log|log1p|exp|pow|abs|min|max|round|floor|ceil|hypot)\s*\()|(?:^|[^/])\/(?:[^
+  const _FORENSIC_CALC_RE = /Math\.(?:sqrt|log|log1p|exp|pow|abs|min|max|round|floor|ceil|hypot)\s*\(|\b(?:Number|Math)\./;
   const _FORENSIC_CORE_NAME_RE = /(?:compute|projection|project|derive|h2h|volatility|confidence|probability|edge|pace|ortg|drtg|pick|market|settle|anchor|blend|average|avg|stddev|variance|shrink)/i;
   const _FORENSIC_BUILTINS = new Set([
     "if","for","while","switch","catch","with","function","return","typeof","instanceof","new",
@@ -37678,7 +37613,7 @@ const EngineAuditor = (function () {
 
   function forensicFindMatchingBrace(src, openIndex) {
 
-       declaration's own brace; one malformed literal elsewhere must not poison the
+    /* declaration's own brace; one malformed literal elsewhere must not poison the
        entire program inventory. Template literals are skipped as complete lexical
        units, including ${...} expressions and nested template literals. */
     let depth = 0;
@@ -37806,8 +37741,6 @@ const EngineAuditor = (function () {
 
   function forensicBuildBracePairs(src) {
 
-       independently by forensicFindMatchingBrace so global brace poisoning cannot
-       invalidate the inventory. */
     return new Map();
   }
 
@@ -38008,9 +37941,7 @@ const EngineAuditor = (function () {
     }
     return out;
   }
-
-   SECTION 36 — Forensic layers
-   ======================================================================== */
+/* SECTION 36 — Forensic layers */
   function forensicStaticProgramAnalysis(src, functions, auditStartLine, auditEndLine) {
     _forensicCurrentLayerKey = "STATIC_PROGRAM_ANALYSIS";
     const text = String(src || "");
@@ -38099,8 +38030,6 @@ const EngineAuditor = (function () {
     _forensicState.inventoriedFunctionCount = inventoriedFunctionNames.size;
     _forensicState.missingFunctionNames = missingFunctionNames;
 
-       inventoried, but improved parsers may discover additional legitimate functions.
-       Extra inventory entries are not evidence of incompleteness. */
     _forensicState.functionInventoryComplete = missingFunctionNames.length === 0 && malformedFunctions.length === 0;
     const callGraphFunctionCount = productFns.length;
     const callGraphEdgeArrayOk = Array.isArray(_forensicState.callEdges);
@@ -38189,9 +38118,6 @@ const EngineAuditor = (function () {
     }
     const registryComplete = registryIds.size === 45 && Array.from({ length: 45 }, (_, i) => registryIds.has(i + 1)).every(Boolean);
 
-       Each lock's behavior is verified by the dedicated regression/forensic tests;
-       this layer must never create 45 false violations merely because the product
-       source does not literally contain the text "LOCK-N". */
     if (registryComplete) {
       forensicAdd("INFO", "Lock registry complete",
         "Top lock registry resolves to all 45 LOCK-1..LOCK-45 contract seats.",
@@ -41820,7 +41746,7 @@ document.addEventListener("DOMContentLoaded", function () {
         const _orig = proxyFetch;
         window.proxyFetch = async function (url, timeout) {
           const short = String(url || "")
-            .replace(/https:\/\/site\.api\.espn\.com\/apis\/site\/v2\/sports\/basketball\
+            .replace(/https:\/\/site\.api\.espn\.com\/apis\/site\/v2\/sports\/basketball\//, "ESPN/basketball/")
             .replace(/https:\/\/site\.api\.espn\.com\/apis\/site\/v2\/sports\//, "ESPN/");
           try {
             return await _orig.apply(this, arguments);
