@@ -184,7 +184,8 @@ body {
   background-color: var(--bg);
 }
 body.dark-mode,
-body.dark-mode html {
+html.dark-mode,
+html:has(body.dark-mode) {
   background-color: #0c0c0c;
 }
 
@@ -4886,7 +4887,7 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
     }
   });
 
-  updateLeagueVolCache(document.getElementById("leagueSelect")?.value || "", scoredList);
+  updateLeagueVolCache(document.getElementById("leagueSelect")?.value || "", scoredList, eventIds);
 
   return {
     scoredList,
@@ -5197,13 +5198,19 @@ async function ssFetchAndAttachPace(side, stats, gen) {
 }
 
 function ssKickoffPaceEnrichment(bundle, gen) {
-  
+  // LOCKED PERMANENTLY: SofaScore statistics fan-out is intentionally blocked.
+  // Do not reactivate the legacy endpoint. Legacy fan-out below is unreachable by design.
   window.__ssSofaStatsBlocked = true;
   if (typeof ssRenderPaceStatus === "function") ssRenderPaceStatus();
   return;
+  /* LEGACY UNREACHABLE (kept for audit trail; permanently disabled):
   const jobs = [];
   if (bundle && bundle.A) jobs.push(ssFetchAndAttachPace("A", bundle.A, gen));
   if (bundle && bundle.B) jobs.push(ssFetchAndAttachPace("B", bundle.B, gen));
+  */
+  const jobs = [];
+  if (false && bundle && bundle.A) jobs.push(ssFetchAndAttachPace("A", bundle.A, gen));
+  if (false && bundle && bundle.B) jobs.push(ssFetchAndAttachPace("B", bundle.B, gen));
   const done = function () {
     ssRenderPaceStatus();
     if (typeof invalidateFetchedAudit === "function") invalidateFetchedAudit();
@@ -5230,7 +5237,7 @@ function clearPasteJSON(side) {
   window.__ssLastPasteMsg = "";
 }
 
-window.__jsonPasteCountA = 0;
+/* window.__jsonPasteCountA removed — was dead diagnostic state */
 window.__jsonPasteCountB = 0;
 
 function updateSofascoreLinks(side) {
@@ -5857,7 +5864,8 @@ function parseSofascoreIndividual(side) {
     else window.__lastEventsB = mergedEvents;
 
     if (side === "A") {
-      window.__jsonPasteCountA = (window.__jsonPasteCountA || 0) + 1;
+      /* __jsonPasteCountA was dead diagnostic state — removed production mutation */
+if (typeof engineDebug === "function") engineDebug("json paste A path", { note: "diagnostic only" });
     } else {
       window.__jsonPasteCountB = (window.__jsonPasteCountB || 0) + 1;
     }
@@ -9023,38 +9031,343 @@ function actualForMarket(pick) {
   return Number.isFinite(parsed.total) ? parsed.total : NaN;
 }
 
+
+/**
+ * AUTHORITATIVE quarter projection — single source for production and tuner.
+ * Both live computeQ and computeQuarterTunerProjection must call this.
+ */
+function computeQuarterProjection({
+  qKey,
+  lineVal = null,
+  league = "",
+  parsed = null,
+  injA = 1,
+  injB = 1,
+  config = {},
+  contextData = null,
+  siblingEdge = null,
+  skipPickAndGrade = false,
+} = {}) {
+  try {
+    if (typeof g_currentLiveComputeMarket !== "undefined") g_currentLiveComputeMarket = qKey;
+  } catch (_e) {}
+
+  const _ctxRoot =
+    contextData ||
+    (typeof AppState !== "undefined" && AppState.context ? AppState.context.data : null) ||
+    {};
+  const _parsed = parsed || {};
+
+
+      const aS = getManualSeries("A", qKey, _parsed, _ctxRoot);
+      const bS = getManualSeries("B", qKey, _parsed, _ctxRoot);
+
+      const _dateAwareAvgAQ = getDateAwareOrFallbackAverage(aS, "A", qKey, _ctxRoot, league);
+      const _dateAwareAvgBQ = getDateAwareOrFallbackAverage(bS, "B", qKey, _ctxRoot, league);
+
+      const pKeyA = "a" + qKey.toUpperCase() + "Allowed";
+      const pKeyB = "b" + qKey.toUpperCase() + "Allowed";
+      const aA =
+        _parsed[pKeyA] && _parsed[pKeyA].length
+          ? _parsed[pKeyA]
+          : (_ctxRoot.A && _ctxRoot.A[qKey + "Allowed"]) || [];
+      const bA =
+        _parsed[pKeyB] && _parsed[pKeyB].length
+          ? _parsed[pKeyB]
+          : (_ctxRoot.B && _ctxRoot.B[qKey + "Allowed"]) || [];
+
+      const volLimit = getMarketVolLimit(league, qKey);
+      const _qVolA = getVolatilityRatioForSeries(aS, volLimit);
+      const _qVolB = getVolatilityRatioForSeries(bS, volLimit);
+      const qVolRatio = Math.min(
+        2.5,
+        Math.sqrt(
+          (Number.isFinite(_qVolA) ? _qVolA : 1) ** 2 + (Number.isFinite(_qVolB) ? _qVolB : 1) ** 2,
+        ),
+      );
+      const qCombinedVolPts =
+        Number.isFinite(qVolRatio) && Number.isFinite(volLimit) ? qVolRatio * volLimit : stdDev(aS.concat(bS));
+      const sampleSize = Math.min(aS.length, bS.length);
+
+      const leagueBaseQ = getLeagueScoreBase(league) / 8;
+
+      const ctxAQ = _ctxRoot.A || {};
+      const ctxBQ = _ctxRoot.B || {};
+
+      const hasAdvancedQ =
+        isFinite(avgOrNaN(ctxAQ.ortg10)) &&
+        isFinite(avgOrNaN(ctxAQ.drtg10)) &&
+        isFinite(avgOrNaN(ctxBQ.ortg10)) &&
+        isFinite(avgOrNaN(ctxBQ.drtg10)) &&
+        isFinite(avgOrNaN(ctxAQ.pace10)) &&
+        avgOrNaN(ctxAQ.pace10) > 0 &&
+        isFinite(avgOrNaN(ctxBQ.pace10)) &&
+        avgOrNaN(ctxBQ.pace10) > 0 &&
+        (ctxAQ.ortg10 || []).length >= 5 &&
+        (ctxBQ.ortg10 || []).length >= 5;
+
+      const leaguePaceBaseQ =
+        LEAGUE_PACE_BASES[league] ||
+        LEAGUE_PACE_BASES.default ||
+        74 * ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown);
+      const leagueRatingBaseQ =
+        LEAGUE_RATING_BASES[league] ||
+        LEAGUE_RATING_BASES.default *
+          ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown) ||
+        110;
+
+      const isEspnLeagueQ = Object.prototype.hasOwnProperty.call(ESPN_LEAGUE_SLUGS, league);
+
+      let projA, projB;
+      const _dynWeightsQ = getDynamicWeights(
+        getSampleTier(aS, bS),
+        qVolRatio,
+        league,
+      ); 
+      const _twQ = isFinite(_dynWeightsQ?.teamWeight) ? Number(_dynWeightsQ.teamWeight) : 0.65;
+      const _owQ = 1 - _twQ;
+      const projA_pts = anchorProjection(
+        _dateAwareAvgAQ * _twQ + avgOrNaN(bA) * _owQ,
+        sampleSize,
+        leagueBaseQ,
+      );
+      const projB_pts = anchorProjection(
+        _dateAwareAvgBQ * _twQ + avgOrNaN(aA) * _owQ,
+        sampleSize,
+        leagueBaseQ,
+      );
+
+      {
+        const _qRegMinutes = getLeagueRegulationMinutes(league) || 48;
+        const _qPeriods = (typeof LEAGUE_FETCH_RULES !== "undefined" && LEAGUE_FETCH_RULES[league] && LEAGUE_FETCH_RULES[league].regulationPeriods) || 4;
+        const qMins = _qRegMinutes / Math.max(1, Number(_qPeriods) || 4); 
+        const qDivisor = 400 * (48 / _qRegMinutes);
+        const _advAQ =
+          typeof getPeriodAdvancedSeries === "function"
+            ? getPeriodAdvancedSeries(ctxAQ, qKey)
+            : { ortg: [], drtg: [], pace: [], source: "none" };
+        const _advBQ =
+          typeof getPeriodAdvancedSeries === "function"
+            ? getPeriodAdvancedSeries(ctxBQ, qKey)
+            : { ortg: [], drtg: [], pace: [], source: "none" };
+        let ortgA_q, drtgA_q, ortgB_q, drtgB_q, synPaceQ;
+
+        if (_advAQ.source === qKey && _advBQ.source === qKey) {
+          ortgA_q = avgOrNaN(_advAQ.ortg);
+          drtgA_q = avgOrNaN(_advAQ.drtg);
+          ortgB_q = avgOrNaN(_advBQ.ortg);
+          drtgB_q = avgOrNaN(_advBQ.drtg);
+          const pA = avgOrNaN(_advAQ.pace);
+          const pB = avgOrNaN(_advBQ.pace);
+          synPaceQ =
+            isFinite(pA) && pA > 0 && isFinite(pB) && pB > 0
+              ? (pA + pB) / 2
+              : LEAGUE_PACE_BASES[league] || LEAGUE_PACE_BASES.default || 99.5;
+        } else {
+          ortgA_q = NaN;
+          drtgA_q = NaN;
+          ortgB_q = NaN;
+          drtgB_q = NaN;
+          synPaceQ = NaN;
+        }
+
+        const hasNativeAdvQ =
+          isFinite(ortgA_q) && isFinite(drtgA_q) && isFinite(ortgB_q) && isFinite(drtgB_q);
+
+        if (hasNativeAdvQ) {
+          const projRatingAQ = ortgA_q + drtgB_q - leagueRatingBaseQ;
+          const projRatingBQ = ortgB_q + drtgA_q - leagueRatingBaseQ;
+          const projA_adv = (synPaceQ * projRatingAQ) / qDivisor;
+          const projB_adv = (synPaceQ * projRatingBQ) / qDivisor;
+          const advTotalQ =
+            (isFinite(projA_adv) ? projA_adv : 0) + (isFinite(projB_adv) ? projB_adv : 0);
+          const advSaneQ =
+            isFinite(advTotalQ) &&
+            advTotalQ >= leagueBaseQ * 1.4 &&
+            advTotalQ <= leagueBaseQ * 2.6 &&
+            isFinite(projA_adv) &&
+            isFinite(projB_adv);
+          const _advWQ = isFinite(config?.advancedBlendWeight)
+            ? Number(config.advancedBlendWeight)
+            : isFinite(getParam("advancedBlendWeight", league))
+              ? Number(getParam("advancedBlendWeight", league))
+              : 0.45;
+          if (advSaneQ && _advWQ > 0) {
+            const w = Math.max(0, Math.min(1, _advWQ));
+            projA = projA_pts * (1 - w) + projA_adv * w;
+            projB = projB_pts * (1 - w) + projB_adv * w;
+          } else {
+            projA = projA_pts;
+            projB = projB_pts;
+          }
+        } else {
+          projA = projA_pts;
+          projB = projB_pts;
+        }
+      }
+
+      projA = applyVolatility(projA, aS, volLimit, league);
+      projB = applyVolatility(projB, bS, volLimit, league);
+
+      projA *= injA;
+      projB *= injB;
+
+      const _qInjOppBoostFactor =
+        getParam("injuryOppBoostFactor", league) ?? INJURY_OPPONENT_BOOST_FACTOR;
+      if (injA < 1) projB *= 1 + Math.min(0.2, (1 - injA) * _qInjOppBoostFactor);
+      if (injB < 1) projA *= 1 + Math.min(0.2, (1 - injB) * _qInjOppBoostFactor);
+
+      const aH2H = getH2HSeries("A", qKey, _parsed);
+      const bH2H = getH2HSeries("B", qKey, _parsed);
+      const hasH2H = maybeReadH2HEnabled(qKey) && aH2H.length >= 2 && bH2H.length >= 2;
+      const tier = getSampleTier(aS, bS);
+
+      const qFullModel = tier === "full";
+      const qProjectionOnly = !hasH2H && tier === "thin";
+      const _qPaceA10 = avgOrNaN(ctxAQ.pace10);
+      const _qPaceB10 = avgOrNaN(ctxBQ.pace10);
+      const _qPaceGapRisk = Number.isFinite(_qPaceA10) && Number.isFinite(_qPaceB10)
+        ? Math.abs(_qPaceA10 - _qPaceB10) > 6
+        : false;
+      if (hasH2H) {
+        const massacreH2HQ = getMassacreH2HSeries(qKey, typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null, _parsed);
+        const decayH2HA = massacreH2HQ.A.length >= 2 ? massacreH2HQ.A : aH2H;
+        const decayH2HB = massacreH2HQ.B.length >= 2 ? massacreH2HQ.B : bH2H;
+
+        const usedDecayA = massacreH2HQ.A.length >= 2;
+        const usedDecayB = massacreH2HQ.B.length >= 2;
+
+        const _qH2hW = massacreH2HQ.weights;
+        const avgH2HA =
+          _qH2hW && _qH2hW.length === decayH2HA.length
+            ? (() => {
+                let sv = 0,
+                  sw = 0;
+                for (let i = 0; i < decayH2HA.length; i++) {
+                  const v = Number(decayH2HA[i]),
+                    w = Number(_qH2hW[i]);
+                  if (isFinite(v) && isFinite(w) && w > 0) {
+                    sv += v * w;
+                    sw += w;
+                  }
+                }
+                return sw > 0 ? sv / sw : avgOrNaN(decayH2HA);
+              })()
+            : avgOrNaN(decayH2HA);
+        const avgH2HB =
+          _qH2hW && _qH2hW.length === decayH2HB.length
+            ? (() => {
+                let sv = 0,
+                  sw = 0;
+                for (let i = 0; i < decayH2HB.length; i++) {
+                  const v = Number(decayH2HB[i]),
+                    w = Number(_qH2hW[i]);
+                  if (isFinite(v) && isFinite(w) && w > 0) {
+                    sv += v * w;
+                    sw += w;
+                  }
+                }
+                return sw > 0 ? sv / sw : avgOrNaN(decayH2HB);
+              })()
+            : avgOrNaN(decayH2HB);
+        const _qModelTotal = (isFinite(projA) ? projA : 0) + (isFinite(projB) ? projB : 0);
+        const _qH2hTotal = (isFinite(avgH2HA) ? avgH2HA : 0) + (isFinite(avgH2HB) ? avgH2HB : 0);
+        const _qH2hDivergence =
+          isFinite(avgH2HA) && isFinite(avgH2HB) ? Math.abs(_qH2hTotal - _qModelTotal) : 0;
+        const _qH2hFactor = isFinite(config?.h2hFactor) ? Number(config.h2hFactor) : 1.0;
+        const hw = getH2HWeight(
+          decayH2HA.length,
+          decayH2HB.length,
+          qKey,
+          tier,
+          _qH2hDivergence,
+          league,
+          leagueBaseQ * 2,
+          _qH2hFactor,
+          {
+            enabled: hasH2H,
+            injMultA: injA,
+            injMultB: injB,
+            volRatio: qVolRatio,
+            blowoutGap: Math.abs(projA - projB),
+            paceGapRisk: _qPaceGapRisk,
+          },
+        );
+        projA = isFinite(avgH2HA) ? projA * (1 - hw) + avgH2HA * hw : projA;
+        projB = isFinite(avgH2HB) ? projB * (1 - hw) + avgH2HB * hw : projB;
+
+        const _aInjAdjBaselineQ =
+          avgOrNaN(aS) * injA * (injB < 1 ? 1 + (1 - injB) * _qInjOppBoostFactor : 1);
+        const _bInjAdjBaselineQ =
+          avgOrNaN(bS) * injB * (injA < 1 ? 1 + (1 - injA) * _qInjOppBoostFactor : 1);
+        projA = applyVolatility(projA, aS, volLimit, league, _aInjAdjBaselineQ);
+        projB = applyVolatility(projB, bS, volLimit, league, _bInjAdjBaselineQ);
+      }
+
+      const qProj = projA + projB;
+      const qEdge = lineVal ? qProj - lineVal : NaN;
+      const qPick = getPick(qEdge, lineVal, league, qKey, { aSc: avgOrNaN(aS), bSc: avgOrNaN(bS) });
+
+      const qTrap = detectTrap(qEdge, lineVal, qPick, league, qKey, qCombinedVolPts);
+      const qConf = getConfidenceGrade({
+        pick: qPick,
+        line: lineVal,
+        edge: qEdge,
+        sampleTier: tier,
+        volatility: qCombinedVolPts,
+        volLimit,
+        fullModel: qFullModel,
+        projectionOnly: qProjectionOnly,
+        trap: qTrap,
+
+        paceGapRisk: _qPaceGapRisk,
+        blowoutGap: Math.abs(projA - projB),
+
+        marketKey: qKey,
+        hasH2H: hasH2H,
+
+        siblingEdge: siblingEdge,
+        league,
+      });
+
+      const qPaceGapRisk = _qPaceGapRisk;
+
+      return {
+        proj: qProj,
+        edge: qEdge,
+        line: lineVal,
+        pick: qPick,
+        confidence: qConf,
+        tier,
+        projA,
+        projB,
+        hasH2H,
+        volatility: qCombinedVolPts,
+        fullModel: qFullModel,
+        projectionOnly: qProjectionOnly,
+        paceGapRisk: qPaceGapRisk,
+        preAnchorProjA: projA,
+        preAnchorProjB: projB,
+        preAnchorProjTotal: qProj,
+      };
+    
+}
+
 function computeQuarterTunerProjection(marketKey, parsed, league, injMultA, injMultB, contextData) {
-
-  const aS = typeof getManualSeries === "function" ? getManualSeries("A", marketKey, parsed, contextData) : [];
-  const bS = typeof getManualSeries === "function" ? getManualSeries("B", marketKey, parsed, contextData) : [];
-  const aA = typeof getManualAllowedSeries === "function" ? getManualAllowedSeries("A", marketKey, parsed, contextData) : [];
-  const bA = typeof getManualAllowedSeries === "function" ? getManualAllowedSeries("B", marketKey, parsed, contextData) : [];
-  const avgAS = typeof getDateAwareOrFallbackAverage === "function" ? getDateAwareOrFallbackAverage(aS, "A", marketKey, contextData, league) : NaN;
-  const avgBS = typeof getDateAwareOrFallbackAverage === "function" ? getDateAwareOrFallbackAverage(bS, "B", marketKey, contextData, league) : NaN;
-  const avgAA = typeof avgOrNaN === "function" ? avgOrNaN(aA) : NaN;
-  const avgBA = typeof avgOrNaN === "function" ? avgOrNaN(bA) : NaN;
-  const volLimit = typeof getMarketVolLimit === "function" ? getMarketVolLimit(league, marketKey) : 4;
-  const volA = typeof getVolatilityRatioForSeries === "function" ? getVolatilityRatioForSeries(aS, volLimit) : 1;
-  const volB = typeof getVolatilityRatioForSeries === "function" ? getVolatilityRatioForSeries(bS, volLimit) : 1;
-  const qVol = Math.min(2.5, Math.sqrt((Number.isFinite(volA) ? volA : 1) ** 2 + (Number.isFinite(volB) ? volB : 1) ** 2));
-  const w = typeof getDynamicWeights === "function" ? getDynamicWeights(typeof getSampleTier === "function" ? getSampleTier(aS, bS) : "full", qVol, league) : { teamWeight: 0.65 };
-  const tw = Number.isFinite(w.teamWeight) ? Number(w.teamWeight) : 0.65;
-  const ow = 1 - tw;
-  const base = (typeof getLeagueScoreBase === "function" ? getLeagueScoreBase(league) : 160) / 8;
-  let projA = Number.isFinite(avgAS) && Number.isFinite(avgBA) ? avgAS * tw + avgBA * ow : avgAS;
-  let projB = Number.isFinite(avgBS) && Number.isFinite(avgAA) ? avgBS * tw + avgAA * ow : avgBS;
-  if (typeof anchorProjection === "function") {
-    const n = Math.min(aS.length || 0, bS.length || 0);
-    if (Number.isFinite(projA)) projA = anchorProjection(projA, n, base);
-    if (Number.isFinite(projB)) projB = anchorProjection(projB, n, base);
-  }
-  const mA = Number.isFinite(Number(injMultA)) ? Number(injMultA) : 1;
-  const mB = Number.isFinite(Number(injMultB)) ? Number(injMultB) : 1;
-  if (Number.isFinite(projA)) projA *= mA;
-  if (Number.isFinite(projB)) projB *= mB;
-
-  if (!Number.isFinite(projA) || !Number.isFinite(projB)) return NaN;
-  const total = projA + projB;
+  // Single authoritative path: same math as live production computeQ / computeQuarterProjection.
+  if (typeof computeQuarterProjection !== "function") return NaN;
+  const result = computeQuarterProjection({
+    qKey: marketKey,
+    lineVal: null,
+    league: league,
+    parsed: parsed,
+    injA: Number.isFinite(Number(injMultA)) ? Number(injMultA) : 1,
+    injB: Number.isFinite(Number(injMultB)) ? Number(injMultB) : 1,
+    config: {},
+    contextData: contextData || null,
+    siblingEdge: null,
+  });
+  const total = result && Number.isFinite(result.proj) ? result.proj : NaN;
   return Number.isFinite(total) && total > 0 ? total : NaN;
 }
 
@@ -9207,9 +9520,10 @@ function evaluatePickWithParams(pick, paramOverrides) {
     );
     try {
       const _distProb = distributionWinProbability(edge, volLimit || 12, volRatio);
+      // Confidence-primary blend (0.7 conf / 0.3 dist); distribution alone only if primary missing.
       if (Number.isFinite(_distProb)) {
         winProbability = Number.isFinite(winProbability)
-          ? clampNumber(0.7 * _distProb + 0.3 * winProbability, 0.02, 0.98)
+          ? clampNumber(0.3 * _distProb + 0.7 * winProbability, 0.02, 0.98)
           : _distProb;
       }
     } catch (_e) {
@@ -10030,8 +10344,25 @@ async function runRetrospectiveAnalysis(pick) {
                 updatedAt: new Date().toISOString(),
               }),
             );
+            // Authoritative persistence for the learning lifecycle (proposal + stored weights).
+            // Production reader getLearnedRecencyWeights remains the single consumer;
+            // save ensures learn → persist → reload is connected.
+            if (typeof saveLearnedRecencyWeights === "function") {
+              saveLearnedRecencyWeights(
+                league,
+                marketKey === "h1" ? "h1" : "ft",
+                learnedConfig.recencyProfile,
+                {
+                  applied: false,
+                  configKey: best.configKey,
+                  sampleCount: best.sampleCount,
+                  netDelta: best.netDelta,
+                  source: "retrospective_tuner",
+                },
+              );
+            }
           } catch (_eProp) {}
-          engineDebug("Learned recency profile proposed (not auto-applied)", {
+          engineDebug("Learned recency profile proposed + persisted", {
             league,
             marketKey,
             weights: learnedConfig.recencyProfile,
@@ -11028,23 +11359,51 @@ function saveVolCache(cache) {
   }
 }
 
-function updateLeagueVolCache(league, values) {
+function updateLeagueVolCache(league, values, sampleIds) {
+  // Stable event/sample identities are mandatory so the same game can never be
+  // counted again merely because its score/value appears in another fetch.
   const key = String(league || "").toLowerCase();
   if (!key) return;
-  const clean = Array.isArray(values) ? values.map(Number).filter((v) => isFinite(v) && v > 0) : [];
-  if (!clean.length) return;
+  if (!Array.isArray(values) || !Array.isArray(sampleIds)) return;
+  if (values.length !== sampleIds.length) return;
+
+  const samples = [];
+  for (let i = 0; i < values.length; i++) {
+    const value = Number(values[i]);
+    const rawId = sampleIds[i];
+    if (!isFinite(value) || value <= 0 || rawId == null || String(rawId).trim() === "") continue;
+    samples.push({ value, id: String(rawId) });
+  }
+  if (!samples.length) return;
 
   const cache = loadVolCache();
-  const entry = cache[key] || { n: 0, mean: 0, m2: 0 };
+  const entry = cache[key] || { n: 0, mean: 0, m2: 0, seen: {} };
+  if (!entry.seen || typeof entry.seen !== "object") entry.seen = {};
 
-  clean.forEach((v) => {
+  samples.forEach(({ value, id }) => {
     if (entry.n >= VOL_CACHE_MAX_SAMPLES) return;
+    // Event identity is the only accepted deduplication key. Never fall back
+    // to score/value/index because those are not stable identities across fetches.
+    const sid = id;
+    if (entry.seen[sid]) return;
+    entry.seen[sid] = 1;
     entry.n += 1;
-    const delta = v - entry.mean;
+    const delta = value - entry.mean;
     entry.mean += delta / entry.n;
-    const delta2 = v - entry.mean;
+    const delta2 = value - entry.mean;
     entry.m2 += delta * delta2;
   });
+
+  // Bound seen-map size to avoid unbounded growth
+  const seenKeys = Object.keys(entry.seen);
+  if (seenKeys.length > VOL_CACHE_MAX_SAMPLES * 3) {
+    const keep = seenKeys.slice(-VOL_CACHE_MAX_SAMPLES * 2);
+    const next = {};
+    keep.forEach((k) => {
+      next[k] = entry.seen[k];
+    });
+    entry.seen = next;
+  }
 
   entry.updatedAt = new Date().toISOString();
   cache[key] = entry;
@@ -13990,6 +14349,27 @@ function matchesTeam(competitor, teamId) {
   return false;
 }
 const _proxyFetchCache = new Map();
+const PROXY_FETCH_CACHE_MAX = 200;
+function _proxyFetchCacheEvictIfNeeded() {
+  // Bounded lifecycle: drop expired entries first, then oldest by timestamp if still over max.
+  const now = Date.now();
+  for (const [k, v] of _proxyFetchCache) {
+    const ttl = (() => {
+      const s = String(k || "");
+      if (/\/injuries|\/scoreboard|\/summary\?event=/i.test(s)) return 3 * 60 * 1000;
+      return 15 * 60 * 1000;
+    })();
+    if (!v || now - (v.timestamp || 0) >= ttl) _proxyFetchCache.delete(k);
+  }
+  if (_proxyFetchCache.size <= PROXY_FETCH_CACHE_MAX) return;
+  const entries = Array.from(_proxyFetchCache.entries()).sort(
+    (a, b) => (a[1].timestamp || 0) - (b[1].timestamp || 0),
+  );
+  const overflow = _proxyFetchCache.size - PROXY_FETCH_CACHE_MAX;
+  for (let i = 0; i < overflow && i < entries.length; i++) {
+    _proxyFetchCache.delete(entries[i][0]);
+  }
+}
 async function proxyFetch(url, timeoutMs = 12000) {
   if (url == null || url === "" || String(url).includes("/undefined") || String(url).includes("/null/")) {
     const err = new Error("proxyFetch blocked — invalid URL (undefined/null path segment)");
@@ -14012,6 +14392,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       _proxyFetchCache.delete(cacheKey);
     }
   }
+  _proxyFetchCacheEvictIfNeeded();
 
   engineDebug("fetch start", { request: fetchLabel, timeoutMs });
 
@@ -14077,6 +14458,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       });
     }
     _proxyFetchCache.set(cacheKey, { data: workerData, timestamp: Date.now() });
+    _proxyFetchCacheEvictIfNeeded();
     return workerData;
   } catch (workerErr) {
     try {
@@ -14101,6 +14483,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       }
       const directData = await fetchJson(url, _espnDirect ? "DirectESPN" : "DirectSofa");
       _proxyFetchCache.set(cacheKey, { data: directData, timestamp: Date.now() });
+      _proxyFetchCacheEvictIfNeeded();
       return directData;
     } catch (directErr) {
       engineDebug("Direct allowlisted fetch failed — no unverified public proxy fallback", {
@@ -18758,6 +19141,8 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
     }
 
     if (advisoryOnly) {
+      // Advisory path: write diagnostic/tracker metadata only.
+      // Must NEVER mutate fields that influence production lock eligibility.
       p.trackerSoftInfluence = {
         applied: true,
         advisoryOnly: true,
@@ -18771,11 +19156,11 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
                 ? "shadow_lock_restrict"
                 : "shadow_keep",
         confidenceShift,
-        lockRestricted,
-        hypotheticalNoPlay,
+        lockRestricted: !!lockRestricted,
+        hypotheticalNoPlay: !!hypotheticalNoPlay,
         reasons,
       };
-      if (lockRestricted) p.lockRestricted = true;
+      // Intentionally do NOT set p.lockRestricted when advisoryOnly.
       return;
     }
 
@@ -21149,9 +21534,10 @@ function selectLock(markets) {
         _fallbackVolLimit,
         volRatio,
       );
+      // Confidence-primary blend (same as getConfidenceGrade / production lock path).
       if (Number.isFinite(_fallbackDistProb)) {
         _reconstructed = Number.isFinite(_reconstructed)
-          ? clampNumber(0.7 * _fallbackDistProb + 0.3 * _reconstructed, 0.02, 0.98)
+          ? clampNumber(0.3 * _fallbackDistProb + 0.7 * _reconstructed, 0.02, 0.98)
           : _fallbackDistProb;
       }
     } catch (_fallbackBlendErr) {
@@ -21284,15 +21670,18 @@ function getMarginConfidenceInputs(edge, referenceScale, combinedStdDev, marginV
   return { marginEdgePct, marginVolRatio };
 }
 
-function detectMarginTrap(edge, referenceScale, league, marketKey, combinedStdDev, marginVolLimit) {
+function detectMarginTrap(edge, referenceScale, league, marketKey, combinedStdDev, marginVolLimit, marketLine) {
+  // referenceScale = projection scale for edge normalization only.
+  // marketLine = actual sportsbook line for line-movement tracking (never pass a model projection here).
   if (!Number.isFinite(edge) || edge === 0) return false;
   const inputs = getMarginConfidenceInputs(edge, referenceScale, combinedStdDev, marginVolLimit);
   if (!isFinite(inputs.marginEdgePct) || !isFinite(inputs.marginVolRatio)) return false;
 
   const side = edge > 0 ? "home" : "away";
+  const lineForMove = Number.isFinite(marketLine) ? marketLine : NaN;
   const move =
-    typeof getLineMoveAgainstSide === "function"
-      ? getLineMoveAgainstSide(league, marketKey, referenceScale, side)
+    typeof getLineMoveAgainstSide === "function" && Number.isFinite(lineForMove)
+      ? getLineMoveAgainstSide(league, marketKey, lineForMove, side)
       : { available: false, adverse: false };
   if (!(move.available && move.adverse)) return false;
 
@@ -21568,6 +21957,8 @@ function isConfidenceCoeffFitted(league) {
 }
 
 function isConfidenceModelFitted(league) {
+  // Authoritative fitted check: same sample-count source as isConfidenceCoeffFitted
+  // (BB_CONFIDENCE_MODEL_COEFF_N), plus model-version guard.
   try {
     const stored = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
     if (!stored) return false;
@@ -21575,11 +21966,35 @@ function isConfidenceModelFitted(league) {
     const _mv = models.modelVersion || models._modelVersion;
     const _cur = typeof getCurrentModelVersion === "function" ? getCurrentModelVersion() : null;
     if (_mv && _cur && String(_mv) !== String(_cur)) return false;
-    let coeff = models[league] || {};
+    // Delegate sample-count + coefficient key checks to the single authoritative helper.
+    if (typeof isConfidenceCoeffFitted === "function") {
+      return isConfidenceCoeffFitted(league);
+    }
+    // Fallback (should not be needed): mirror isConfidenceCoeffFitted logic.
+    const leagueGroup =
+      league === "nba" ? "nba" : league === "ncaa" || league === "ncaaw" ? "ncaa" : "other";
+    let _resolvedScope = "global";
+    let coeff;
+    if (models[league]) {
+      coeff = models[league];
+      _resolvedScope = league;
+    } else if (models[leagueGroup]) {
+      coeff = models[leagueGroup];
+      _resolvedScope = leagueGroup;
+    } else {
+      coeff = models["global"];
+      _resolvedScope = "global";
+    }
     const keys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
-    if (!keys.every(function (k) { return Number.isFinite(coeff[k]); })) return false;
-    let n = Number(coeff.n || coeff.sample || 0);
-    return n >= 40;
+    if (!keys.every(function (k) { return Number.isFinite(coeff && coeff[k]); })) return false;
+    let _coeffN = 0;
+    try {
+      const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
+      _coeffN = Number(nMap[_resolvedScope] || nMap.global || 0);
+    } catch (_e) {
+      _coeffN = 0;
+    }
+    return _coeffN >= 40;
   } catch (_e) {
     return false;
   }
@@ -21667,16 +22082,22 @@ function getConfidenceGrade(params) {
     },
   );
 
+  // Distribution CDF is diagnostic + optional blend only. Primary production probability remains
+  // getConfidenceWinProbability unless model is unfitted and winProb is non-finite.
   try {
     const _volLimitPts = getMarketVolLimit(league, params?.marketKey || "ft") || 12;
     const _distProb = distributionWinProbability(edge, _volLimitPts, volRatio);
     if (Number.isFinite(_distProb)) {
+      params = params || {};
+      params._distributionWinProbDiagnostic = _distProb; // diagnostic only
       if (Number.isFinite(winProb)) {
-        winProb = clampNumber(0.7 * _distProb + 0.3 * winProb, 0.02, 0.98);
+        // Explicit validated blend (not silent replace): confidence-model primary, distribution secondary.
+        winProb = clampNumber(0.3 * _distProb + 0.7 * winProb, 0.02, 0.98);
       } else {
+        // Only when primary is missing may distribution supply a production value.
         winProb = _distProb;
       }
-      engineDebug("Distribution-primary winProb", {
+      engineDebug("Distribution-blend winProb (primary=confidence model)", {
         league,
         marketKey: params?.marketKey,
         distributionWinProb: _distProb,
@@ -21692,7 +22113,8 @@ function getConfidenceGrade(params) {
   if (Number.isFinite(winProb) && !isConfidenceModelFitted(league)) {
     winProb = Math.min(winProb, 0.72);
   }
-  if (params && params.injuryFetchFailed) {
+  // Authoritative injury-fetch status (params OR live AppState), not only optional param.
+  if (injuryFetchFailed) {
     winProb = Math.min(Number.isFinite(winProb) ? winProb : 0.5, 0.62);
   }
 
@@ -21756,12 +22178,13 @@ function getMarginConfidenceGrade(params) {
     if (isFinite(marginEdgePts) && isFinite(_volLim)) {
       const _distProb = distributionWinProbability(marginEdgePts, _volLim, volRatio);
       if (Number.isFinite(_distProb)) {
+        // Confidence-primary blend; distribution is secondary (same authority as getConfidenceGrade).
         if (Number.isFinite(winProb)) {
-          winProb = clampNumber(0.7 * _distProb + 0.3 * winProb, 0.02, 0.98);
+          winProb = clampNumber(0.3 * _distProb + 0.7 * winProb, 0.02, 0.98);
         } else {
           winProb = _distProb;
         }
-        engineDebug("Margin distribution-primary winProb", {
+        engineDebug("Margin distribution-blend winProb (primary=confidence model)", {
           league,
           marketKey: params?.marketKey,
           distributionWinProb: _distProb,
@@ -24571,8 +24994,10 @@ async function fetchESPNCore(league, teamAName, teamBName) {
           : fetchScheduleCore(espnBase, teamBId, league, teamBVenue, true))
       : null;
 
-    if (aStats?.scored?.length) updateLeagueVolCache(league, aStats.scored);
-    if (bStats?.scored?.length) updateLeagueVolCache(league, bStats.scored);
+    if (aStats?.scored?.length)
+      updateLeagueVolCache(league, aStats.scored, aStats.eventIds || null);
+    if (bStats?.scored?.length)
+      updateLeagueVolCache(league, bStats.scored, bStats.eventIds || null);
 
     if (aStats?.q1Scored?.length >= 2) {
       updateTeamQuarterShapeProfile(
@@ -25845,14 +26270,21 @@ function computeFTProjection({
   const _ow = 1 - _tw;
   const _missingDefenseA = !isFinite(bAllowed);
   const _missingDefenseB = !isFinite(aAllowed);
-  let _twEff = _tw;
-  let _owEff = _ow;
-  if (_missingDefenseA || _missingDefenseB) {
-    _twEff = Math.min(_tw, 0.55);
-    _owEff = 1 - _twEff;
+  // Handle missing defense independently per projection side (no global cross-contamination).
+  let _twEffA = _tw;
+  let _owEffA = _ow;
+  let _twEffB = _tw;
+  let _owEffB = _ow;
+  if (_missingDefenseA) {
+    _twEffA = Math.min(_tw, 0.55);
+    _owEffA = 1 - _twEffA;
   }
-  const aS_points = isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _twEff + bAllowed * _owEff : aS_pre;
-  const bS_points = isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _twEff + aAllowed * _owEff : bS_pre;
+  if (_missingDefenseB) {
+    _twEffB = Math.min(_tw, 0.55);
+    _owEffB = 1 - _twEffB;
+  }
+  const aS_points = isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _twEffA + bAllowed * _owEffA : aS_pre;
+  const bS_points = isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _twEffB + aAllowed * _owEffB : bS_pre;
 
   if (isEspnLeague && hasRealRatings && hasRealPace) {
     const _betaO = Math.min(1.5, Math.max(0.25, Number((typeof getParam === "function" ? getParam("advBetaOffense", league) : null) ?? 1.0)));
@@ -26290,16 +26722,22 @@ function compute1HProjection({
   const _ow1 = 1 - _tw1;
   const _missingDefenseA1 = !isFinite(bAllowed);
   const _missingDefenseB1 = !isFinite(aAllowed);
-  let _tw1Eff = _tw1;
-  let _ow1Eff = _ow1;
-  if (_missingDefenseA1 || _missingDefenseB1) {
-    _tw1Eff = Math.min(_tw1, 0.55);
-    _ow1Eff = 1 - _tw1Eff;
+  let _tw1EffA = _tw1;
+  let _ow1EffA = _ow1;
+  let _tw1EffB = _tw1;
+  let _ow1EffB = _ow1;
+  if (_missingDefenseA1) {
+    _tw1EffA = Math.min(_tw1, 0.55);
+    _ow1EffA = 1 - _tw1EffA;
+  }
+  if (_missingDefenseB1) {
+    _tw1EffB = Math.min(_tw1, 0.55);
+    _ow1EffB = 1 - _tw1EffB;
   }
   const projA1H_points =
-    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw1Eff + bAllowed * _ow1Eff : aS_pre;
+    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw1EffA + bAllowed * _ow1EffA : aS_pre;
   const projB1H_points =
-    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw1Eff + aAllowed * _ow1Eff : bS_pre;
+    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw1EffB + aAllowed * _ow1EffB : bS_pre;
 
   if (isEspnLeague && hasRealRatings && hasRealPace) {
     const _betaO1 = Math.min(1.5, Math.max(0.25, Number((typeof getParam === "function" ? getParam("advBetaOffense", league) : null) ?? 1.0)));
@@ -26638,16 +27076,22 @@ function compute2HProjection({
   const _ow2 = 1 - _tw2;
   const _missingDefenseA2 = !isFinite(bAllowed);
   const _missingDefenseB2 = !isFinite(aAllowed);
-  let _tw2Eff = _tw2;
-  let _ow2Eff = _ow2;
-  if (_missingDefenseA2 || _missingDefenseB2) {
-    _tw2Eff = Math.min(_tw2, 0.55);
-    _ow2Eff = 1 - _tw2Eff;
+  let _tw2EffA = _tw2;
+  let _ow2EffA = _ow2;
+  let _tw2EffB = _tw2;
+  let _ow2EffB = _ow2;
+  if (_missingDefenseA2) {
+    _tw2EffA = Math.min(_tw2, 0.55);
+    _ow2EffA = 1 - _tw2EffA;
+  }
+  if (_missingDefenseB2) {
+    _tw2EffB = Math.min(_tw2, 0.55);
+    _ow2EffB = 1 - _tw2EffB;
   }
   const projA2H_points =
-    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw2Eff + bAllowed * _ow2Eff : aS_pre;
+    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw2EffA + bAllowed * _ow2EffA : aS_pre;
   const projB2H_points =
-    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw2Eff + aAllowed * _ow2Eff : bS_pre;
+    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw2EffB + aAllowed * _ow2EffB : bS_pre;
 
   {
     const _h2RegMinutes = getLeagueRegulationMinutes(league) || 48;
@@ -29350,299 +29794,24 @@ async function runEngine() {
       injB = g_injB.scoringMult,
       config = {},
     ) => {
-      g_currentLiveComputeMarket = qKey;
-
-      const aS = getManualSeries("A", qKey, parsed);
-      const bS = getManualSeries("B", qKey, parsed);
-
-      const _dateAwareAvgAQ = getDateAwareOrFallbackAverage(aS, "A", qKey, AppState.context?.data || null, league);
-      const _dateAwareAvgBQ = getDateAwareOrFallbackAverage(bS, "B", qKey, AppState.context?.data || null, league);
-
-      const pKeyA = "a" + qKey.toUpperCase() + "Allowed";
-      const pKeyB = "b" + qKey.toUpperCase() + "Allowed";
-      const aA =
-        parsed[pKeyA] && parsed[pKeyA].length
-          ? parsed[pKeyA]
-          : AppState.context.data.A[qKey + "Allowed"] || [];
-      const bA =
-        parsed[pKeyB] && parsed[pKeyB].length
-          ? parsed[pKeyB]
-          : AppState.context.data.B[qKey + "Allowed"] || [];
-
-      const volLimit = getMarketVolLimit(league, qKey);
-      const _qVolA = getVolatilityRatioForSeries(aS, volLimit);
-      const _qVolB = getVolatilityRatioForSeries(bS, volLimit);
-      const qVolRatio = Math.min(
-        2.5,
-        Math.sqrt(
-          (Number.isFinite(_qVolA) ? _qVolA : 1) ** 2 + (Number.isFinite(_qVolB) ? _qVolB : 1) ** 2,
-        ),
-      );
-      const qCombinedVolPts =
-        Number.isFinite(qVolRatio) && Number.isFinite(volLimit) ? qVolRatio * volLimit : stdDev(aS.concat(bS));
-      const sampleSize = Math.min(aS.length, bS.length);
-
-      const leagueBaseQ = getLeagueScoreBase(league) / 8;
-
-      const ctxAQ = AppState.context.data?.A || {};
-      const ctxBQ = AppState.context.data?.B || {};
-
-      const hasAdvancedQ =
-        isFinite(avgOrNaN(ctxAQ.ortg10)) &&
-        isFinite(avgOrNaN(ctxAQ.drtg10)) &&
-        isFinite(avgOrNaN(ctxBQ.ortg10)) &&
-        isFinite(avgOrNaN(ctxBQ.drtg10)) &&
-        isFinite(avgOrNaN(ctxAQ.pace10)) &&
-        avgOrNaN(ctxAQ.pace10) > 0 &&
-        isFinite(avgOrNaN(ctxBQ.pace10)) &&
-        avgOrNaN(ctxBQ.pace10) > 0 &&
-        (ctxAQ.ortg10 || []).length >= 5 &&
-        (ctxBQ.ortg10 || []).length >= 5;
-
-      const leaguePaceBaseQ =
-        LEAGUE_PACE_BASES[league] ||
-        LEAGUE_PACE_BASES.default ||
-        74 * ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown);
-      const leagueRatingBaseQ =
-        LEAGUE_RATING_BASES[league] ||
-        LEAGUE_RATING_BASES.default *
-          ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown) ||
-        110;
-
-      const isEspnLeagueQ = Object.prototype.hasOwnProperty.call(ESPN_LEAGUE_SLUGS, league);
-
-      let projA, projB;
-      const _dynWeightsQ = getDynamicWeights(
-        getSampleTier(aS, bS),
-        qVolRatio,
+      // AUTHORITATIVE: delegates to shared computeQuarterProjection (same as tuner).
+      const _sib =
+        qKey === "q1" || qKey === "q2"
+          ? h1Calc.h1Edge
+          : h2Calc && isFinite(h2Calc.h2Edge)
+            ? h2Calc.h2Edge
+            : ftCalc.ftEdge;
+      return computeQuarterProjection({
+        qKey,
+        lineVal,
         league,
-      ); 
-      const _twQ = isFinite(_dynWeightsQ?.teamWeight) ? Number(_dynWeightsQ.teamWeight) : 0.65;
-      const _owQ = 1 - _twQ;
-      const projA_pts = anchorProjection(
-        _dateAwareAvgAQ * _twQ + avgOrNaN(bA) * _owQ,
-        sampleSize,
-        leagueBaseQ,
-      );
-      const projB_pts = anchorProjection(
-        _dateAwareAvgBQ * _twQ + avgOrNaN(aA) * _owQ,
-        sampleSize,
-        leagueBaseQ,
-      );
-
-      {
-        const _qRegMinutes = getLeagueRegulationMinutes(league) || 48;
-        const _qPeriods = (typeof LEAGUE_FETCH_RULES !== "undefined" && LEAGUE_FETCH_RULES[league] && LEAGUE_FETCH_RULES[league].regulationPeriods) || 4;
-        const qMins = _qRegMinutes / Math.max(1, Number(_qPeriods) || 4); 
-        const qDivisor = 400 * (48 / _qRegMinutes);
-        const _advAQ =
-          typeof getPeriodAdvancedSeries === "function"
-            ? getPeriodAdvancedSeries(ctxAQ, qKey)
-            : { ortg: [], drtg: [], pace: [], source: "none" };
-        const _advBQ =
-          typeof getPeriodAdvancedSeries === "function"
-            ? getPeriodAdvancedSeries(ctxBQ, qKey)
-            : { ortg: [], drtg: [], pace: [], source: "none" };
-        let ortgA_q, drtgA_q, ortgB_q, drtgB_q, synPaceQ;
-
-        if (_advAQ.source === qKey && _advBQ.source === qKey) {
-          ortgA_q = avgOrNaN(_advAQ.ortg);
-          drtgA_q = avgOrNaN(_advAQ.drtg);
-          ortgB_q = avgOrNaN(_advBQ.ortg);
-          drtgB_q = avgOrNaN(_advBQ.drtg);
-          const pA = avgOrNaN(_advAQ.pace);
-          const pB = avgOrNaN(_advBQ.pace);
-          synPaceQ =
-            isFinite(pA) && pA > 0 && isFinite(pB) && pB > 0
-              ? (pA + pB) / 2
-              : LEAGUE_PACE_BASES[league] || LEAGUE_PACE_BASES.default || 99.5;
-        } else {
-          ortgA_q = NaN;
-          drtgA_q = NaN;
-          ortgB_q = NaN;
-          drtgB_q = NaN;
-          synPaceQ = NaN;
-        }
-
-        const hasNativeAdvQ =
-          isFinite(ortgA_q) && isFinite(drtgA_q) && isFinite(ortgB_q) && isFinite(drtgB_q);
-
-        if (hasNativeAdvQ) {
-          const projRatingAQ = ortgA_q + drtgB_q - leagueRatingBaseQ;
-          const projRatingBQ = ortgB_q + drtgA_q - leagueRatingBaseQ;
-          const projA_adv = (synPaceQ * projRatingAQ) / qDivisor;
-          const projB_adv = (synPaceQ * projRatingBQ) / qDivisor;
-          const advTotalQ =
-            (isFinite(projA_adv) ? projA_adv : 0) + (isFinite(projB_adv) ? projB_adv : 0);
-          const advSaneQ =
-            isFinite(advTotalQ) &&
-            advTotalQ >= leagueBaseQ * 1.4 &&
-            advTotalQ <= leagueBaseQ * 2.6 &&
-            isFinite(projA_adv) &&
-            isFinite(projB_adv);
-          const _advWQ = isFinite(config?.advancedBlendWeight)
-            ? Number(config.advancedBlendWeight)
-            : isFinite(getParam("advancedBlendWeight", league))
-              ? Number(getParam("advancedBlendWeight", league))
-              : 0.45;
-          if (advSaneQ && _advWQ > 0) {
-            const w = Math.max(0, Math.min(1, _advWQ));
-            projA = projA_pts * (1 - w) + projA_adv * w;
-            projB = projB_pts * (1 - w) + projB_adv * w;
-          } else {
-            projA = projA_pts;
-            projB = projB_pts;
-          }
-        } else {
-          projA = projA_pts;
-          projB = projB_pts;
-        }
-      }
-
-      projA = applyVolatility(projA, aS, volLimit, league);
-      projB = applyVolatility(projB, bS, volLimit, league);
-
-      projA *= injA;
-      projB *= injB;
-
-      const _qInjOppBoostFactor =
-        getParam("injuryOppBoostFactor", league) ?? INJURY_OPPONENT_BOOST_FACTOR;
-      if (injA < 1) projB *= 1 + Math.min(0.2, (1 - injA) * _qInjOppBoostFactor);
-      if (injB < 1) projA *= 1 + Math.min(0.2, (1 - injB) * _qInjOppBoostFactor);
-
-      const aH2H = getH2HSeries("A", qKey, parsed);
-      const bH2H = getH2HSeries("B", qKey, parsed);
-      const hasH2H = maybeReadH2HEnabled(qKey) && aH2H.length >= 2 && bH2H.length >= 2;
-      const tier = getSampleTier(aS, bS);
-
-      const qFullModel = tier === "full";
-      const qProjectionOnly = !hasH2H && tier === "thin";
-      const _qPaceA10 = avgOrNaN(ctxAQ.pace10);
-      const _qPaceB10 = avgOrNaN(ctxBQ.pace10);
-      const _qPaceGapRisk = Number.isFinite(_qPaceA10) && Number.isFinite(_qPaceB10)
-        ? Math.abs(_qPaceA10 - _qPaceB10) > 6
-        : false;
-      if (hasH2H) {
-        const massacreH2HQ = getMassacreH2HSeries(qKey, getCurrentFixtureMeta(), parsed);
-        const decayH2HA = massacreH2HQ.A.length >= 2 ? massacreH2HQ.A : aH2H;
-        const decayH2HB = massacreH2HQ.B.length >= 2 ? massacreH2HQ.B : bH2H;
-
-        const usedDecayA = massacreH2HQ.A.length >= 2;
-        const usedDecayB = massacreH2HQ.B.length >= 2;
-
-        const _qH2hW = massacreH2HQ.weights;
-        const avgH2HA =
-          _qH2hW && _qH2hW.length === decayH2HA.length
-            ? (() => {
-                let sv = 0,
-                  sw = 0;
-                for (let i = 0; i < decayH2HA.length; i++) {
-                  const v = Number(decayH2HA[i]),
-                    w = Number(_qH2hW[i]);
-                  if (isFinite(v) && isFinite(w) && w > 0) {
-                    sv += v * w;
-                    sw += w;
-                  }
-                }
-                return sw > 0 ? sv / sw : avgOrNaN(decayH2HA);
-              })()
-            : avgOrNaN(decayH2HA);
-        const avgH2HB =
-          _qH2hW && _qH2hW.length === decayH2HB.length
-            ? (() => {
-                let sv = 0,
-                  sw = 0;
-                for (let i = 0; i < decayH2HB.length; i++) {
-                  const v = Number(decayH2HB[i]),
-                    w = Number(_qH2hW[i]);
-                  if (isFinite(v) && isFinite(w) && w > 0) {
-                    sv += v * w;
-                    sw += w;
-                  }
-                }
-                return sw > 0 ? sv / sw : avgOrNaN(decayH2HB);
-              })()
-            : avgOrNaN(decayH2HB);
-        const _qModelTotal = (isFinite(projA) ? projA : 0) + (isFinite(projB) ? projB : 0);
-        const _qH2hTotal = (isFinite(avgH2HA) ? avgH2HA : 0) + (isFinite(avgH2HB) ? avgH2HB : 0);
-        const _qH2hDivergence =
-          isFinite(avgH2HA) && isFinite(avgH2HB) ? Math.abs(_qH2hTotal - _qModelTotal) : 0;
-        const _qH2hFactor = isFinite(config?.h2hFactor) ? Number(config.h2hFactor) : 1.0;
-        const hw = getH2HWeight(
-          decayH2HA.length,
-          decayH2HB.length,
-          qKey,
-          tier,
-          _qH2hDivergence,
-          league,
-          leagueBaseQ * 2,
-          _qH2hFactor,
-          {
-            enabled: hasH2H,
-            injMultA: injA,
-            injMultB: injB,
-            volRatio: qVolRatio,
-            blowoutGap: Math.abs(projA - projB),
-            paceGapRisk: _qPaceGapRisk,
-          },
-        );
-        projA = isFinite(avgH2HA) ? projA * (1 - hw) + avgH2HA * hw : projA;
-        projB = isFinite(avgH2HB) ? projB * (1 - hw) + avgH2HB * hw : projB;
-
-        const _aInjAdjBaselineQ =
-          avgOrNaN(aS) * injA * (injB < 1 ? 1 + (1 - injB) * _qInjOppBoostFactor : 1);
-        const _bInjAdjBaselineQ =
-          avgOrNaN(bS) * injB * (injA < 1 ? 1 + (1 - injA) * _qInjOppBoostFactor : 1);
-        projA = applyVolatility(projA, aS, volLimit, league, _aInjAdjBaselineQ);
-        projB = applyVolatility(projB, bS, volLimit, league, _bInjAdjBaselineQ);
-      }
-
-      const qProj = projA + projB;
-      const qEdge = lineVal ? qProj - lineVal : NaN;
-      const qPick = getPick(qEdge, lineVal, league, qKey, { aSc: avgOrNaN(aS), bSc: avgOrNaN(bS) });
-
-      const qTrap = detectTrap(qEdge, lineVal, qPick, league, qKey, qCombinedVolPts);
-      const qConf = getConfidenceGrade({
-        pick: qPick,
-        line: lineVal,
-        edge: qEdge,
-        sampleTier: tier,
-        volatility: qCombinedVolPts,
-        volLimit,
-        fullModel: qFullModel,
-        projectionOnly: qProjectionOnly,
-        trap: qTrap,
-
-        paceGapRisk: _qPaceGapRisk,
-        blowoutGap: Math.abs(projA - projB),
-
-        marketKey: qKey,
-        hasH2H: hasH2H,
-
-        siblingEdge: qKey === "q1" || qKey === "q2" ? h1Calc.h1Edge : (h2Calc && isFinite(h2Calc.h2Edge) ? h2Calc.h2Edge : ftCalc.ftEdge),
-        league,
+        parsed,
+        injA,
+        injB,
+        config,
+        contextData: (typeof AppState !== "undefined" && AppState.context && AppState.context.data) || null,
+        siblingEdge: _sib,
       });
-
-      const qPaceGapRisk = _qPaceGapRisk;
-
-      return {
-        proj: qProj,
-        edge: qEdge,
-        line: lineVal,
-        pick: qPick,
-        confidence: qConf,
-        tier,
-        projA,
-        projB,
-        hasH2H,
-        volatility: qCombinedVolPts,
-        fullModel: qFullModel,
-        projectionOnly: qProjectionOnly,
-        paceGapRisk: qPaceGapRisk,
-        preAnchorProjA: projA,
-        preAnchorProjB: projB,
-        preAnchorProjTotal: qProj,
-      };
     };
 
     const q1 = computeQ(
@@ -30056,7 +30225,6 @@ async function runEngine() {
     const ftNote = ftCalc.ftNote || ftCalc.ftProjectionNote || null;
     const h1Note = h1Calc.h1Note || h1Calc.h1ProjectionNote || null;
 
-    const sharedInjuryNotes = [];
 
     const lqA = computeLineupQuality(AppState.context.data?.A?.roster, g_injA);
     const lqB = computeLineupQuality(AppState.context.data?.B?.roster, g_injB);
@@ -30174,7 +30342,17 @@ async function runEngine() {
       h2Trap = true;
     }
 
-    const aTrap = detectTrap(ftCalc.aEdge, aLine, aPick, league, "team_a", ftCalc.aVol); 
+    // Team-market volatility must use the team_a/team_b market scale (not FT limit).
+    const _ftVolLim = getMarketVolLimit(league, "ft") || 12;
+    const _teamAVolLim = getMarketVolLimit(league, "team_a");
+    const _teamBVolLim = getMarketVolLimit(league, "team_b");
+    const _aVolTeamScale = Number.isFinite(ftCalc.aVol)
+      ? ftCalc.aVol * (_teamAVolLim / _ftVolLim)
+      : NaN;
+    const _bVolTeamScale = Number.isFinite(ftCalc.bVol)
+      ? ftCalc.bVol * (_teamBVolLim / _ftVolLim)
+      : NaN;
+    const aTrap = detectTrap(ftCalc.aEdge, aLine, aPick, league, "team_a", _aVolTeamScale);
     const aConfidence = getConfidenceGrade({
       pick: aPick,
       note: ftNote,
@@ -30188,15 +30366,15 @@ async function runEngine() {
 
       paceGapRisk: ftCalc.paceGapRisk,
       blowoutGap: ftCalc.blowoutGap,
-      volatility: ftCalc.aVol,
-      volLimit: getMarketVolLimit(league, "ft"),
+      volatility: _aVolTeamScale,
+      volLimit: _teamAVolLim,
       injuryNotes: [],
       marketKey: "team_a",
 
       lineupQuality: lqA,
     });
 
-    const bTrap = detectTrap(ftCalc.bEdge, bLine, bPick, league, "team_b", ftCalc.bVol); 
+    const bTrap = detectTrap(ftCalc.bEdge, bLine, bPick, league, "team_b", _bVolTeamScale);
     const bConfidence = getConfidenceGrade({
       pick: bPick,
       note: ftNote,
@@ -30210,8 +30388,8 @@ async function runEngine() {
 
       paceGapRisk: ftCalc.paceGapRisk,
       blowoutGap: ftCalc.blowoutGap,
-      volatility: ftCalc.bVol,
-      volLimit: getMarketVolLimit(league, "ft"),
+      volatility: _bVolTeamScale,
+      volLimit: _teamBVolLim,
       injuryNotes: [],
       marketKey: "team_b",
 
@@ -30322,6 +30500,7 @@ async function runEngine() {
       "winner",
       combinedMarginVolFT,
       getMarketVolLimit(league, "ft"),
+      NaN /* winner has no handicap market line for move tracking */,
     );
     const winnerConfidence = getMarginConfidenceGrade({
       pick: winnerPick,
@@ -30349,6 +30528,7 @@ async function runEngine() {
       "handicap",
       combinedMarginVolFT,
       getMarketVolLimit(league, "ft"),
+      finalLines.handicapLine,
     );
     const handicapConfidence = getMarginConfidenceGrade({
       pick: handicapPick,
@@ -30376,6 +30556,7 @@ async function runEngine() {
       "handicap_h1",
       combinedMarginVolH1,
       _h1VolLimitForMargin,
+      finalLines.handicapH1Line,
     );
     const handicapH1Confidence = getMarginConfidenceGrade({
       pick: handicapH1Pick,
@@ -30402,6 +30583,7 @@ async function runEngine() {
       "handicap_h2",
       combinedMarginVolH2,
       _h2VolLimitForMargin,
+      finalLines.handicapH2Line,
     );
     const handicapH2Confidence = getMarginConfidenceGrade({
       pick: handicapH2Pick,
@@ -30880,12 +31062,17 @@ async function runEngine() {
     applyIntelligenceLayerToPicks(finalPicksForDisplay, intelligencePack, league);
     applyV24CardLayer(finalPicksForDisplay, league);
 
+    // Distribution is diagnostic only here. Never overwrite primary production p.winProbability.
+    // Authoritative winProbability is set below from confidence-model path (+ explicit blend).
     finalPicksForDisplay.forEach((p) => {
       if (!p) return;
       const dist = typeof getDistributionWinProbabilityForPick === "function"
         ? getDistributionWinProbabilityForPick(p, league)
         : null;
-      if (Number.isFinite(dist)) p.winProbability = dist;
+      if (Number.isFinite(dist)) {
+        p.distributionWinProbability = dist; // diagnostic / secondary only
+        // Do NOT assign p.winProbability = dist
+      }
     });
 
     finalPicksForDisplay.forEach((p) => {
@@ -30965,10 +31152,15 @@ async function runEngine() {
               _lockVolLimitPts,
               volRatio,
             );
+            // Explicit blend: confidence model primary (0.7), distribution secondary (0.3).
+            // Matches getConfidenceGrade authority. Distribution alone never replaces primary.
             if (Number.isFinite(_lockDistProb)) {
-              _lockWinProb = Number.isFinite(_lockWinProb)
-                ? clampNumber(0.7 * _lockDistProb + 0.3 * _lockWinProb, 0.02, 0.98)
-                : _lockDistProb;
+              if (Number.isFinite(_lockWinProb)) {
+                _lockWinProb = clampNumber(0.3 * _lockDistProb + 0.7 * _lockWinProb, 0.02, 0.98);
+              } else {
+                _lockWinProb = _lockDistProb; // only when primary missing
+              }
+              p.distributionWinProbability = _lockDistProb;
             }
           } catch (_lockBlendErr) {
             engineDebug("Lock winProbability distribution blend failed", {
@@ -31026,6 +31218,11 @@ async function runEngine() {
       });
     }
 
+    // Suppress correlated half-plays BEFORE lock selection so lock cannot land on a later-invalidated pick.
+    if (typeof suppressCorrelatedHalfPlays === "function") {
+      suppressCorrelatedHalfPlays(finalPicksForDisplay);
+    }
+
     let lockIdx = selectLock(
       finalPicksForDisplay.map((p) => ({
         edge: isFinite(p.displayEdge) ? p.displayEdge : p.edge,
@@ -31048,6 +31245,37 @@ async function runEngine() {
         marginEdgePct: p.marginEdgePct,
       })),
     );
+
+    // If suppression (or later mutation) invalidated the chosen lock, re-select once.
+    if (
+      Number.isFinite(lockIdx) &&
+      lockIdx >= 0 &&
+      finalPicksForDisplay[lockIdx] &&
+      (finalPicksForDisplay[lockIdx].pick === "NO PLAY" ||
+        finalPicksForDisplay[lockIdx].pick === "NaN")
+    ) {
+      lockIdx = selectLock(
+        finalPicksForDisplay.map((p) => ({
+          edge: isFinite(p.displayEdge) ? p.displayEdge : p.edge,
+          line: isFinite(p.displayLineUsed) ? p.displayLineUsed : p.line,
+          pick: p.pick,
+          fullModel: p.fullModel,
+          confidence: p.confidence,
+          confidenceGrade: p.confidenceGrade || p.confidence,
+          winProbability: p.winProbability,
+          sampleTier: p.sampleTier,
+          hasH2H: p.hasH2H,
+          volatility: p.volatility,
+          volLimit: p.volLimit,
+          trap: p.trap,
+          league: p.league || league,
+          marketKey: p.marketKey,
+          lockStrength: p.lockStrength,
+          lockRestricted: !!p.lockRestricted,
+          marginEdgePct: p.marginEdgePct,
+        })),
+      );
+    }
 
     const displayablePicks = finalPicksForDisplay;
 
@@ -31417,7 +31645,7 @@ async function runEngine() {
             teamB_stdDev: stdDev(_aud_bFTRaw),
             leagueVolLimit: _aud_volLimit,
             formulaNote:
-              "applyVolatility(proj, series, leagueVolLimit) clamps proj to baseline(series) ± leagueVolLimit when the deviation exceeds the limit, damping outlier projections toward recent-form baseline. Volatility is also used separately as the SD of a Normal predictive distribution (see distributionWinProbability/_normalCdf), blended 70/30 with the logistic model to produce P(total beats line).",
+              "applyVolatility(proj, series, leagueVolLimit) clamps proj to baseline(series) ± leagueVolLimit when the deviation exceeds the limit, damping outlier projections toward recent-form baseline. Volatility is also used separately as the SD of a Normal predictive distribution (see distributionWinProbability/_normalCdf), blended 30% distribution / 70% logistic confidence model (confidence primary) to produce P(total beats line).",
           },
           STEP5_advancedStatsBlend: {
             used: ftCalc.usedAdvanced,
@@ -31666,7 +31894,7 @@ async function runEngine() {
       confidenceBuild: {
         gradeThresholds: _aud_gradeThresholds,
         scoringFormula:
-          "STALE-STRING FIX: the additive score system previously documented here (score += 2.0/1.0/-2/-4/-1.0, clamp(edgePct...), q4EdgeNorm, etc.) does not exist in the live code and never ran during this build. Actual live grading (getConfidenceGrade / resolveConfidenceGradeFromWinProbability): winProb = 0.7*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.3*getConfidenceWinProbability(logistic) when both are finite, else whichever is finite, else NaN sentinel (NO PLAY). getConfidenceWinProbability itself returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope has >=40 settled picks (BB_CONFIDENCE_MODEL_COEFF_N) — so distribution CDF is the sole driver until then. Grade A is unreachable (capped at B) while isConfidenceCoeffFitted(league) is false, i.e. before calibration. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D; an ECE-based cap (D13) can further cap to B/C for poorly-calibrated market/league scopes with n>=30 tracked outcomes.",
+          "STALE-STRING FIX: the additive score system previously documented here (score += 2.0/1.0/-2/-4/-1.0, clamp(edgePct...), q4EdgeNorm, etc.) does not exist in the live code and never ran during this build. Actual live grading (getConfidenceGrade / resolveConfidenceGradeFromWinProbability): winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability itself returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope has >=40 settled picks (BB_CONFIDENCE_MODEL_COEFF_N) — so distribution CDF is the sole driver until then. Grade A is unreachable (capped at B) while isConfidenceCoeffFitted(league) is false, i.e. before calibration. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D; an ECE-based cap (D13) can further cap to B/C for poorly-calibrated market/league scopes with n>=30 tracked outcomes.",
         markets: {
           FT: {
             pick: ftPick,
@@ -32006,6 +32234,15 @@ function clearAll() {
   g_injB = defaultInjuryMeta();
   _schedCache.clear();
   _summaryCache.clear();
+  // Session/league boundary: clear event-scoped and proxy caches (bounded persistent maps).
+  try {
+    if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
+      _ssEventStatsCache.clear();
+  } catch (_eSs) {}
+  try {
+    if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
+      _proxyFetchCache.clear();
+  } catch (_ePf) {}
   _fixtureCache.clear();
 
   setStatusText("", "");
@@ -32235,6 +32472,15 @@ function onLeagueChange() {
 
   _schedCache.clear();
   _summaryCache.clear();
+  // Session/league boundary: clear event-scoped and proxy caches (bounded persistent maps).
+  try {
+    if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
+      _ssEventStatsCache.clear();
+  } catch (_eSs) {}
+  try {
+    if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
+      _proxyFetchCache.clear();
+  } catch (_ePf) {}
 
   AppState.injuries.A = defaultInjuryMeta();
   AppState.injuries.B = defaultInjuryMeta();
@@ -33246,6 +33492,14 @@ const AFDB = (function () {
 
     if (typeof _schedCache !== "undefined") _schedCache.clear();
     if (typeof _summaryCache !== "undefined") _summaryCache.clear();
+    try {
+      if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
+        _ssEventStatsCache.clear();
+    } catch (_eSs2) {}
+    try {
+      if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
+        _proxyFetchCache.clear();
+    } catch (_ePf2) {}
     if (typeof _fixtureCache !== "undefined") _fixtureCache.clear();
     if (typeof _teamCatalogCache !== "undefined") _teamCatalogCache.clear();
 
