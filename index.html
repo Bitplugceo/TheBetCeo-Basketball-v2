@@ -1,3 +1,5 @@
+A
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -13982,9 +13984,25 @@ function updateTrackerInsightsButton() {
     copyBtn.style.display = isTrackerReportView() || isTrackerConfigsView() ? "" : "none";
     copyBtn.textContent = "📋";
     copyBtn.title = isTrackerReportView() ? "Copy tracker report" : "Copy config data";
-    copyBtn.onclick = () => {
-      if (isTrackerReportView()) copyTrackerData();
-      else if (isTrackerConfigsView()) copyConfigsData();
+    copyBtn.onclick = function (ev) {
+      try {
+        if (ev) {
+          ev.preventDefault();
+          ev.stopPropagation();
+        }
+        if (isTrackerReportView()) {
+          if (typeof window.copyTrackerData === "function") window.copyTrackerData();
+          else if (typeof copyTrackerData === "function") copyTrackerData();
+        } else if (isTrackerConfigsView()) {
+          if (typeof window.copyConfigsData === "function") window.copyConfigsData();
+          else if (typeof copyConfigsData === "function") copyConfigsData();
+        }
+      } catch (err) {
+        console.error("[BB Engine] copy button failed", err);
+        try {
+          alert("Copy failed: " + (err && err.message ? err.message : err));
+        } catch (_a) {}
+      }
     };
   }
 
@@ -28882,11 +28900,52 @@ function buildTrackedPickPayload({
         ? crypto.randomUUID()
         : `pick_${String(fixtureMeta.eventId || "noevent")}_${String(marketKey || "market")}_${++_trackedPickFallbackSeq}`,
     snapshot: snapshot,
-    eventId: fixtureMeta.eventId || "",
-    eventDate: fixtureMeta.eventDate || "",
+    eventId: (function () {
+      if (fixtureMeta.eventId) return String(fixtureMeta.eventId);
+      // Synthetic stable id so manual / non-ESPN runs still persist to active tracker.
+      const ha = String(
+        (fixtureMeta.homeTeam && fixtureMeta.homeTeam !== "—" ? fixtureMeta.homeTeam : "") ||
+          (typeof document !== "undefined" && document.getElementById("teamAName")
+            ? document.getElementById("teamAName").value
+            : "") ||
+          "A",
+      )
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .slice(0, 40);
+      const aa = String(
+        (fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—" ? fixtureMeta.awayTeam : "") ||
+          (typeof document !== "undefined" && document.getElementById("teamBName")
+            ? document.getElementById("teamBName").value
+            : "") ||
+          "B",
+      )
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .slice(0, 40);
+      const d = String(fixtureMeta.eventDate || new Date().toISOString().slice(0, 10)).slice(0, 10);
+      return "manual-" + String(league || "unk") + "-" + ha + "-vs-" + aa + "-" + d;
+    })(),
+    eventDate: fixtureMeta.eventDate || new Date().toISOString().slice(0, 10),
     league,
-    homeTeam: fixtureMeta.homeTeam && fixtureMeta.homeTeam !== "—" ? fixtureMeta.homeTeam : "A",
-    awayTeam: fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—" ? fixtureMeta.awayTeam : "B",
+    homeTeam: (function () {
+      if (fixtureMeta.homeTeam && fixtureMeta.homeTeam !== "—") return fixtureMeta.homeTeam;
+      try {
+        const n = document.getElementById("teamAName") && document.getElementById("teamAName").value.trim();
+        if (n) return n;
+      } catch (_e) {}
+      return "A";
+    })(),
+    awayTeam: (function () {
+      if (fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—") return fixtureMeta.awayTeam;
+      try {
+        const n = document.getElementById("teamBName") && document.getElementById("teamBName").value.trim();
+        if (n) return n;
+      } catch (_e) {}
+      return "B";
+    })(),
     homeId: fixtureMeta.homeId || "",
     awayId: fixtureMeta.awayId || "",
     fixtureLabel: `${fixtureMeta.homeTeam && fixtureMeta.homeTeam !== "—" ? fixtureMeta.homeTeam : "A"} vs ${fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—" ? fixtureMeta.awayTeam : "B"}`,
@@ -28958,7 +29017,9 @@ function buildTrackedPickPayload({
     quarterFormAgreement: pickRow.quarterFormAgreement || null,
     marginProjection: isFinite(pickRow.marginProjection) ? Number(pickRow.marginProjection) : null,
     rawEdge: isFinite(pickRow.rawEdge) ? Number(pickRow.rawEdge) : null,
-    isShadow: isTrackableNoPlay ? true : !fixtureMeta.eventId,
+    // Only clean NO-PLAY calibration tickets are shadows. Real plays always save to activePicks
+    // even when ESPN fixture eventId is missing (manual leagues / no schedule match).
+    isShadow: !!isTrackableNoPlay,
     diagnostics: {
       ...(diagnostics || {}),
       phase2Mode: diagnostics?.phase2Activation?.phase2Mode || "live",
@@ -32359,15 +32420,23 @@ async function runEngine() {
       // Prediction persistence is a correctness requirement, not a best-effort
       // debounce. Await the local write before allowing the run to finish, then
       // flush the same state to the remote tracker when configured.
-      await addTrackedPicks(trackedToSave);
+      const _savedOk = await addTrackedPicks(trackedToSave);
       await forceTrackerSaveNow();
+      try {
+        if (typeof renderTrackedPicks === "function") renderTrackedPicks();
+      } catch (_rt) {}
       engineDebug("tracked picks durably saved", {
         trackedToSave: trackedToSave.length,
+        addTrackedResult: _savedOk,
+        activeCount: Array.isArray(g_trackerState && g_trackerState.activePicks)
+          ? g_trackerState.activePicks.length
+          : 0,
         trackerStateAfterSave: getTrackerStateDebugScore(g_trackerState),
       });
     } else if (actionablePicks.length) {
       engineDebug("actionable picks were not saved to tracker", {
         reason: "tracker payload validation rejected every actionable pick",
+        hint: "Check fixture eventId, pick line, and NO PLAY / gate notes",
       });
     }
 
@@ -42211,30 +42280,52 @@ document.addEventListener("DOMContentLoaded", function () {
 
 function copyTextToClipboard(text, onDone) {
   const _done = typeof onDone === "function" ? onDone : function () {};
-  const fallback = () => {
+  const payload = text == null ? "" : String(text);
+
+  const execFallback = function () {
     try {
-      const ta = Object.assign(document.createElement("textarea"), {
-        value: text,
-        style: "position:fixed;opacity:0",
-      });
+      const ta = document.createElement("textarea");
+      ta.value = payload;
+      ta.setAttribute("readonly", "");
+      ta.style.cssText =
+        "position:fixed;top:0;left:0;width:2px;height:2px;padding:0;border:none;outline:none;box-shadow:none;background:transparent;opacity:0;z-index:-1;";
       document.body.appendChild(ta);
+      ta.focus();
       ta.select();
-      const copied = document.execCommand("copy");
+      ta.setSelectionRange(0, payload.length);
+      let copied = false;
+      try {
+        copied = document.execCommand("copy") === true;
+      } catch (_e) {
+        copied = false;
+      }
       document.body.removeChild(ta);
-      _done(copied === true); 
-    } catch (_) {
-      _done(false);
-    }
+      if (copied) {
+        _done(true);
+        return true;
+      }
+    } catch (_e2) {}
+    return false;
   };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard
-      .writeText(text)
-      .then(() => _done(true))
-      .catch(fallback);
-  } else {
-    fallback();
-  }
+
+  // Prefer async clipboard when available (secure contexts). Always fall back to execCommand.
+  try {
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+      navigator.clipboard
+        .writeText(payload)
+        .then(function () {
+          _done(true);
+        })
+        .catch(function () {
+          if (!execFallback()) _done(false);
+        });
+      return;
+    }
+  } catch (_e3) {}
+
+  if (!execFallback()) _done(false);
 }
+window.copyTextToClipboard = copyTextToClipboard;
 
 function copyTrackerData() {
   
@@ -42479,6 +42570,10 @@ function copyConfigsData() {
   };
   copyTextToClipboard(text, setFeedback);
 }
+
+window.copyTrackerData = copyTrackerData;
+window.copyConfigsData = copyConfigsData;
+window.copyTextToClipboard = copyTextToClipboard;
 
 window.__BETCEO_ENGINE_FULL_BOOT = true;
 
