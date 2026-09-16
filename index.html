@@ -1,3 +1,5 @@
+S
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -9784,7 +9786,7 @@ function evaluatePickWithParams(pick, paramOverrides) {
       
       if (Number.isFinite(_distProb)) {
         winProbability = Number.isFinite(winProbability)
-          ? clampNumber(0.3 * _distProb + 0.7 * winProbability, 0.02, 0.98)
+          ? blendConfidenceAndDistribution(_distProb, winProbability)
           : _distProb;
       }
     } catch (_e) {
@@ -11518,6 +11520,11 @@ const LEAGUE_REGULATION_MINUTES = {
   wnba_pre: 40,
   ncaa: 40,
   ncaaw: 40,
+  /* FIX item 2: PBA plays four 12-minute quarters (48 min regulation) — the PBA's rules
+     are a hybrid of NBA/FIBA rules but explicitly use the NBA's 48-minute game length,
+     not the FIBA/NCAA 40-minute standard. Verified against multiple independent sources
+     (PBA rulebook summaries) as of this fix; re-verify if the league ever changes format. */
+  pba: 48,
   default: 40,
 };
 function getLeagueRegulationMinutes(league) {
@@ -12909,14 +12916,64 @@ function getLiveConfigFingerprint(league) {
       const v = getParam(k, league);
       return k + ":" + (Array.isArray(v) ? v.join(",") : v);
     });
-    const str = parts.join("|");
-    let hash = 5381;
-    for (let i = 0; i < str.length; i++) {
-      hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0;
-    }
-    return hash.toString(16);
+    return djb2Hash(parts.join("|"));
   } catch (e) {
     return "unknown";
+  }
+}
+
+/* FIX items 24/25/31: shared hash + provenance helpers.
+   djb2Hash: single implementation reused by the config fingerprint, the feature-schema
+   hash, and the data-snapshot id, instead of three copies of the same loop drifting apart. */
+function djb2Hash(str) {
+  let hash = 5381;
+  const s = String(str == null ? "" : str);
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) + hash + s.charCodeAt(i)) >>> 0;
+  }
+  return hash.toString(16);
+}
+
+/* Item 24: featureSchemaHash. A model version / config fingerprint tells you which model
+   and which tuning parameters were live, but not whether the feature-generation contract
+   itself changed (e.g. a new input added to buildConfidenceFeatures without a version bump).
+   This hashes the actual field names of that contract (sourced from the real function,
+   not a hand-maintained list that can drift out of sync with it), so historical records
+   become comparable only when the underlying feature shape actually matches. */
+function getFeatureSchemaHash() {
+  try {
+    const sampleFeatures =
+      typeof buildConfidenceFeatures === "function" ? buildConfidenceFeatures({}) : {};
+    const keys = Object.keys(sampleFeatures).sort();
+    return djb2Hash(keys.join(","));
+  } catch (e) {
+    return "unknown";
+  }
+}
+
+/* Item 31: calibration provenance, kept separate from config fingerprint (item 31 notes
+   these are conceptually different things: tuning-parameter configuration vs which
+   model/calibration coefficients were actually live). Two predictions can share a config
+   fingerprint while using different model coefficients; this block is what actually lets
+   a historical prediction be reproduced. */
+function getCalibrationProvenance(league) {
+  try {
+    const liveBundleRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
+    const liveBundle = liveBundleRaw ? JSON.parse(liveBundleRaw) : null;
+    const coeffRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
+    const plattRaw = localStorage.getItem("BB_PLATT_CALIB");
+    const coeff = coeffRaw ? JSON.parse(coeffRaw) : null;
+    const platt = plattRaw ? JSON.parse(plattRaw) : null;
+    const scopeKey = String(league || "global").toLowerCase();
+    const scopedPlatt = (platt && (platt[scopeKey] || platt.global)) || null;
+    return {
+      confidenceModelCoeffHash: coeff ? djb2Hash(JSON.stringify(coeff)) : null,
+      plattA: scopedPlatt && isFinite(scopedPlatt.a) ? scopedPlatt.a : null,
+      plattB: scopedPlatt && isFinite(scopedPlatt.b) ? scopedPlatt.b : null,
+      calibrationRunAt: liveBundle && liveBundle.appliedAt ? new Date(liveBundle.appliedAt).toISOString() : null,
+    };
+  } catch (e) {
+    return { confidenceModelCoeffHash: null, plattA: null, plattB: null, calibrationRunAt: null, error: String(e && e.message || e) };
   }
 }
 
@@ -21798,7 +21855,7 @@ function selectLock(markets) {
       
       if (Number.isFinite(_fallbackDistProb)) {
         _reconstructed = Number.isFinite(_reconstructed)
-          ? clampNumber(0.3 * _fallbackDistProb + 0.7 * _reconstructed, 0.02, 0.98)
+          ? blendConfidenceAndDistribution(_fallbackDistProb, _reconstructed)
           : _fallbackDistProb;
       }
     } catch (_fallbackBlendErr) {
@@ -21976,6 +22033,23 @@ function _normalCdf(z) {
   if (z > 0) p = 1 - p;
   return p;
 }
+/* FIX item 10 / item 35: single source of truth for the confidence/distribution blend.
+   This was previously the literal expression `0.3 * distProb + 0.7 * winProb` duplicated
+   independently in five places (not three — this audit found two more than the original
+   review: line ~9788 and a second getConfidenceGrade-family site at ~22497, in addition to
+   the three already identified). Duplicated calibration math is exactly what item 35 warns
+   about: one copy can drift from the others under a future edit. The weights themselves are
+   UNCHANGED (0.3 distribution / 0.7 confidence-model) — backtesting alternative weightings
+   is a separate, evidence-gated item (item 10's VERIFY FIRST status) and is not done here. */
+const CONFIDENCE_BLEND_DIST_WEIGHT = 0.3;
+const CONFIDENCE_BLEND_MODEL_WEIGHT = 0.7;
+function blendConfidenceAndDistribution(distProb, modelProb) {
+  return clampNumber(
+    CONFIDENCE_BLEND_DIST_WEIGHT * distProb + CONFIDENCE_BLEND_MODEL_WEIGHT * modelProb,
+    0.02,
+    0.98,
+  );
+}
 function distributionWinProbability(meanEdge, leagueVolLimit, volRatio) {
   if (!isFinite(meanEdge) || !isFinite(leagueVolLimit) || leagueVolLimit <= 0) return null;
   const sd = leagueVolLimit * Math.max(0.5, isFinite(volRatio) ? volRatio : 1.0);
@@ -22097,7 +22171,7 @@ function getConfidenceWinProbability(
   let _coeffN = 0;
   try {
     const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
-    _coeffN = Number(nMap[_resolvedScope] || nMap.global || 0);
+    _coeffN = Number(nMap[_resolvedScope] || 0); /* FIX item 11: scoped N must not silently fall back to global N — a scoped coeff evaluated with global N could be treated as sufficiently trained when it is not */
   } catch (_e) {
     _coeffN = 0;
   }
@@ -22212,7 +22286,7 @@ function isConfidenceCoeffFitted(league) {
     let _coeffN = 0;
     try {
       const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
-      _coeffN = Number(nMap[_resolvedScope] || nMap.global || 0);
+      _coeffN = Number(nMap[_resolvedScope] || 0); /* FIX item 11: scoped N must not silently fall back to global N — a scoped coeff evaluated with global N could be treated as sufficiently trained when it is not */
     } catch (_e) {
       _coeffN = 0;
     }
@@ -22256,7 +22330,7 @@ function isConfidenceModelFitted(league) {
     let _coeffN = 0;
     try {
       const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
-      _coeffN = Number(nMap[_resolvedScope] || nMap.global || 0);
+      _coeffN = Number(nMap[_resolvedScope] || 0); /* FIX item 11: scoped N must not silently fall back to global N — a scoped coeff evaluated with global N could be treated as sufficiently trained when it is not */
     } catch (_e) {
       _coeffN = 0;
     }
@@ -22354,7 +22428,7 @@ function getConfidenceGrade(params) {
       params._distributionWinProbDiagnostic = _distProb; 
       if (Number.isFinite(winProb)) {
         
-        winProb = clampNumber(0.3 * _distProb + 0.7 * winProb, 0.02, 0.98);
+        winProb = blendConfidenceAndDistribution(_distProb, winProb);
       } else {
         
         winProb = _distProb;
@@ -22438,7 +22512,7 @@ function getMarginConfidenceGrade(params) {
       if (Number.isFinite(_distProb)) {
         
         if (Number.isFinite(winProb)) {
-          winProb = clampNumber(0.3 * _distProb + 0.7 * winProb, 0.02, 0.98);
+          winProb = blendConfidenceAndDistribution(_distProb, winProb);
         } else {
           winProb = _distProb;
         }
@@ -26735,7 +26809,13 @@ function computeFTProjection({
   let projBFT = bS;
 
   let _ftRealH2HWeight = 0;
+  /* FIX item 23: forensic H2H contribution record. The tracked payload previously stored
+     raw H2H arrays and hasH2H/h2hFactor but not the actual computed contribution, so a
+     saved prediction could not be forensically reconstructed to show exactly how much H2H
+     changed the projection. This captures the real variables from the calculation below. */
+  let _ftH2HContribution = null;
   if (ftHasH2H) {
+    const _ftH2HProjBefore = { a: projAFT, b: projBFT };
     const massacreH2H = getMassacreH2HSeries(
       "ft",
       _ctxRoot.fixtureMeta || getCurrentFixtureMeta(),
@@ -26826,6 +26906,20 @@ function computeFTProjection({
         ? projBFT * (1 - hw) + avgH2HB * hw
         : projBFT
       : avgH2HB;
+
+    _ftH2HContribution = {
+      sampleSizeA: decayH2HA.length,
+      sampleSizeB: decayH2HB.length,
+      estimateA: isFinite(avgH2HA) ? Number(avgH2HA.toFixed(2)) : null,
+      estimateB: isFinite(avgH2HB) ? Number(avgH2HB.toFixed(2)) : null,
+      weightApplied: isFinite(hw) ? Number(hw.toFixed(4)) : null,
+      divergence: isFinite(_h2hDivergence) ? Number(_h2hDivergence.toFixed(2)) : null,
+      usedDecayWeighting: !!(usedDecayA || usedDecayB),
+      projectionBeforeA: isFinite(_ftH2HProjBefore.a) ? Number(_ftH2HProjBefore.a.toFixed(2)) : null,
+      projectionBeforeB: isFinite(_ftH2HProjBefore.b) ? Number(_ftH2HProjBefore.b.toFixed(2)) : null,
+      projectionAfterA: isFinite(projAFT) ? Number(projAFT.toFixed(2)) : null,
+      projectionAfterB: isFinite(projBFT) ? Number(projBFT.toFixed(2)) : null,
+    };
 
     const _aInjAdjBaseline =
       avgOrNaN(aFTS) * injMultA * (injMultB < 1 ? 1 + (1 - injMultB) * _injOppBoostFactor : 1);
@@ -26923,6 +27017,7 @@ function computeFTProjection({
     ftVolRatio: _ftVolRatio,
 
     ftH2HWeight: isFinite(_ftRealH2HWeight) ? _ftRealH2HWeight : 0,
+    h2hContribution: _ftH2HContribution,
   };
 }
 
@@ -27999,85 +28094,11 @@ function calibrateConfidenceModel() {
     localStorage.setItem("BB_SETTLED_BIAS_AUDIT", JSON.stringify({ settledBucketCounts: _settledBucketCounts, weights: _biasWeightByBucket, fitN: fitPicks.length, holdoutN: calPicks.length, ts: new Date().toISOString() }));
   } catch (e) {}
 
-  const gradeWinRates = { A: [], B: [], C: [], D: [] };
-  fitPicks.forEach((p) => {
-    const grade = String(p.confidenceGrade || p.confidence || "").toUpperCase();
-    if (gradeWinRates[grade] !== undefined) {
-      gradeWinRates[grade].push(p.resultStatus === "win" ? 1 : 0);
-    }
-  });
-  const thresholds = {};
-  Object.keys(gradeWinRates).forEach((g) => {
-    const wins = gradeWinRates[g].filter((v) => v === 1).length;
-    const total = gradeWinRates[g].length;
-    if (total >= 5) thresholds[g + "WinRate"] = wins / total;
-  });
-
-  const winProbs = fitPicks
-    .map((p) => {
-      const edgePct = isFinite(Number(p.edgePct))
-        ? Number(p.edgePct) / 100
-        : isFinite(p.edge) && isFinite(p.line) && p.line
-          ? Math.abs(p.edge / p.line)
-          : null;
-      if (edgePct === null) return null;
-      const volRatio =
-        isFinite(p.volatility) && isFinite(p.volLimit) && p.volLimit > 0
-          ? p.volatility / p.volLimit
-          : 0.5;
-      const wp = getConfidenceWinProbability(
-        null,
-        edgePct,
-        volRatio,
-        p.sampleTier,
-        p.hasH2H,
-        false,
-        p.league,
-      );
-      return { winProb: wp, result: p.resultStatus };
-    })
-    .filter((s) => s && Number.isFinite(s.winProb));
-  if (winProbs.length >= 30) {
-    winProbs.sort((a, b) => a.winProb - b.winProb);
-    let aThreshold = winProbs[Math.floor(winProbs.length * 0.8)]?.winProb ?? 0.66;
-    let bThreshold = winProbs[Math.floor(winProbs.length * 0.5)]?.winProb ?? 0.58;
-    let cThreshold = winProbs[Math.floor(winProbs.length * 0.2)]?.winProb ?? 0.51;
-
-    const TARGET_WR_GAP = 0.04;
-    if (
-      isFinite(thresholds.AWinRate) &&
-      isFinite(thresholds.BWinRate) &&
-      thresholds.AWinRate < thresholds.BWinRate + TARGET_WR_GAP
-    ) {
-      aThreshold = clampNumber(aThreshold + 0.02, 0.1, 0.9);
-    }
-    if (
-      isFinite(thresholds.BWinRate) &&
-      isFinite(thresholds.CWinRate) &&
-      thresholds.BWinRate < thresholds.CWinRate + TARGET_WR_GAP
-    ) {
-      bThreshold = clampNumber(bThreshold + 0.02, 0.1, 0.9);
-    }
-    if (
-      isFinite(thresholds.CWinRate) &&
-      isFinite(thresholds.DWinRate) &&
-      thresholds.CWinRate < thresholds.DWinRate + TARGET_WR_GAP
-    ) {
-      cThreshold = clampNumber(cThreshold + 0.02, 0.1, 0.9);
-    }
-    const gradeThresholds = { aThresh: aThreshold, bThresh: bThreshold, cThresh: cThreshold };
-    try {
-      localStorage.setItem("BB_CONFIDENCE_THRESHOLDS_PROPOSED", JSON.stringify(gradeThresholds));
-      localStorage.setItem("BB_CONFIDENCE_GRADE_WIN_RATES_PROPOSED", JSON.stringify(thresholds));
-      engineDebug("Confidence grade thresholds proposed (not auto-applied)", {
-        gradeThresholds,
-        winRates: thresholds,
-      });
-    } catch (e) {
-      console.error("[BB Engine] Confidence grade threshold proposal save failed", e);
-    }
-  }
-
+  /* FIX item 28: fit the proposed model FIRST (moved up from below threshold derivation).
+     Threshold/grade-winrate derivation must score picks using THIS proposed model, not the
+     live global getConfidenceWinProbability() (which reads the OLD coefficients still in
+     localStorage) — scoring a new model's thresholds against the old model's predictions
+     was mixing model generations. */
   const buildF = (p) => buildConfidenceFeatures(p);
 
   const _gd = (data, lr, lambda) => {
@@ -28207,6 +28228,80 @@ function calibrateConfidenceModel() {
       (coeff.trap ?? -1.2) * f.trap
     );
   };
+  /* FIX item 28: score a pick's win probability using the PROPOSED coefficients for its own
+     scope (falling back to the proposed global model), not the live model in localStorage. */
+  const _proposedWinProb = (p) => {
+    const coeff = (p.league && models[p.league]) || models.global;
+    if (!coeff) return null;
+    const lo = clampNumber(_rawLogOdds(coeff, p), -20, 20);
+    return 1 / (1 + Math.exp(-lo));
+  };
+
+  /* FIX item 29: grade win rates must come from calPicks (the untouched holdout), not the
+     same fitPicks used to fit the model above — otherwise the model is graded using the
+     data it was trained on, which inflates apparent reliability. */
+  const gradeWinRates = { A: [], B: [], C: [], D: [] };
+  calPicks.forEach((p) => {
+    const grade = String(p.confidenceGrade || p.confidence || "").toUpperCase();
+    if (gradeWinRates[grade] !== undefined) {
+      gradeWinRates[grade].push(p.resultStatus === "win" ? 1 : 0);
+    }
+  });
+  const thresholds = {};
+  Object.keys(gradeWinRates).forEach((g) => {
+    const wins = gradeWinRates[g].filter((v) => v === 1).length;
+    const total = gradeWinRates[g].length;
+    if (total >= 5) thresholds[g + "WinRate"] = wins / total;
+  });
+
+  /* FIX item 27/28: percentile thresholds derived from calPicks (untouched holdout) scored
+     with the PROPOSED model via _proposedWinProb — previously fitPicks scored with the live
+     global model, contaminating both the training/calibration separation (27) and the model
+     generation being evaluated (28). */
+  const winProbs = calPicks
+    .map((p) => ({ winProb: _proposedWinProb(p), result: p.resultStatus }))
+    .filter((s) => s && Number.isFinite(s.winProb));
+  if (winProbs.length >= 30) {
+    winProbs.sort((a, b) => a.winProb - b.winProb);
+    let aThreshold = winProbs[Math.floor(winProbs.length * 0.8)]?.winProb ?? 0.66;
+    let bThreshold = winProbs[Math.floor(winProbs.length * 0.5)]?.winProb ?? 0.58;
+    let cThreshold = winProbs[Math.floor(winProbs.length * 0.2)]?.winProb ?? 0.51;
+
+    const TARGET_WR_GAP = 0.04;
+    if (
+      isFinite(thresholds.AWinRate) &&
+      isFinite(thresholds.BWinRate) &&
+      thresholds.AWinRate < thresholds.BWinRate + TARGET_WR_GAP
+    ) {
+      aThreshold = clampNumber(aThreshold + 0.02, 0.1, 0.9);
+    }
+    if (
+      isFinite(thresholds.BWinRate) &&
+      isFinite(thresholds.CWinRate) &&
+      thresholds.BWinRate < thresholds.CWinRate + TARGET_WR_GAP
+    ) {
+      bThreshold = clampNumber(bThreshold + 0.02, 0.1, 0.9);
+    }
+    if (
+      isFinite(thresholds.CWinRate) &&
+      isFinite(thresholds.DWinRate) &&
+      thresholds.CWinRate < thresholds.DWinRate + TARGET_WR_GAP
+    ) {
+      cThreshold = clampNumber(cThreshold + 0.02, 0.1, 0.9);
+    }
+    const gradeThresholds = { aThresh: aThreshold, bThresh: bThreshold, cThresh: cThreshold };
+    try {
+      localStorage.setItem("BB_CONFIDENCE_THRESHOLDS_PROPOSED", JSON.stringify(gradeThresholds));
+      localStorage.setItem("BB_CONFIDENCE_GRADE_WIN_RATES_PROPOSED", JSON.stringify(thresholds));
+      engineDebug("Confidence grade thresholds proposed (not auto-applied)", {
+        gradeThresholds,
+        winRates: thresholds,
+      });
+    } catch (e) {
+      console.error("[BB Engine] Confidence grade threshold proposal save failed", e);
+    }
+  }
+
   const fitPlattScaling = (coeff, calRows) => {
     if (!coeff || !calRows || calRows.length < 20)
       return { a: 1, b: 0, n: calRows ? calRows.length : 0 };
@@ -28246,6 +28341,46 @@ function calibrateConfidenceModel() {
     plattCalib[scope] = fitPlattScaling(models[scope], scopeCalRows);
   });
 
+  /* FIX item 26: this is where a genuine out-of-sample evaluation belongs — score calPicks
+     (never touched by runGD/_gd above) with the PROPOSED model and report real predictive
+     metrics, not just a raw win rate disconnected from any specific model's predictions.
+     runOutOfSampleValidation() (separate function, see its updated comment) intentionally
+     does NOT do this — it only tracks raw test-set win rate over time as a simple drift
+     monitor and was never actually evaluating model predictions; that gap is what item 26
+     originally flagged, and it is fixed here where the model fitting actually happens. */
+  try {
+    const evalRows = calPicks
+      .map((p) => ({ prob: _proposedWinProb(p), y: p.resultStatus === "win" ? 1 : 0 }))
+      .filter((r) => Number.isFinite(r.prob));
+    if (evalRows.length >= 15) {
+      let brierSum = 0,
+        logLossSum = 0,
+        correct = 0;
+      evalRows.forEach((r) => {
+        brierSum += (r.prob - r.y) ** 2;
+        const pClamped = Math.min(1 - 1e-9, Math.max(1e-9, r.prob));
+        logLossSum -= r.y === 1 ? Math.log(pClamped) : Math.log(1 - pClamped);
+        if ((r.prob >= 0.5 ? 1 : 0) === r.y) correct++;
+      });
+      const oosMetrics = {
+        n: evalRows.length,
+        brierScore: brierSum / evalRows.length,
+        logLoss: logLossSum / evalRows.length,
+        accuracy: correct / evalRows.length,
+        meanPredictedProb: evalRows.reduce((s, r) => s + r.prob, 0) / evalRows.length,
+        meanActualWinRate: evalRows.reduce((s, r) => s + r.y, 0) / evalRows.length,
+        computedAt: new Date().toISOString(),
+      };
+      localStorage.setItem("BB_CONFIDENCE_MODEL_OOS_METRICS_PROPOSED", JSON.stringify(oosMetrics));
+      engineDebug(
+        "Proposed confidence model OOS metrics (held-out calPicks, never used in fitting)",
+        oosMetrics,
+      );
+    }
+  } catch (e) {
+    engineDebug("OOS metrics computation failed", { error: e?.message || String(e) });
+  }
+
   if (Object.keys(models).length) {
     try {
       localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF_PROPOSED", JSON.stringify(models));
@@ -28268,6 +28403,12 @@ function calibrateConfidenceModel() {
 
 <script>
 
+/* FIX item 26 (clarifying comment only, no behavior change here): despite the name, this
+   function does NOT fit or evaluate a predictive model. It only reports the raw win rate of
+   whichever picks happen to fall after a persisted chronological cutoff — a simple drift
+   monitor, not a train/predict experiment. The actual model-fit-then-evaluate-on-holdout
+   logic (with real Brier score / log loss / accuracy) now lives in calibrateConfidenceModel()
+   above, which is the function the original item 26 finding actually applies to. */
 function runOutOfSampleValidation(league) {
   const allPicks = getLearningTrackedPicks()
     .filter(
@@ -28336,6 +28477,12 @@ function checkModelHealth(league) {
 
   const MIN_N = 12;
   if (allPicks.length < MIN_N) return null;
+  /* FIX item 30: getLearningTrackedPicks() returns [...active, ...archived], which is not
+     guaranteed to be globally chronological (active is newest-first via unshift, but the
+     concatenation with archived does not preserve that). Sort explicitly, newest first,
+     before slicing, so "recent" actually means recent. Mirrors the existing sort convention
+     used elsewhere in the tracker (see displayPicks sort). */
+  allPicks.sort((a, b) => (Date.parse(b.createdAt) || 0) - (Date.parse(a.createdAt) || 0));
   const recentWindow = Math.min(20, Math.max(8, Math.round(allPicks.length * 0.4)));
   const recentPicks = allPicks.slice(0, recentWindow) ;
   const allWR = allPicks.filter((p) => p.resultStatus === "win").length / allPicks.length;
@@ -28933,6 +29080,22 @@ function buildTrackedPickPayload({
     originalConfidenceGrade: String(grade || "").toUpperCase(),
     modelVersion: getCurrentModelVersion(),
     configFingerprint: getLiveConfigFingerprint(league),
+    /* FIX items 24/25/31: identity/reproducibility fields the tracked payload was missing.
+       featureSchemaHash changes if the confidence model's actual input contract changes.
+       dataSnapshotId is a content hash of the same immutable snapshot already being saved
+       below (extends the existing snapshot system rather than replacing it, per item 25).
+       calibrationProvenance records which model/Platt coefficients were actually live and
+       when they were last (re)calibrated, kept separate from configFingerprint since those
+       are different things (item 31). */
+    featureSchemaHash: getFeatureSchemaHash(),
+    dataSnapshotId: (() => {
+      try {
+        return djb2Hash(JSON.stringify(snapshot));
+      } catch (_e) {
+        return null;
+      }
+    })(),
+    calibrationProvenance: getCalibrationProvenance(league),
     isLock,
     isABQualified,
     trackerBucket: "raw",
@@ -31400,7 +31563,7 @@ async function runEngine() {
             // Matches getConfidenceGrade authority. Distribution alone never replaces primary.
             if (Number.isFinite(_lockDistProb)) {
               if (Number.isFinite(_lockWinProb)) {
-                _lockWinProb = clampNumber(0.3 * _lockDistProb + 0.7 * _lockWinProb, 0.02, 0.98);
+                _lockWinProb = blendConfidenceAndDistribution(_lockDistProb, _lockWinProb);
               } else {
                 _lockWinProb = _lockDistProb; // only when primary missing
               }
@@ -31934,6 +32097,11 @@ async function runEngine() {
             avgB: avgOrNaN(_aud_h2hFTB),
             h2hWeight: _aud_ftH2HW,
             teamWeight: 1 - _aud_ftH2HW,
+            /* FIX item 23: real per-pick H2H contribution record (sample size actually used
+               after decay-weighting, weight actually applied, divergence vs the pre-H2H
+               model total, and the projection immediately before/after this blend stage).
+               Null when H2H was not used for this pick. */
+            contribution: ftCalc.h2hContribution || null,
             formulaNote:
               'projA = projA*(1-hw) + avgH2HA*hw  (hw is dynamic via getH2HWeight: sample-size log-scaled, capped at 0.30 by default (getParam("h2hMaxWeight", league)), damped by injury/volatility/blowout/pace-gap — NOT a fixed constant)',
           },
@@ -32138,7 +32306,7 @@ async function runEngine() {
       confidenceBuild: {
         gradeThresholds: _aud_gradeThresholds,
         scoringFormula:
-          "STALE-STRING FIX: the additive score system previously documented here (score += 2.0/1.0/-2/-4/-1.0, clamp(edgePct...), q4EdgeNorm, etc.) does not exist in the live code and never ran during this build. Actual live grading (getConfidenceGrade / resolveConfidenceGradeFromWinProbability): winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability itself returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope has >=40 settled picks (BB_CONFIDENCE_MODEL_COEFF_N) — so distribution CDF is the sole driver until then. Grade A is unreachable (capped at B) while isConfidenceCoeffFitted(league) is false, i.e. before calibration. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D; an ECE-based cap (D13) can further cap to B/C for poorly-calibrated market/league scopes with n>=30 tracked outcomes.",
+          "DOC FIX (item 32, " + new Date().toISOString().slice(0,10) + "): the previous version of this note (itself a replacement for an even earlier stale description) claimed two safety mechanisms that were searched for exhaustively ('ECE' and 'D13', zero matches anywhere in this file) and do not exist in the live code: (1) an unfitted-model cap that supposedly makes Grade A unreachable before calibration, and (2) an ECE-based 'D13' cap on B/C grades. Neither is implemented — this note now describes only what the code actually does. Actual live grading (getConfidenceGrade / resolveConfidenceGradeFromWinProbability): winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability itself returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope] — no longer falls back to the global N if the scope's own N is missing/zero, see item 11 fix) — so distribution CDF alone drives winProb until then, and any grade including A IS reachable from a sufficiently high distribution-only probability; there is no cap forcing B-or-lower during this period. Separately, if injury data failed to fetch, winProb is capped at 0.62 (min(winProb, 0.62)) regardless of source. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D. If an unfitted-model grade cap or an ECE-based calibration cap is actually wanted as a safety mechanism, it needs to be designed and implemented — this string cannot be relied on as evidence that either exists; treat documentation like this as unverified until checked against source.",
         markets: {
           FT: {
             pick: ftPick,
