@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4200,7 +4199,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
         <button type="button" id="trackerCloseBtn" class="tracker-close">✕</button>
       </div>
     </div>
-    <div class="tracker-summary" id="trackerSummary">0 saved • 0 settled • 0 wins</div>
+    <div class="tracker-summary" id="trackerSummary">0 live • 0 wins • 0 losses</div>
 
     <div class="tracker-body-scroll" id="trackedPicksWrap">
       <div id="trackerAnalyticsPanel" class="tracker-analytics-panel"></div>
@@ -4553,8 +4552,8 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v25_audit10_20260913";
-window.__BB_INTEGRITY_BUILD__ = "F01-F19-2026-09-17";
+const APP_BUILD_VERSION = "v25_integrity_harden_20260917";
+window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260917";
 window.__BB_CLEAR_STALE_REPLAY_SNAPSHOTS__ = function __BB_CLEAR_STALE_REPLAY_SNAPSHOTS__() {
   try {
     const want = String(window.__BB_INTEGRITY_BUILD__ || "");
@@ -15041,7 +15040,7 @@ function applySmartLineToPick(pickRow, rawInput, league) {
   
   if (!pickRow) return pickRow;
   const meta = typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(rawInput) : null;
-  return {
+  let next = {
     ...pickRow,
     decisionLine: pickRow.line,
     trackerLine: pickRow.line,
@@ -15051,6 +15050,8 @@ function applySmartLineToPick(pickRow, rawInput, league) {
     bufferedPickText: pickRow.pick,
     smartLineMeta: meta,
   };
+  next = applyWideRangeLineGate(next, rawInput);
+  return next;
 }
 
 function parseMarketRangeMeta(val) {
@@ -15087,6 +15088,114 @@ function parseMarketRangeMeta(val) {
   }
 
   return null;
+}
+
+
+function getWideRangeMarketThreshold(marketKey) {
+  const k = String(marketKey || "").toLowerCase();
+  if (k === "ft" || k === "winner") return 8;
+  if (k === "h1" || k === "h2") return 6;
+  if (k.indexOf("team_") === 0 || k === "h1_team_a" || k === "h1_team_b") return 6;
+  if (k.indexOf("q") === 0) return 4;
+  if (k.indexOf("handicap") === 0) return 3;
+  return 8;
+}
+
+function forcePickNoPlayWithNote(pickRow, noteText) {
+  if (!pickRow) return pickRow;
+  pickRow.pick = "NO PLAY";
+  pickRow.displayPick = "NO PLAY";
+  pickRow.bufferedPickText = "NO PLAY";
+  pickRow.confidence = "NaN";
+  pickRow.isLock = false;
+  pickRow.lockRestricted = true;
+  const note = String(noteText || "").trim();
+  if (note) {
+    const prev = String(pickRow.note || "").trim();
+    if (!prev) pickRow.note = note;
+    else if (prev.indexOf(note) !== 0) {
+      if (prev.indexOf(note) >= 0) pickRow.note = note + " · " + prev.replace(note, "").replace(/^[·\s]+/, "");
+      else pickRow.note = note + " · " + prev;
+    }
+  }
+  return pickRow;
+}
+
+function applyWideRangeLineGate(pickRow, rawInput) {
+  if (!pickRow) return pickRow;
+  const meta =
+    typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(rawInput) : null;
+  if (!meta || !meta.isRange) return pickRow;
+  const low = Number(meta.low);
+  const high = Number(meta.high);
+  if (!Number.isFinite(low) || !Number.isFinite(high)) return pickRow;
+  const rangeWidth = high - low;
+  const threshold = getWideRangeMarketThreshold(pickRow.marketKey);
+  if (!(rangeWidth > threshold)) return pickRow;
+  pickRow.wideRangeBlocked = true;
+  pickRow.wideRangeWidth = rangeWidth;
+  pickRow.wideRangeThreshold = threshold;
+  pickRow.smartLineMeta = meta;
+  return forcePickNoPlayWithNote(
+    pickRow,
+    "Wide range line — enter a single book price",
+  );
+}
+
+function applySiblingMarketContradictionGate(picks, rawMarketInputs) {
+  if (!Array.isArray(picks) || !picks.length) return picks;
+  const raw = rawMarketInputs || {};
+  const lineOf = function (key) {
+    const meta =
+      typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(raw[key] || "") : null;
+    if (meta && Number.isFinite(meta.mid)) return meta.mid;
+    const row = picks.find(function (p) {
+      return p && p.marketKey === key;
+    });
+    if (row && Number.isFinite(row.line)) return row.line;
+    return NaN;
+  };
+  const forceKeys = function (keys, note) {
+    picks.forEach(function (p) {
+      if (!p || keys.indexOf(p.marketKey) < 0) return;
+      if (p.pick === "NO PLAY" || p.pick === "NaN") {
+        // Still stamp the contradiction note if missing, but do not invent a play.
+        const prev = String(p.note || "");
+        if (note && prev.indexOf(note) < 0) {
+          p.note = prev ? note + " · " + prev : note;
+        }
+        p.confidence = "NaN";
+        return;
+      }
+      forcePickNoPlayWithNote(p, note);
+      p.marketContradictionBlocked = true;
+    });
+  };
+  const q1 = lineOf("q1");
+  const q2 = lineOf("q2");
+  const h1 = lineOf("h1");
+  if (Number.isFinite(q1) && Number.isFinite(q2) && Number.isFinite(h1)) {
+    if (Math.abs(q1 + q2 - h1) > 6.0) {
+      forceKeys(["q1", "q2", "h1"], "Market contradiction: Q1+Q2 vs 1H lines");
+    }
+  }
+  const q3 = lineOf("q3");
+  const q4 = lineOf("q4");
+  const h2 = lineOf("h2");
+  if (Number.isFinite(q3) && Number.isFinite(q4) && Number.isFinite(h2)) {
+    if (Math.abs(q3 + q4 - h2) > 6.0) {
+      forceKeys(["q3", "q4", "h2"], "Market contradiction: Q3+Q4 vs 2H lines");
+    }
+  }
+  return picks;
+}
+
+function auditFinalGradeSentinel(confidence, pick) {
+  const conf = String(confidence == null ? "" : confidence).trim();
+  // NO PLAY rows historically used em-dash / hyphen / empty instead of NaN.
+  if (!conf || conf === "-" || conf === "–" || conf === "—") return "NaN";
+  void pick;
+  return conf;
 }
 
 function parseHandicapLine(val) {
@@ -17634,11 +17743,8 @@ function renderTrackedPicks() {
       g_liveGameStatus.has(p.eventId),
   ).length;
 
-  const savedCount = Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks.length
-    : 0;
-  const settledCount = Number(stats.settled || 0);
-  summaryEl.innerHTML = `${savedCount} saved • ${settledCount} settled • ${stats.wins || 0} wins • ${liveCount} live`;
+  // Tracker summary matches classic engine: live / wins / losses only (not saved/settled).
+  summaryEl.innerHTML = `${liveCount} live • ${stats.wins || 0} wins • ${stats.losses || 0} losses`;
 
   try {
     const _qfStats = getQuarterFormBacktestStats();
@@ -17661,6 +17767,9 @@ function renderTrackedPicks() {
     marketSummaryEl.style.display = "none";
   }
 
+  const savedCount = Array.isArray(AppState.tracker.state.activePicks)
+    ? AppState.tracker.state.activePicks.length
+    : 0;
   if (!displayPicks.length) {
     emptyEl.style.display = isTrackerPicksView() ? "block" : "none";
     emptyEl.textContent = savedCount
@@ -22673,15 +22782,25 @@ function isConfidenceModelFitted(league) {
   }
 }
 
-function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKey = "") {
+function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKey = "", outMeta = null) {
   if (!Number.isFinite(winProb) || winProb < 0 || winProb > 1) return "NaN";
   const threshA = getParam("confidenceAThresh", league) ?? 0.66;
   const threshB = getParam("confidenceBThresh", league) ?? 0.58;
   const threshC = getParam("confidenceCThresh", league) ?? 0.51;
-  if (winProb >= threshA) return "A";
-  if (winProb >= threshB) return "B";
-  if (winProb >= threshC) return "C";
-  return "D";
+  let grade = "D";
+  if (winProb >= threshA) grade = "A";
+  else if (winProb >= threshB) grade = "B";
+  else if (winProb >= threshC) grade = "C";
+  // H3: unfitted logistic cannot mint Grade A from distribution-only winProb.
+  if (
+    grade === "A" &&
+    typeof isConfidenceModelFitted === "function" &&
+    !isConfidenceModelFitted(league)
+  ) {
+    grade = "B";
+    if (outMeta && typeof outMeta === "object") outMeta._gradeCappedUnfitted = true;
+  }
+  return grade;
 }
 
 </script>
@@ -22795,7 +22914,17 @@ function getConfidenceGrade(params) {
     return "NaN";
   }
 
-  return resolveConfidenceGradeFromWinProbability(winProb, league, params?.marketKey || "");
+  const _gradeCapMeta = {};
+  const _grade = resolveConfidenceGradeFromWinProbability(
+    winProb,
+    league,
+    params?.marketKey || "",
+    _gradeCapMeta,
+  );
+  if (_gradeCapMeta._gradeCappedUnfitted && params && typeof params === "object") {
+    params._gradeCappedUnfitted = true;
+  }
+  return _grade;
 }
 
 function getMarginConfidenceGrade(params) {
@@ -22876,7 +23005,17 @@ function getMarginConfidenceGrade(params) {
     return "NaN";
   }
 
-  return resolveConfidenceGradeFromWinProbability(winProb, league, params?.marketKey || "margin");
+  const _gradeCapMeta = {};
+  const _grade = resolveConfidenceGradeFromWinProbability(
+    winProb,
+    league,
+    params?.marketKey || "margin",
+    _gradeCapMeta,
+  );
+  if (_gradeCapMeta._gradeCappedUnfitted && params && typeof params === "object") {
+    params._gradeCappedUnfitted = true;
+  }
+  return _grade;
 }
 
 function anchorProjection(proj, sampleSize, leagueBase) {
@@ -24335,7 +24474,14 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
     }
     const items = data?.injuries || data?.items || [];
     if (!items.length) {
+      // Empty ESPN injury list is NOT proof of full strength — treat as injury-blind for grading.
       result.confirmedNone = true;
+      result.emptyFeed = true;
+      result.fetchFailed = true; // triggers existing 0.62 winProb cap in getConfidenceGrade
+      result.notes.push({
+        type: "meta",
+        text: "Injury feed empty — grades capped",
+      });
       return result;
     }
 
@@ -25307,9 +25453,9 @@ function renderInjuryBox(boxId, contentId, inj) {
     bits.push(
       '<div class="inj-dtd">Injury feed failed — availability UNKNOWN. Do not treat this roster as full strength.</div>',
     );
-  } else if (inj.confirmedNone && !notes.length) {
+  } else if ((inj.confirmedNone || inj.emptyFeed) && !notes.length) {
     bits.push(
-      '<div class="inj-dtd">ESPN list empty. No other absences reported.</div>',
+      '<div class="inj-dtd">Injury feed empty — grades capped. Do not treat roster as confirmed full strength.</div>',
     );
   } else if (!notes.length) {
     bits.push('<div>No ESPN absences listed. Confirm stars yourself before sides.</div>');
@@ -26203,6 +26349,15 @@ async function fetchESPNCore(league, teamAName, teamBName) {
 
     renderInjuryBox("injuryBoxA", "injuryContentA", AppState.injuries.A);
     renderInjuryBox("injuryBoxB", "injuryContentB", AppState.injuries.B);
+    const _injEmptyWarn =
+      !!(AppState.injuries.A && (AppState.injuries.A.emptyFeed || (AppState.injuries.A.confirmedNone && AppState.injuries.A.fetchFailed))) ||
+      !!(AppState.injuries.B && (AppState.injuries.B.emptyFeed || (AppState.injuries.B.confirmedNone && AppState.injuries.B.fetchFailed)));
+    if (_injEmptyWarn) {
+      messages.push("Injury feed empty — grades capped");
+      window.__bbInjuryFeedEmptyWarning = true;
+    } else {
+      window.__bbInjuryFeedEmptyWarning = false;
+    }
     if (typeof updateCardExtraLabels === "function") updateCardExtraLabels();
     if (typeof applyAvailabilityLayer === "function") applyAvailabilityLayer();
     if (typeof renderQualityPaceCard === "function") renderQualityPaceCard();
@@ -31928,6 +32083,12 @@ async function runEngine() {
       .map((p) => applySmartLineToPick(p, rawMarketInputs[p.marketKey], league))
       .filter(Boolean);
 
+    // H1/H2: wide-range + sibling market-line contradiction gates (market inputs, not proj rewrite).
+    finalPicksForDisplay.forEach((p) =>
+      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey]),
+    );
+    applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
+
     finalPicksForDisplay.forEach((p) => {
       p.smartLineNoPlay = p.displayPick === "NO PLAY" && p.pick !== "NO PLAY";
     });
@@ -31976,7 +32137,7 @@ async function runEngine() {
     finalPicksForDisplay.forEach((p) => {
 
       if (p.pick === "NO PLAY" && p.note) {
-        p.confidence = "—";
+        p.confidence = "NaN";
         p.displayPick = "NO PLAY";
         p.bufferedPickText = "NO PLAY";
         return;
@@ -31986,7 +32147,7 @@ async function runEngine() {
         p.displayPick = p.pick;
         p.bufferedPickText = p.pick;
       } else {
-        p.confidence = "—";
+        p.confidence = "NaN";
         p.displayPick = "NO PLAY";
         p.bufferedPickText = "NO PLAY";
       }
@@ -32071,6 +32232,12 @@ async function runEngine() {
       });
     }
 
+    // Re-assert H1/H2 after winProb/grade re-sync so soft/wide lines cannot remint Grade A.
+    finalPicksForDisplay.forEach((p) =>
+      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey]),
+    );
+    applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
+
     const paceIcon = ftCalc.pace > 100 ? "🔥" : "🧊";
 
     const paceDisplay = isFinite(ftCalc.pace) && ftCalc.pace > 0 ? ftCalc.pace.toFixed(1) : "—";
@@ -32089,6 +32256,16 @@ async function runEngine() {
           <div><div style="font-size: 9px; color: var(--muted); margin-bottom: 3px; text-transform: uppercase;">Pace</div><div style="font-size: 18px; font-weight: 900; color: var(--tracker-strong)">${paceIcon} ${paceDisplay}</div></div>
           <div><div style="font-size: 9px; color: var(--muted); margin-bottom: 3px; text-transform: uppercase;">Team B Net</div><div style="font-size: 18px; font-weight: 900; color: ${netBColor}">${netBDisplay}</div></div>
         </div>`;
+
+    const _injEmptyBoard =
+      (typeof window !== "undefined" && window.__bbInjuryFeedEmptyWarning) ||
+      !!(g_injA && (g_injA.emptyFeed || (g_injA.confirmedNone && g_injA.fetchFailed))) ||
+      !!(g_injB && (g_injB.emptyFeed || (g_injB.confirmedNone && g_injB.fetchFailed)));
+    if (_injEmptyBoard) {
+      dashHtml =
+        '<div id="injuryFeedEmptyWarn" style="background:#3a1a00;color:#ffb84d;padding:8px 10px;font-weight:800;font-size:11px;border-bottom:1px solid #6a3a00;">⚠ Injury feed empty — grades capped</div>' +
+        dashHtml;
+    }
 
     let existingDash = document.getElementById("syndicateDashboard");
     if (!existingDash) {
@@ -32797,7 +32974,7 @@ async function runEngine() {
       confidenceBuild: {
         gradeThresholds: _aud_gradeThresholds,
         scoringFormula:
-          "DOC FIX (item 32, " + new Date().toISOString().slice(0,10) + "): the previous version of this note (itself a replacement for an even earlier stale description) claimed two safety mechanisms that were searched for exhaustively ('ECE' and 'D13', zero matches anywhere in this file) and do not exist in the live code: (1) an unfitted-model cap that supposedly makes Grade A unreachable before calibration, and (2) an ECE-based 'D13' cap on B/C grades. Neither is implemented — this note now describes only what the code actually does. Actual live grading (getConfidenceGrade / resolveConfidenceGradeFromWinProbability): winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability itself returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope] — no longer falls back to the global N if the scope's own N is missing/zero, see item 11 fix) — so distribution CDF alone drives winProb until then, and any grade including A IS reachable from a sufficiently high distribution-only probability; there is no cap forcing B-or-lower during this period. Separately, if injury data failed to fetch, winProb is capped at 0.62 (min(winProb, 0.62)) regardless of source. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D. If an unfitted-model grade cap or an ECE-based calibration cap is actually wanted as a safety mechanism, it needs to be designed and implemented — this string cannot be relied on as evidence that either exists; treat documentation like this as unverified until checked against source.",
+          "DOC FIX (item 32 / H3 harden, " + new Date().toISOString().slice(0,10) + "): Unfitted-model Grade A cap IS NOW IMPLEMENTED in resolveConfidenceGradeFromWinProbability (also enforced via getConfidenceGrade / getMarginConfidenceGrade): if !isConfidenceModelFitted(league) and the resolved grade would be A, grade is capped to B and params._gradeCappedUnfitted may be set. This closes the prior distribution-only path that could mint Grade A before logistic calibration. ECE-based D13 cap on B/C is still not implemented. Actual live grading: winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope]). Separately, if injury data failed to fetch OR ESPN injury feed returned empty (emptyFeed), winProb is capped at 0.62 (min(winProb, 0.62)) via injuryFetchFailed. Wide-range market inputs and Q1+Q2 vs H1 / Q3+Q4 vs H2 line contradictions force NO PLAY (confidence NaN) and never publish Grade A/B/C on a wide midpoint. Thresholds: winProb>=aThresh->A (capped to B when unfitted), >=bThresh->B, >=cThresh->C, else D.",
         markets: {
           FT: {
             pick: ftPick,
@@ -32935,7 +33112,11 @@ async function runEngine() {
                 trap: !!row.trap,
                 hasH2H: !!row.hasH2H,
                 marketKey: key,
-                finalGrade: row.confidence || "NaN",
+                finalGrade: (typeof auditFinalGradeSentinel === "function"
+                  ? auditFinalGradeSentinel(row.confidence, row.pick)
+                  : (row.confidence && String(row.confidence).trim() && String(row.confidence).trim() !== "—" && String(row.confidence).trim() !== "-"
+                      ? row.confidence
+                      : "NaN")),
                 winProbability: isFinite(row.winProbability) ? row.winProbability : null,
               };
             }
