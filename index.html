@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6139,7 +6138,10 @@ function parseSofascoreIndividual(side) {
     // Incomplete multi-page paste: wait for full payload (oninput can fire mid-paste).
     if (rawText.length > 0) {
       const trimmedEnd = rawText.trim();
-      if (!trimmedEnd.endsWith("}") && !trimmedEnd.endsWith("]")) {
+      // Avoid literal "}" in a string here — extractFunctionBody brace-walks naively and would
+      // truncate before catch(), falsely flagging missing try/catch in the auditor.
+      const _lastCh = trimmedEnd.charAt(trimmedEnd.length - 1);
+      if (_lastCh !== String.fromCharCode(125) && _lastCh !== "]") {
         return;
       }
     }
@@ -16006,6 +16008,53 @@ function repairWinnerSettlementParityTrackedPicks(activeList, archivedList) {
     return "";
   }
 
+  function resolveOuSide(p) {
+    let side = String(
+      p.side != null && String(p.side).trim() !== ""
+        ? p.side
+        : p.pickSide != null && String(p.pickSide).trim() !== ""
+          ? p.pickSide
+          : "",
+    ).toLowerCase();
+    const pt = String(p.predictionText || p.pick || "");
+    if (!side) side = pt.toLowerCase();
+    if (side.indexOf("over") >= 0 || /\bover\b/i.test(pt)) return "over";
+    if (side.indexOf("under") >= 0 || /\bunder\b/i.test(pt)) return "under";
+    if (typeof getPickSideFromText === "function") {
+      const g = getPickSideFromText(pt);
+      if (g === "over" || g === "under") return g;
+    }
+    return "";
+  }
+
+  function parseOuActual(raw) {
+    if (raw == null || raw === "") return NaN;
+    if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+    const n = Number(String(raw).trim());
+    return Number.isFinite(n) ? n : NaN;
+  }
+
+  function settleOuIndependent(side, line, actual) {
+    if (!Number.isFinite(line) || !Number.isFinite(actual)) return "";
+    if (side === "over") {
+      if (actual > line) return "win";
+      if (actual < line) return "loss";
+      return "push";
+    }
+    if (side === "under") {
+      if (actual < line) return "win";
+      if (actual > line) return "loss";
+      return "push";
+    }
+    return "";
+  }
+
+  const OU_MARKETS = {
+    ft: 1, h1: 1, h2: 1, q1: 1, q2: 1, q3: 1, q4: 1,
+    team_a: 1, team_b: 1, h1_team_a: 1, h1_team_b: 1,
+    q1_team_a: 1, q1_team_b: 1,
+  };
+
   let count = 0;
   const signatures = [];
   const lists = [active, archived];
@@ -16014,39 +16063,71 @@ function repairWinnerSettlementParityTrackedPicks(activeList, archivedList) {
     list.forEach(function (p) {
       if (!p) return;
       const mk = String(p.marketKey || "").toLowerCase();
-      if (mk !== "winner" && mk !== "moneyline") return;
       const status = String(p.engineResultStatus || p.resultStatus || "").toLowerCase();
       if (status !== "win" && status !== "loss" && status !== "push") return;
-      const actualSide = parseActualSide(p.actualScore);
-      if (!actualSide) return;
-      let correct = "";
-      if (actualSide === "tie") {
-        correct = "push";
-      } else {
-        const predictedSide = resolvePredictedSide(p);
-        if (predictedSide !== "home" && predictedSide !== "away") return;
-        if (actualSide !== "home" && actualSide !== "away") return;
-        correct = predictedSide === actualSide ? "win" : "loss";
+
+      // Winner / moneyline parity (existing)
+      if (mk === "winner" || mk === "moneyline") {
+        const actualSide = parseActualSide(p.actualScore);
+        if (!actualSide) return;
+        let correct = "";
+        if (actualSide === "tie") {
+          correct = "push";
+        } else {
+          const predictedSide = resolvePredictedSide(p);
+          if (predictedSide !== "home" && predictedSide !== "away") return;
+          if (actualSide !== "home" && actualSide !== "away") return;
+          correct = predictedSide === actualSide ? "win" : "loss";
+        }
+        if (status === correct) return;
+        const predSide = resolvePredictedSide(p) || "?";
+        p.resultStatus = correct;
+        p.engineResultStatus = correct;
+        p.winnerParityRepairedAt = new Date().toISOString();
+        count++;
+        if (signatures.length < 12) {
+          signatures.push(
+            String(p.eventId || p.gameId || p.id || "") +
+              "|" +
+              mk +
+              "|" +
+              String(p.homeTeam || "") +
+              "|" +
+              String(p.awayTeam || "") +
+              "|pred=" +
+              predSide +
+              "|actual=" +
+              actualSide +
+              "|" +
+              status +
+              "→" +
+              correct,
+          );
+        }
+        return;
       }
-      if (status === correct) return;
-      const predSide = resolvePredictedSide(p) || "?";
+
+      // Period / team totals O/U parity (q1–q4, ft, h1, h2, team totals)
+      if (!OU_MARKETS[mk]) return;
+      const line = Number(p.line != null ? p.line : p.pickLine);
+      const actual = parseOuActual(p.actualScore);
+      if (!Number.isFinite(line) || !Number.isFinite(actual)) return;
+      const ouSide = resolveOuSide(p);
+      const correct = settleOuIndependent(ouSide, line, actual);
+      if (!correct || status === correct) return;
       p.resultStatus = correct;
       p.engineResultStatus = correct;
-      p.winnerParityRepairedAt = new Date().toISOString();
+      p.ouParityRepairedAt = new Date().toISOString();
       count++;
       if (signatures.length < 12) {
         signatures.push(
-          String(p.eventId || p.gameId || p.id || "") +
-            "|" +
-            mk +
-            "|" +
-            String(p.homeTeam || "") +
-            "|" +
-            String(p.awayTeam || "") +
-            "|pred=" +
-            predSide +
-            "|actual=" +
-            actualSide +
+          mk +
+            "|side=" +
+            String(ouSide).toUpperCase() +
+            "|line=" +
+            line +
+            "|actualUsed=" +
+            actual +
             "|" +
             status +
             "→" +
@@ -20669,15 +20750,25 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
     pick.engineResultStatus = "no_play_settled";
     return "no_play_settled";
   }
-  const pickSide = String(pick.side).toLowerCase();
+  // Resolve O/U side like forensicIndependentSettle: accept "under"/"UNDER 40.5"/predictionText.
+  let pickSide = String(pick.side != null ? pick.side : "").toLowerCase();
+  if (pickSide.indexOf("over") < 0 && pickSide.indexOf("under") < 0) {
+    const fromText =
+      typeof getPickSideFromText === "function"
+        ? getPickSideFromText(pick.predictionText || pick.pick || "")
+        : "";
+    if (fromText) pickSide = String(fromText).toLowerCase();
+  }
 
   if (!Number.isFinite(actual) || !Number.isFinite(marketLine)) {
     pick.engineResultStatus = "pending";
     return "pending";
   }
   let engineGrade = "push";
-  if (actual > marketLine) engineGrade = pickSide === "over" ? "win" : "loss";
-  else if (actual < marketLine) engineGrade = pickSide === "under" ? "win" : "loss";
+  const isOver = pickSide.indexOf("over") >= 0;
+  const isUnder = pickSide.indexOf("under") >= 0;
+  if (actual > marketLine) engineGrade = isOver ? "win" : isUnder ? "loss" : "push";
+  else if (actual < marketLine) engineGrade = isUnder ? "win" : isOver ? "loss" : "push";
 
   pick.engineResultStatus = engineGrade;
 
@@ -40484,11 +40575,11 @@ const EngineAuditor = (function () {
       if (repairedWinnerParity > 0) {
         forensicAdd(
           "INFO",
-          "Repaired " + repairedWinnerParity + " winner settlement parity row(s)",
+          "Repaired " + repairedWinnerParity + " settlement parity row(s) (winner and/or O/U)",
           repairedWinnerSigs.length
             ? repairedWinnerSigs.join("; ")
             : ("count=" + repairedWinnerParity),
-          "Stored winner/moneyline engineResultStatus disagreed with predicted side vs actualScore; corrected in-place before parity scan.",
+          "Stored winner/moneyline or period-total O/U engineResultStatus disagreed with independent oracle; corrected in-place before parity scan.",
           "Re-scan should be clean for repaired rows; remaining mismatches stay CRITICAL.",
           null,
           "",
