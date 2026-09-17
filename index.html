@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -256,7 +257,7 @@ body {
   text-transform: uppercase;
 }
 
-.theme-toggle {
+.header-icon-btn, .theme-toggle {
   background: none !important;
   border: none !important;
   box-shadow: none !important;
@@ -893,10 +894,6 @@ small.muted-note {
   cursor: help;
 }
 
-body.dark-mode .conf-none {
-  background: #2a2f3a !important;
-  color: #9aa0a8 !important;
-}
 
 .lock {
   font-size: 4px !important;
@@ -2297,7 +2294,6 @@ body.dark-mode .tracker-bar-stage {
 }
 
 .tracker-panel.analytics-view #trackerSummary,
-.tracker-panel.analytics-view #trackerMarketSummary,
 .tracker-panel.analytics-view #trackerEmpty,
 .tracker-panel.analytics-view .tracker-table-wrap {
   display: none !important;
@@ -2779,7 +2775,7 @@ body.dark-mode .tracker-analytics-section-head {
 #engineLockOverlay {
   position: fixed;
   inset: 0;
-  z-index: 2000000;
+  z-index: 2147483646;
   background: #0c0c0e;
   display: flex;
   align-items: center;
@@ -2790,7 +2786,7 @@ body.dark-mode .tracker-analytics-section-head {
   box-sizing: border-box;
 }
 #engineLockOverlay.hidden {
-  display: none;
+  display: none !important;
 }
 .engine-lock-card {
   width: 100%;
@@ -2940,11 +2936,11 @@ const BB_LOCK_REGISTRY = Object.freeze([
   </span>
 
   <span class="brand-right">
-    <button class="theme-toggle" type="button" id="trackerToggleBtn" title="Open tracked picks">
+    <button class="header-icon-btn" type="button" id="trackerToggleBtn" title="Open tracked picks">
       📊
     </button>
     <button
-      class="theme-toggle"
+      class="header-icon-btn"
       type="button"
       id="afdbBtn"
       title="Auto-Fetch Debugger"
@@ -2954,7 +2950,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
     </button>
 
     <button
-      class="theme-toggle"
+      class="header-icon-btn"
       type="button"
       id="engineRelockBtn"
       title="Lock the engine"
@@ -3325,7 +3321,8 @@ const BB_LOCK_REGISTRY = Object.freeze([
         <input
           id="ssPasteA"
           placeholder="Paste JSON A"
-          oninput="parseSofascoreIndividual('A')"
+          oninput="queueSofascorePasteParse('A')"
+          onpaste="queueSofascorePasteParse('A')"
           style="
             margin: 0;
             padding: 6px 8px;
@@ -3418,7 +3415,8 @@ const BB_LOCK_REGISTRY = Object.freeze([
         <input
           id="ssPasteB"
           placeholder="Paste JSON B"
-          oninput="parseSofascoreIndividual('B')"
+          oninput="queueSofascorePasteParse('B')"
+          onpaste="queueSofascorePasteParse('B')"
           style="
             margin: 0;
             padding: 6px 8px;
@@ -3648,20 +3646,6 @@ const BB_LOCK_REGISTRY = Object.freeze([
       </div>
       <div>
         <label>1H Team B</label><input id="h1TeamBMarket" placeholder="53.5" aria-label="53.5" />
-      </div>
-    </div>
-
-    <div
-      id="highLowQMarketSection"
-      style="display: none; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px"
-    >
-      <div>
-        <label>Highest Q Total</label
-        ><input id="highQTotalMarket" placeholder="62.5 - 65.5" aria-label="62.5 - 65.5" />
-      </div>
-      <div>
-        <label>Lowest Q Total</label
-        ><input id="lowQTotalMarket" placeholder="32.5 - 35.5" aria-label="32.5 - 35.5" />
       </div>
     </div>
 
@@ -4217,7 +4201,6 @@ const BB_LOCK_REGISTRY = Object.freeze([
       </div>
     </div>
     <div class="tracker-summary" id="trackerSummary">0 saved • 0 settled • 0 wins</div>
-    <div class="tracker-market-summary" id="trackerMarketSummary"></div>
 
     <div class="tracker-body-scroll" id="trackedPicksWrap">
       <div id="trackerAnalyticsPanel" class="tracker-analytics-panel"></div>
@@ -4311,6 +4294,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
 <script>
 (function () {
 /* SECTION 6 — PIN lock */
+  /* UX-only client gate: PIN hash is checked in-page; not a server secret vault. Offline HTML model by design. */
   const ENGINE_LOCK_PIN_HASH = "dc69839a54b801d7badf5c5d5a64ad5800f49c2cb4cca4f99a1767940240b711";
   const ENGINE_LOCK_SALT = "bb_engine_lock_v1";
   const overlay = document.getElementById("engineLockOverlay");
@@ -4632,6 +4616,7 @@ window.MARKET_SEMANTICS = MARKET_SEMANTICS;
 const STANDALONE_BUILD_MARKER = "bb_engine_standalone_build";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
 
+/* UX/rate-gate only: WORKER_SHARED_SECRET ships in the client bundle and is not a server-side credential. */
 const WORKER_SHARED_SECRET = (function () {
   const a = [
     "da4d",
@@ -5380,6 +5365,11 @@ async function ssFetchEventStatistics(eventId) {
   }
   const mapped = ssMapEventStatistics(data);
   _ssEventStatsCache.set(id, mapped);
+  const _SS_EVENT_STATS_CACHE_MAX = 200;
+  while (_ssEventStatsCache.size > _SS_EVENT_STATS_CACHE_MAX) {
+    const oldest = _ssEventStatsCache.keys().next().value;
+    _ssEventStatsCache.delete(oldest);
+  }
   return mapped;
 }
 
@@ -5488,7 +5478,6 @@ function clearPasteJSON(side) {
   window.__ssLastPasteMsg = "";
 }
 
-window.__jsonPasteCountB = 0;
 
 function updateSofascoreLinks(side) {
   const idInput = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
@@ -6129,6 +6118,17 @@ function ssPasteMatchesSelectedLeague(events, leagueKey) {
   return hits > 0;
 }
 
+window.__ssPasteParseTimers = window.__ssPasteParseTimers || { A: null, B: null };
+function queueSofascorePasteParse(side) {
+  const key = side === "A" ? "A" : "B";
+  const timers = window.__ssPasteParseTimers;
+  if (timers[key]) clearTimeout(timers[key]);
+  timers[key] = setTimeout(function () {
+    timers[key] = null;
+    parseSofascoreIndividual(key);
+  }, 280);
+}
+
 function parseSofascoreIndividual(side) {
   const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
   let rawText = (pasteEl?.value || "").trim();
@@ -6136,6 +6136,13 @@ function parseSofascoreIndividual(side) {
   if (!rawText) return;
 
   try {
+    // Incomplete multi-page paste: wait for full payload (oninput can fire mid-paste).
+    if (rawText.length > 0) {
+      const trimmedEnd = rawText.trim();
+      if (!trimmedEnd.endsWith("}") && !trimmedEnd.endsWith("]")) {
+        return;
+      }
+    }
     const parsed = JSON.parse(rawText);
     const events = parsed.events || [];
     if (!events.length) throw new Error("No events found in pasted JSON.");
@@ -6176,10 +6183,18 @@ function parseSofascoreIndividual(side) {
     if (!ssPasteMatchesSelectedLeague(events, leagueSelect)) {
       if (st) {
         st.style.color = "#d92d2a";
+        const _detectedComp = String(
+          firstEvent?.tournament?.uniqueTournament?.name ||
+          firstEvent?.tournament?.name ||
+          tournamentName ||
+          "a different competition"
+        ).trim();
         st.textContent =
-          "❌ Rejected: pasted JSON is not " +
+          "❌ Rejected: pasted JSON looks like " +
+          _detectedComp +
+          ", but the dropdown is set to " +
           _leagueLabel +
-          ". Change the league dropdown to the competition in the JSON, then paste again.";
+          ". Change the league dropdown to match the JSON competition, then paste again.";
       }
       if (typeof triggerGlobalEngineAlert === "function") {
         triggerGlobalEngineAlert("Paste/league mismatch for team " + side);
@@ -6202,7 +6217,6 @@ function parseSofascoreIndividual(side) {
       
 if (typeof engineDebug === "function") engineDebug("json paste A path", { note: "diagnostic only" });
     } else {
-      window.__jsonPasteCountB = (window.__jsonPasteCountB || 0) + 1;
     }
 
     const _leagueMappedTid = getSofaUniqueTournamentIdForLeague(leagueSelect);
@@ -6348,6 +6362,19 @@ if (typeof engineDebug === "function") engineDebug("json paste A path", { note: 
     openSection("teamBSection");
     invalidateFetchedAudit();
   } catch (err) {
+    const msg = String(err && err.message ? err.message : err || "");
+    const incompleteJson =
+      err instanceof SyntaxError &&
+      /Unexpected end|Unexpected token|JSON\.parse/i.test(msg);
+    if (incompleteJson) {
+      if (typeof engineDebug === "function") {
+        engineDebug("parseSofascoreIndividual incomplete paste (waiting)", {
+          side,
+          error: msg,
+        });
+      }
+      return;
+    }
     if (st) {
       st.style.color = "#d92d2a";
       st.textContent = "❌ Parse failed: " + err.message;
@@ -6664,7 +6691,6 @@ function buildGlobalModelState({ league, parsed, lines, injMultA = 1, injMultB =
 }
 
 const MODEL_CONFIG = {
-  H2H_DIVERGE_THRESHOLD: 0.2,
   // UNUSED — sample-size leagueBase anchor only; not book line shrink
   LINE_ANCHOR_NBA: 0.65,
   // UNUSED — sample-size leagueBase anchor only; not book line shrink
@@ -7737,6 +7763,10 @@ function getTunableParam(key, league, market) {
     handicap_h1: "h1",
     h2: "h2",
     handicap_h2: "h2",
+    q1: "q1",
+    q2: "q2",
+    q3: "q3",
+    q4: "q4",
   };
   const rawMarket =
     market != null && market !== ""
@@ -8481,7 +8511,7 @@ window.getLockStatus = getLockStatus;
 
 function getLiveLockBanner(league) {
   if (!league || typeof hasLockedConfig !== "function") return "";
-  const markets = ["ft", "h1", "team_a", "team_b", "q1", "q2", "q3", "q4"];
+  const markets = ["ft", "h1", "h2", "q1", "q2", "q3", "q4"];
   const active = markets.filter(function (m) {
     return hasLockedConfig(league, m);
   });
@@ -9358,7 +9388,7 @@ function actualForMarket(pick) {
   const parsed = typeof parseFinalScore === "function" ? parseFinalScore(s) : { total: parseFloat(s), home: NaN, away: NaN };
   const looksScoreline = /^\d+(?:\.\d+)?\s*[-–:]\s*\d+(?:\.\d+)?$/.test(s);
   if (mk === "ft") return Number.isFinite(parsed.total) ? parsed.total : NaN;
-  if (mk === "h1" || mk === "h2" || /^q[1-4]$/.test(mk) || mk === "high_q_ou" || mk === "low_q_ou") {
+  if (mk === "h1" || mk === "h2" || /^q[1-4]$/.test(mk)) {
 
     if (looksScoreline) return Number.isFinite(parsed.total) ? parsed.total : NaN;
     const n = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(s) ? Number(s) : NaN;
@@ -9642,7 +9672,7 @@ function computeQuarterProjection({
       }
 
       const qProj = projA + projB;
-      let qEdge = lineVal ? qProj - lineVal : NaN;
+      let qEdge = Number.isFinite(lineVal) ? qProj - lineVal : NaN;
       if (Number.isFinite(qEdge) && typeof applyEdgeMult === "function") qEdge = applyEdgeMult(qEdge, league);
       const qPick = getPick(qEdge, lineVal, league, qKey, { aSc: avgOrNaN(aS), bSc: avgOrNaN(bS), _edgeAlreadyScaled: true });
 
@@ -10089,7 +10119,12 @@ function _getCanaryHealth(league) {
   const MIN_N = 12;
   if (allPicks.length < MIN_N) return null;
   const recentWindow = Math.min(20, Math.max(8, Math.round(allPicks.length * 0.4)));
-  const recentPicks = allPicks.slice(0, recentWindow) ;
+  const _sortedForRecent2 = allPicks.slice().sort(function (a, b) {
+    const ta = (typeof getTrackedPickTimeMs === "function" ? getTrackedPickTimeMs(a) : 0) || Date.parse(a.createdAt || a.eventDate || 0) || 0;
+    const tb = (typeof getTrackedPickTimeMs === "function" ? getTrackedPickTimeMs(b) : 0) || Date.parse(b.createdAt || b.eventDate || 0) || 0;
+    return tb - ta;
+  });
+  const recentPicks = _sortedForRecent2.slice(0, recentWindow);
   const allWR = allPicks.filter((p) => p.resultStatus === "win").length / allPicks.length;
   const recentWR = recentPicks.filter((p) => p.resultStatus === "win").length / recentPicks.length;
   const drift = recentWR - allWR;
@@ -13903,6 +13938,7 @@ function isIgnoredEngineWatchLine(line = "") {
     text.includes('"no-play"') ||
     text.includes("critical network block") ||
     text.includes("fetch is aborted") ||
+    /* Broad hydrate/403 ignore list is intentional: noisy transport errors must not page the user. */
     text.includes("hydrate failed") ||
     text.includes("/statistics") ||
     text.includes("directsofa http 403") ||
@@ -14745,6 +14781,9 @@ function setStatusHTML(html, type = "") {
 }
 
 function buildCompactFetchStatus(messages = [], fetchAuditIssues = []) {
+  const esc = (typeof safeText === "function" ? safeText : (typeof escapeHtml === "function" ? escapeHtml : function (s) {
+    return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }));
   const clean = (messages || []).map((m) => String(m || "").trim()).filter(Boolean);
   const h2hOnly = clean.filter((m) => /^H2H:/i.test(m));
   let summary = h2hOnly.length ? h2hOnly[h2hOnly.length - 1] : clean[clean.length - 1] || "";
@@ -14757,7 +14796,7 @@ function buildCompactFetchStatus(messages = [], fetchAuditIssues = []) {
     summary += " • tap ⚠️";
   }
 
-  return summary;
+  return esc(summary);
 }
 
 function unlockFetchBtn() {
@@ -15848,11 +15887,22 @@ function getQuarterFormBacktestStats() {
 window.getQuarterFormBacktestStats = getQuarterFormBacktestStats;
 
 function repairMisclassifiedNoPlayTrackedPicks(activeList, archivedList) {
-  
-  return 0;
+  // Live repair (early `return 0` removed). No-arg form reads AppState.tracker.state.
+  if (arguments.length < 2) {
+    try {
+      const st = (typeof AppState !== "undefined" && AppState.tracker && AppState.tracker.state)
+        ? AppState.tracker.state
+        : null;
+      activeList = st && Array.isArray(st.activePicks) ? st.activePicks : [];
+      archivedList = st && Array.isArray(st.archivedPicks) ? st.archivedPicks : [];
+    } catch (_e) {
+      activeList = Array.isArray(activeList) ? activeList : [];
+      archivedList = Array.isArray(archivedList) ? archivedList : [];
+    }
+  }
   const marginMarkets = new Set(["winner", "handicap", "handicap_h1", "handicap_h2"]);
   let repaired = 0;
-  const lists = [activeList];
+  const lists = [activeList, archivedList];
   lists.forEach((list) => {
     if (!Array.isArray(list)) return;
     list.forEach((p) => {
@@ -16500,8 +16550,18 @@ function scheduleLiveClockPoll() {
   }, 28000);
 }
 
+let _liveClockPollInFlight = false;
+let _liveClockPollAbort = null;
 async function pollLiveGameClocks() {
+  if (_liveClockPollInFlight) return;
   if (g_liveGameStatus.size === 0) return;
+  _liveClockPollInFlight = true;
+  if (_liveClockPollAbort) {
+    try { _liveClockPollAbort.abort(); } catch (_eAbort) {}
+  }
+  _liveClockPollAbort = (typeof AbortController !== "undefined") ? new AbortController() : null;
+  const _liveClockSignal = _liveClockPollAbort ? _liveClockPollAbort.signal : undefined;
+  try {
   const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
   const byLeague = new Map();
   active.forEach((p) => {
@@ -16521,7 +16581,7 @@ async function pollLiveGameClocks() {
     try {
       let data = null;
       try {
-        const res = await fetch(`${base}/scoreboard?_=${Date.now()}`, { cache: "no-store" });
+        const res = await fetch(`${base}/scoreboard?_=${Date.now()}`, { cache: "no-store", signal: _liveClockSignal });
         if (res.ok) data = await res.json();
       } catch (e) {
         data = await proxyFetch(`${base}/scoreboard`, 6000).catch(() => null);
@@ -16615,6 +16675,9 @@ async function pollLiveGameClocks() {
   }
   if (didChange) renderTrackedPicks();
   scheduleLiveClockPoll();
+  } finally {
+    _liveClockPollInFlight = false;
+  }
 }
 
 async function hydrateTrackedPicks(force = false) {
@@ -17505,8 +17568,10 @@ function renderTrackedPicks() {
     engineDebug("quarter-form backtest summary failed", { error: _qfErr?.message || String(_qfErr) });
   }
 
-  marketSummaryEl.innerHTML = "";
-  marketSummaryEl.style.display = "none";
+  if (marketSummaryEl) {
+    marketSummaryEl.innerHTML = "";
+    marketSummaryEl.style.display = "none";
+  }
 
   if (!displayPicks.length) {
     emptyEl.style.display = isTrackerPicksView() ? "block" : "none";
@@ -17541,7 +17606,6 @@ function renderTrackedPicks() {
             : (p.edgePct > 0 ? "+" : "") + Number(p.edgePct).toFixed(2) + "%";
 
         const grade = String(p.confidenceGrade || p.confidence || "—").toUpperCase();
-        const gradeClass = getConfidenceClass(grade);
         const encSig = encodeURIComponent(p.signature || makeTrackedSignature(p) || "");
 
         let statusHtml = "";
@@ -19643,6 +19707,7 @@ function formatMarginPickForDisplay(pickText, marketKey, homeTeamName, awayTeamN
 }
 
 function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation = null) {
+  // Soft-tracker policy: no-play-only. Edge/grade boost+downgrade branches removed (dead confidenceShift).
   if (!TRACKER_SOFT_EFFECTS.enabled || !Array.isArray(picks) || !picks.length) return;
 
   const derived = g_trackerDerivedState || defaultTrackerDerivedState();
@@ -19667,85 +19732,40 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
     if (!side || !p.marketKey) return;
 
     const edgePct = Math.abs(p.edge / p.line);
-    let confidenceShift = 0;
-    let lockRestricted = false;
-    let trackerNoPlay = false;
     const reasons = [];
 
     const posteriorWinProb = getTrackerPosteriorWinProbFromSnapshot(p.league, p.marketKey, side);
-    if (isFinite(posteriorWinProb)) {
-      const priorProb = 0.5;
-      const logOddsRatio =
-        Math.log(posteriorWinProb / (1 - posteriorWinProb)) - Math.log(priorProb / (1 - priorProb));
+    if (!isFinite(posteriorWinProb)) return;
 
-      const effectiveFactor = 1 + clampNumber(logOddsRatio, -0.5, 0.5) * 0.3;
-      const adjustedEdge = p.edge * effectiveFactor;
+    if (posteriorWinProb >= 0.62) {
+      reasons.push("tracker strong market");
+    } else if (posteriorWinProb <= 0.44) {
+      reasons.push("tracker weak market");
+    }
 
-      p.trackerFeedback = {
-        posteriorWinProb,
-        factor: effectiveFactor,
-        rawEdge: p.edge,
-        adjustedEdge,
-        mildMode,
-      };
-
-      if (posteriorWinProb >= 0.62) {
-        reasons.push("tracker strong market");
-      } else if (posteriorWinProb <= 0.44) {
-        reasons.push("tracker weak market");
-      }
-
-      if (
-        !mildMode &&
-        posteriorWinProb <= 0.4 &&
-        edgePct < Number(TRACKER_SOFT_EFFECTS.weakEdgeNoPlayPct || 0.055)
-      ) {
-        trackerNoPlay = true;
-        lockRestricted = true;
-        reasons.push("tracker no-play block");
-      }
+    let trackerNoPlay = false;
+    if (
+      !mildMode &&
+      posteriorWinProb <= 0.4 &&
+      edgePct < Number(TRACKER_SOFT_EFFECTS.weakEdgeNoPlayPct || 0.055)
+    ) {
+      trackerNoPlay = true;
+      reasons.push("tracker no-play block");
     }
 
     if (trackerNoPlay) {
       p.pick = "NO PLAY";
       p.confidence = "—";
-      p.note = reasons.includes("team no-play caution")
-        ? "Tracker block — weak team signal"
-        : "Tracker block — weak market signal";
+      p.note = "Tracker block — weak market signal";
       p.lockRestricted = true;
       p.trackerSoftInfluence = {
         applied: true,
         action: "no_play",
-        confidenceShift,
+        confidenceShift: 0,
         lockRestricted: true,
         reasons,
       };
-      return;
     }
-
-    if (p.pick === "NO PLAY") return;
-
-    if (confidenceShift > 0) {
-      applyGuardedConfidenceShift(p, 1, "trackerSoftInfluence", confidenceShift);
-    } else if (confidenceShift < 0 && p.confidence && p.confidence !== "—") {
-      applyGuardedConfidenceShift(p, -1, "trackerSoftInfluence", confidenceShift);
-    }
-
-    p.lockRestricted = !!lockRestricted;
-    p.trackerSoftInfluence = {
-      applied: true,
-      action:
-        confidenceShift > 0
-          ? "boost"
-          : confidenceShift < 0
-            ? "downgrade"
-            : lockRestricted
-              ? "lock_restrict"
-              : "keep",
-      confidenceShift,
-      lockRestricted,
-      reasons,
-    };
   });
 }
 function getTrackedLeagueApiBase(league) {
@@ -20440,7 +20460,7 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
   const marketLine = parseFloat(pick.line);
   if (
     isNaN(marketLine) &&
-    !["winner", "margin_team", "margin_any", "high_q", "low_q", "htft", "player"].includes(market)
+    !["winner", "margin_team", "margin_any", "htft", "player"].includes(market)
   )
     return "pending";
 
@@ -20595,20 +20615,6 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
   } else if (market === "q4") {
     if (!Number.isFinite(q4Home) || !Number.isFinite(q4Away)) return "pending";
     actual = q4Home + q4Away;
-  } else if (market === "high_q_ou") {
-    if (!Number.isFinite(q1Home) || !Number.isFinite(q1Away) || !Number.isFinite(q2Home) || !Number.isFinite(q2Away) || !Number.isFinite(q3Home) || !Number.isFinite(q3Away) || !Number.isFinite(q4Home) || !Number.isFinite(q4Away)) return "pending";
-    const qs = [q1Home + q1Away, q2Home + q2Away, q3Home + q3Away, q4Home + q4Away].filter((q) =>
-      Number.isFinite(q),
-    );
-    if (!qs.length) return "pending";
-    actual = Math.max(...qs);
-  } else if (market === "low_q_ou") {
-    if (!Number.isFinite(q1Home) || !Number.isFinite(q1Away) || !Number.isFinite(q2Home) || !Number.isFinite(q2Away) || !Number.isFinite(q3Home) || !Number.isFinite(q3Away) || !Number.isFinite(q4Home) || !Number.isFinite(q4Away)) return "pending";
-    const qs = [q1Home + q1Away, q2Home + q2Away, q3Home + q3Away, q4Home + q4Away].filter((q) =>
-      Number.isFinite(q),
-    );
-    if (!qs.length) return "pending";
-    actual = Math.min(...qs);
   } else if (market === "q1_team_a") {
     
     if (!isTeamAHome && String(pick.homeId || "") === "") return "pending";
@@ -20651,19 +20657,6 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
     } else if (pt.includes("31+")) {
       isWin = diff >= 31;
     }
-    pick.engineResultStatus = isWin ? "win" : "loss";
-    return isWin ? "win" : "loss";
-  } else if (market === "high_q" || market === "low_q") {
-    if (!Number.isFinite(q1Home) || !Number.isFinite(q1Away) || !Number.isFinite(q4Home) || !Number.isFinite(q4Away)) return "pending";
-    const qs = [q1Home + q1Away, q2Home + q2Away, q3Home + q3Away, q4Home + q4Away].filter((q) =>
-      Number.isFinite(q),
-    );
-    if (!qs.length) return "pending";
-    const target = market === "high_q" ? Math.max(...qs) : Math.min(...qs);
-    const count = qs.filter((q) => q === target).length;
-    const actualStr = count > 1 ? "Equal" : `Quarter ${qs.indexOf(target) + 1}`;
-    pick.actualScore = qs.join(", ");
-    const isWin = actualStr === String(pick.predictionText);
     pick.engineResultStatus = isWin ? "win" : "loss";
     return isWin ? "win" : "loss";
   } else {
@@ -21006,35 +20999,6 @@ async function refreshTrackedPickResults() {
                 });
               }
             }
-            if (["high_q_ou", "low_q_ou"].includes(pick.marketKey) && Number(period || 0) >= 2) {
-              const _qouEarly = settleTrackedPickFromCompetition(pick, competition, true);
-              if (_qouEarly && _qouEarly !== "pending" && pick.resultStatus !== _qouEarly) {
-                pick.resultStatus = _qouEarly;
-                pick.settledAt = new Date().toISOString();
-                pick.settlementSource = "api_early_qou";
-                pick.settledVersion = ENGINE_MODEL_VERSION;
-                changed = true;
-                g_liveGameStatus.delete(pick.eventId);
-                g_settlementDebugLog.set(_dbgKey, {
-                  pick: `${pick.homeTeam} vs ${pick.awayTeam} · ${pick.marketKey}`,
-                  eventId: pick.eventId,
-                  status: `✅ EARLY QOU: ${_qouEarly.toUpperCase()}`,
-                  apiFinal: false,
-                  clock,
-                  period,
-                  settled: _qouEarly,
-                  actual: pick.actualScore,
-                  line: pick.lineAtPick || pick.line,
-                  ts: new Date().toLocaleTimeString([], { hour12: false }),
-                });
-                trackerDebug("early qou settled", {
-                  eventId: pick.eventId,
-                  market: pick.marketKey,
-                  result: _qouEarly,
-                  actual: pick.actualScore,
-                });
-              }
-            }
           }
         }
 
@@ -21149,7 +21113,17 @@ async function refreshTrackedPickResults() {
           const _perLeagueStore = {};
           try {
             const _existingRaw = localStorage.getItem("BB_CALIBRATION_METRICS_BY_LEAGUE");
-            if (_existingRaw) Object.assign(_perLeagueStore, JSON.parse(_existingRaw));
+            if (_existingRaw) {
+              const _parsedCal = JSON.parse(_existingRaw);
+              const _safeCal = Object.create(null);
+              if (_parsedCal && typeof _parsedCal === "object" && !Array.isArray(_parsedCal)) {
+                const _allow = Object.keys(_parsedCal).filter(function (k) {
+                  return k !== "__proto__" && k !== "constructor" && k !== "prototype" && Object.prototype.hasOwnProperty.call(_parsedCal, k);
+                });
+                _allow.forEach(function (k) { _safeCal[k] = _parsedCal[k]; });
+              }
+              Object.keys(_safeCal).forEach(function (k) { _perLeagueStore[k] = _safeCal[k]; });
+            }
           } catch (_readErr) {
             engineDebug("BB_CALIBRATION_METRICS_BY_LEAGUE read failed", {
               error: _readErr?.message || String(_readErr),
@@ -22313,7 +22287,7 @@ function distributionWinProbability(meanEdge, leagueVolLimit, volRatio) {
   if (!isFinite(meanEdge) || !isFinite(leagueVolLimit) || leagueVolLimit <= 0) return null;
   const sd = leagueVolLimit * Math.max(0.5, isFinite(volRatio) ? volRatio : 1.0);
   if (!isFinite(sd) || sd <= 0) return null;
-  const z = Math.abs(meanEdge) / sd;
+  const z = Math.abs(meanEdge) /* intentional: magnitude→CDF; pick-side already aligned at call sites */ / sd;
   return clampNumber(_normalCdf(z), 0.02, 0.98);
 }
 function getDistributionWinProbabilityForPick(p, leagueKey) {
@@ -22810,7 +22784,14 @@ function anchorProjection(proj, sampleSize, leagueBase) {
   const n = Math.max(0, Number(sampleSize) || 0);
   const base = Number(leagueBase) || proj;
   if (n >= 10) return proj;
-  const blendFactor = n / 10;
+  let blendFactor = n / 10;
+  try {
+    const w = (typeof getParam === "function" ? getParam("quarterAnchorBlendWeight") : null);
+    if (Number.isFinite(Number(w)) && Number(w) > 0) {
+      // Tunable scales how quickly sample evidence dominates the league anchor.
+      blendFactor = Math.max(0, Math.min(1, (n / 10) * Number(w)));
+    }
+  } catch (_eBlend) {}
   return proj * blendFactor + base * (1 - blendFactor);
 }
 
@@ -23091,7 +23072,7 @@ function computeIntelligencePack(league, lines = {}, parsedInput = null) {
   return {
     restDaysA,
     restDaysB,
-    travelMiles: Number.isFinite(travelMilesResult) ? travelMilesResult : 0,
+    travelMiles: Number.isFinite(travelMilesResult) ? travelMilesResult : 0, // confidence-only (not a market intel signal input)
     travelMilesKnown: Number.isFinite(travelMilesResult),
     backToBack,
     hasAnyData: ctxA.restDays != null || ctxB.restDays != null,
@@ -23406,7 +23387,6 @@ function applyV24CardLayer(picks, league) {
 function applyIntelligenceLayerToPicks(picks, intelligencePack, league) {
   // Confidence shift provisional; runEngine re-resolves grade from winProbability (F-11).
   if (!Array.isArray(picks) || !picks.length || !intelligencePack) return;
-  const QUARTER_KEYS = new Set(["q1", "q2", "q3", "q4"]);
   picks.forEach((p) => {
     if (!p || p.pick === "NO PLAY") return;
     let confAdj = 0;
@@ -24627,8 +24607,6 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
 
   const strictFiltered = requiredVenue ? unique.filter((g) => g.venue === requiredVenue) : unique;
   const venueReliable = strictFiltered.length >= 2;
-  const usedVenueFallback = false;
-  const venueFallbackBlocked = !!requiredVenue && !venueReliable && unique.length >= 2 && allowFallback;
   const chosen = requiredVenue ? strictFiltered : unique;
 
   if (chosen.length < 2) return null;
@@ -24980,8 +24958,6 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         lastGameCity: summaries.find(Boolean)?.venueCity || null,
         lastGameState: summaries.find(Boolean)?.venueState || null,
         venueReliable,
-        usedVenueFallback,
-        venueFallbackBlocked,
 
         sos: (() => {
           const cache = window._espnStandingsCache?.[leagueKey]?.data;
@@ -25439,8 +25415,6 @@ function pickFixture(homeName, homeId, awayName, awayId, eventDate) {
     "q4Market",
     "h1TeamAMarket",
     "h1TeamBMarket",
-    "highQTotalMarket",
-    "lowQTotalMarket",
     "handicapMarket",
     "handicapH1Market",
     "handicapH2Market",
@@ -25482,8 +25456,6 @@ async function fetchESPN() {
     "h1TeamBMarket",
     "q1TeamAMarket",
     "q1TeamBMarket",
-    "highQTotalMarket",
-    "lowQTotalMarket",
     "handicapMarket",
     "handicapH1Market",
     "handicapH2Market",
@@ -25805,21 +25777,21 @@ async function fetchESPNCore(league, teamAName, teamBName) {
     g_fetchMeta.A = {
       ft: {
         source: "espn",
-        venueReliable: !!(aVenueStats?.venueReliable || aVenueStats?.usedVenueFallback === false),
+        venueReliable: !!aVenueStats?.venueReliable,
       },
       h1: {
         source: "espn",
-        venueReliable: !!(aVenueStats?.venueReliable || aVenueStats?.usedVenueFallback === false),
+        venueReliable: !!aVenueStats?.venueReliable,
       },
     };
     g_fetchMeta.B = {
       ft: {
         source: "espn",
-        venueReliable: !!(bVenueStats?.venueReliable || bVenueStats?.usedVenueFallback === false),
+        venueReliable: !!bVenueStats?.venueReliable,
       },
       h1: {
         source: "espn",
-        venueReliable: !!(bVenueStats?.venueReliable || bVenueStats?.usedVenueFallback === false),
+        venueReliable: !!bVenueStats?.venueReliable,
       },
     };
 
@@ -26207,7 +26179,12 @@ async function fetchESPNCore(league, teamAName, teamBName) {
 
 function showRunError(table, html) {
   const row = table.insertRow();
-  row.innerHTML = `<td colspan="5" style="color:#ff6b6b;text-align:left;padding:8px;">${html}</td>`;
+  const esc = (typeof safeText === "function" ? safeText : (typeof escapeHtml === "function" ? escapeHtml : function (s) {
+    return String(s || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  }));
+  // Callers may pass light markup; escape unless explicitly marked trusted via {__html}.
+  const body = html && typeof html === "object" && html.__html != null ? String(html.__html) : esc(html);
+  row.innerHTML = `<td colspan="5" style="color:#ff6b6b;text-align:left;padding:8px;">${body}</td>`;
 }
 
 function avgOrNaN(arr) {
@@ -26335,8 +26312,8 @@ function getManualVenueSeriesForSide(side, marketKey, metric, parsed) {
   };
   const values = readRoleSeries(role);
   if (values.length) return values;
-  // Manual boxes can be populated under the opposite split; do not discard them.
-  return readRoleSeries(role === "home" ? "away" : "home");
+  // Fail closed: do not silently substitute the opposite home/away split.
+  return [];
 }
 
 function filterEventsAsOf(events, predictionDate) {
@@ -26908,8 +26885,7 @@ function getMarketKeyFromName(name, marketKeyOverride) {
   if (n.startsWith("Race to")) return "race";
   if (n.startsWith("1H Individual")) return "h1_teams";
   if (n.startsWith("Q1 Individual")) return "q1_teams";
-  if (n.startsWith("Highest Scoring Quarter")) return "high_q";
-  if (n.startsWith("Lowest Scoring Quarter")) return "low_q";
+  /* REMOVED: high_q / low_q markets permanently deleted */
   if (n.startsWith("FT Total")) return "ft";
   if (n.startsWith("1H Total")) return "h1";
 
@@ -26932,8 +26908,7 @@ function getMarketKeyFromName(name, marketKeyOverride) {
   if (n.startsWith("HT/FT")) return "htft";
   if (n.startsWith("Winning Margin (Team)")) return "margin_team";
   if (n.startsWith("Winning Margin (Any)")) return "margin_any";
-  if (n.startsWith("Highest Q Total")) return "high_q_ou";
-  if (n.startsWith("Lowest Q Total")) return "low_q_ou";
+  /* REMOVED: high_q_ou / low_q_ou markets permanently deleted */
   return "other";
 }
 
@@ -28542,7 +28517,7 @@ function calibrateConfidenceModel() {
   const _biasBucketOf = (edgePctVal) => Math.max(0, Math.min(4, Math.floor(Math.abs(Number(edgePctVal) || 0) / 5)));
   const _settledBucketCounts = [0, 0, 0, 0, 0];
   fitPicks.forEach((p) => _settledBucketCounts[_biasBucketOf(p.edgePct)]++);
-  const _biasWeightByBucket = _settledBucketCounts.map((n) => n >= 5 ? 1 : 1);
+  const _biasWeightByBucket = _settledBucketCounts.map((n) => 1); // bias-weighting deferred; uniform weights
   fitPicks.forEach((p) => { p._biasWeight = _biasWeightByBucket[_biasBucketOf(p.edgePct)]; });
   try {
     localStorage.setItem("BB_SETTLED_BIAS_AUDIT", JSON.stringify({ settledBucketCounts: _settledBucketCounts, weights: _biasWeightByBucket, fitN: fitPicks.length, holdoutN: calPicks.length, ts: new Date().toISOString() }));
@@ -28695,8 +28670,20 @@ function calibrateConfidenceModel() {
      same fitPicks used to fit the model above — otherwise the model is graded using the
      data it was trained on, which inflates apparent reliability. */
   const gradeWinRates = { A: [], B: [], C: [], D: [] };
+  // Regrade holdout picks with the PROPOSED model before computing grade WRs (avoid historical-label leakage).
   calPicks.forEach((p) => {
-    const grade = String(p.confidenceGrade || p.confidence || "").toUpperCase();
+    let grade = String(p.confidenceGrade || p.confidence || "").toUpperCase();
+    try {
+      if (typeof _proposedWinProb === "function") {
+        const wp = _proposedWinProb(p);
+        if (Number.isFinite(wp) && typeof gradeFromWinProb === "function") {
+          grade = String(gradeFromWinProb(wp, p) || grade).toUpperCase();
+        } else if (Number.isFinite(wp)) {
+          // Local fallback thresholds aligned with typical A/B/C/D bands.
+          grade = wp >= 0.72 ? "A" : wp >= 0.64 ? "B" : wp >= 0.56 ? "C" : "D";
+        }
+      }
+    } catch (_eRegrade) {}
     if (gradeWinRates[grade] !== undefined) {
       gradeWinRates[grade].push(p.resultStatus === "win" ? 1 : 0);
     }
@@ -28787,8 +28774,6 @@ function calibrateConfidenceModel() {
     let scopeCalRows;
     if (scope === "global") {
       scopeCalRows = calPicks;
-    } else if (scope.startsWith("tier_")) {
-      const tierLevel = scope.slice(5);
     } else {
       scopeCalRows = calPicks.filter((p) => p.league === scope);
     }
@@ -28958,7 +28943,7 @@ function checkModelHealth(league) {
 }
 
 function getTrackedInputSource(marketKey = "ft") {
-  const bucket = marketKey === "h1" ? "h1" : marketKey === "h2" ? "h2" : "ft";
+  const bucket = marketKey === "h1" ? "h1" : "ft"; // h2 fetchMeta bucket not populated — do not advertise
 
   const aSource = String(AppState.fetchMeta.A?.[bucket]?.source || "")
     .trim()
@@ -28999,13 +28984,9 @@ function buildTrackedPickPayload({
     "player",
     "w_ou",
     "race",
-    "high_q",
-    "low_q",
     "htft",
     "margin_team",
     "margin_any",
-    "high_q_ou",
-    "low_q_ou",
     "other",
     "winner",
   ];
@@ -29590,13 +29571,20 @@ function buildTrackedPickPayload({
   return payload;
 }
 
-function recordLiveCalculationSnapshot(gameId, pick, state) {
-  if (!gameId) return null;
+function recordLiveCalculationSnapshot(metaOrGameId, pick, state) {
+  if (!metaOrGameId) return null;
   try {
+    // Call sites pass a single metadata object; persist that object as the payload.
+    const meta =
+      metaOrGameId && typeof metaOrGameId === "object" && pick === undefined && state === undefined
+        ? metaOrGameId
+        : { gameId: metaOrGameId, pick, state };
     const rawId =
-      gameId && typeof gameId === "object" ? (gameId.eventId ?? gameId.id ?? gameId) : gameId;
+      meta.eventId ?? meta.id ?? meta.gameId ??
+      (typeof metaOrGameId !== "object" ? metaOrGameId : null);
+    if (rawId == null || rawId === "") return null;
     const key = "snapshot_" + String(rawId).replace(/[^a-z0-9_]/gi, "");
-    const payload = { gameId, pick, state, capturedAt: new Date().toISOString() };
+    const payload = Object.assign({}, meta, { capturedAt: new Date().toISOString() });
     localStorage.setItem(key, JSON.stringify(payload));
     return payload;
   } catch (e) {
@@ -30001,8 +29989,6 @@ function extractInputs(league) {
     q1bLine: readLine("q1TeamBMarket"),
     h1aLine: readLine("h1TeamAMarket"),
     h1bLine: readLine("h1TeamBMarket"),
-    highQLine: null,
-    lowQLine: null,
 
     handicapLine: readHandicapLine("handicapMarket"),
 
@@ -30123,8 +30109,6 @@ function captureAllInputs() {
     "h1TeamBMarket",
     "q1TeamAMarket",
     "q1TeamBMarket",
-    "highQTotalMarket",
-    "lowQTotalMarket",
     "ssTeamAName",
     "ssTeamAId",
     "ssTeamBName",
@@ -30485,8 +30469,6 @@ async function runEngine() {
       q1bLine: lines.q1bLine,
       h1aLine: lines.h1aLine,
       h1bLine: lines.h1bLine,
-      highQLine: lines.highQLine,
-      lowQLine: lines.lowQLine,
       raceRange: lines.raceRange,
 
       handicapLine: lines.handicapLine,
@@ -33038,9 +33020,6 @@ function clearAll() {
     if (el) el.style.display = "none";
   });
 
-  const highQ = document.getElementById("highLowQMarketSection");
-  if (highQ) highQ.style.display = "none";
-
   setDisplayValues(FIELD_GROUPS.autoTags, "none");
 
   hideInjuryBox("A");
@@ -33263,9 +33242,6 @@ function onLeagueChange() {
     if (el) el.style.display = leagueVal && _qSeriesShown ? "grid" : "none";
   });
 
-  const highLowQEl = document.getElementById("highLowQMarketSection");
-  if (highLowQEl) highLowQEl.style.display = "none";
-
   ["q1TeamMarketSection", "exoticMarketSection"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.style.display = "none";
@@ -33296,7 +33272,6 @@ function onLeagueChange() {
   }
   g_h2hManualPreference.ft = null;
   g_h2hManualPreference.h1 = null;
-  g_h2hManualPreference.h2 = null;
 
   syncAllH2HCheckboxes(false);
 
@@ -33352,9 +33327,6 @@ function applySystemTheme() {
   }
 }
 
-function toggleTheme() {
-  applySystemTheme();
-}
 
 (function applySavedTheme() {
   applySystemTheme();
@@ -33741,8 +33713,6 @@ document.addEventListener("DOMContentLoaded", () => {
     "q4Market",
     "h1TeamAMarket",
     "h1TeamBMarket",
-    "highQTotalMarket",
-    "lowQTotalMarket",
     "q1TeamAMarket",
     "q1TeamBMarket",
   ].forEach((id) => {
@@ -33823,6 +33793,10 @@ document.addEventListener("DOMContentLoaded", () => {
         "teamBName",
         "ftMarket",
         "h1Market",
+        "h2Market",
+        "handicapMarket",
+        "handicapH1Market",
+        "handicapH2Market",
         "teamAMarket",
         "teamBMarket",
         "q1Market",
@@ -33833,8 +33807,6 @@ document.addEventListener("DOMContentLoaded", () => {
         "h1TeamBMarket",
         "q1TeamAMarket",
         "q1TeamBMarket",
-        "highQTotalMarket",
-        "lowQTotalMarket",
         "aFTScored",
         "aFTAllowed",
         "bFTScored",
@@ -34469,6 +34441,7 @@ const AFDB = (function () {
     },
   };
 })();
+window.AFDB = AFDB;
 
 </script>
 
@@ -34625,8 +34598,6 @@ const EngineAuditor = (function () {
       q1bLine: 27.5,
       h1aLine: 56.5,
       h1bLine: 55.5,
-      highQLine: 30,
-      lowQLine: 26,
       raceRange: null,
       handicapLine: -2.5,
       handicapH1Line: -1,
@@ -35032,13 +35003,20 @@ const EngineAuditor = (function () {
         src.match(/window\.[A-Za-z0-9_]+\s*=\s*[A-Z][A-Za-z0-9_]*\s*;/g) || []
       ).length;
       ["AFDB", "EngineAuditor"].forEach(function (mod) {
-        const decl = new RegExp("const\\s+" + mod + "\\s*=");
-        const attached = new RegExp("window\\." + mod + "\\s*=");
-        if (decl.test(src) && !attached.test(src) && src.indexOf("onclick=\"" + mod) < 0 && src.indexOf("onclick='" + mod) < 0) {
+        const decl = new RegExp("const\s+" + mod + "\s*=");
+        const attached = new RegExp("window\." + mod + "\s*=");
+        const hasOnclick = src.indexOf('onclick="' + mod) >= 0 || src.indexOf("onclick='" + mod) >= 0;
+        if (decl.test(src) && hasOnclick && !attached.test(src)) {
+          add("MEDIUM", AREA, "Module " + mod + " lacks window attachment for inline onclick",
+            "Declared as const IIFE with inline onclick=\"" + mod + " but no window." + mod + " assignment.",
+            "Inline HTML handlers resolve via window, not script lexical scope — module controls silently no-op.",
+            "Add window." + mod + " = " + mod + ";",
+            "ARCH_MODULE_" + mod);
+        } else if (decl.test(src) && !attached.test(src) && !hasOnclick) {
           add("LOW", AREA, "Module " + mod + " may lack window attachment",
-            "Declared as const IIFE without window." + mod + " or onclick=" + mod,
-            "Inline handlers should resolve the module.",
-            "Attach window." + mod + " or keep explicit onclick.",
+            "Declared as const IIFE without window." + mod + ".",
+            "External callers may not resolve the module.",
+            "Attach window." + mod + " if external access is required.",
             "ARCH_MODULE_" + mod);
         }
       });
@@ -36019,9 +35997,18 @@ const EngineAuditor = (function () {
           let activeList = null;
           let archivedList = null;
           try {
-            if (typeof loadTrackedPicks === "function") {
+            if (typeof AppState !== "undefined" && AppState.tracker && AppState.tracker.state) {
+              activeList = AppState.tracker.state.activePicks || null;
+              archivedList = AppState.tracker.state.archivedPicks || null;
+            } else if (typeof loadTrackedPicks === "function") {
               const loaded = loadTrackedPicks();
-              if (loaded && typeof loaded === "object") {
+              // loadTrackedPicks returns the active array (not a bag).
+              if (Array.isArray(loaded)) {
+                activeList = loaded;
+                archivedList = (typeof AppState !== "undefined" && AppState.tracker && AppState.tracker.state)
+                  ? (AppState.tracker.state.archivedPicks || [])
+                  : [];
+              } else if (loaded && typeof loaded === "object") {
                 activeList = loaded.activePicks || loaded.active || null;
                 archivedList = loaded.archivedPicks || loaded.archived || null;
               }
@@ -36045,9 +36032,15 @@ const EngineAuditor = (function () {
             let activeListW = null;
             let archivedListW = null;
             try {
-              if (typeof loadTrackedPicks === "function") {
+              if (typeof AppState !== "undefined" && AppState.tracker && AppState.tracker.state) {
+                activeListW = AppState.tracker.state.activePicks || null;
+                archivedListW = AppState.tracker.state.archivedPicks || null;
+              } else if (typeof loadTrackedPicks === "function") {
                 const loadedW = loadTrackedPicks();
-                if (loadedW && typeof loadedW === "object") {
+                if (Array.isArray(loadedW)) {
+                  activeListW = loadedW;
+                  archivedListW = (AppState && AppState.tracker && AppState.tracker.state && AppState.tracker.state.archivedPicks) || [];
+                } else if (loadedW && typeof loadedW === "object") {
                   activeListW = loadedW.activePicks || loadedW.active || null;
                   archivedListW = loadedW.archivedPicks || loadedW.archived || null;
                 }
@@ -37280,25 +37273,25 @@ const EngineAuditor = (function () {
 
     tally();
     pass();
-    if (typeof toggleTheme === "function") {
+    if (typeof applySystemTheme === "function") {
       add(
         "INFO",
         AREA,
-        "Theme toggle present",
-        'toggleTheme() is defined and toggles the "dark-mode" class on document.body.',
+        "System theme sync present",
+        'Theme follows OS prefers-color-scheme via applySystemTheme(); no manual theme toggle product path.',
         "Confirms the light/dark theming feature referenced throughout the stylesheet has a working entry point.",
         "No action needed.",
-        "toggleTheme()",
+        "applySystemTheme()",
       );
     } else {
       add(
         "LOW",
         AREA,
         "Theme toggle function not found",
-        "toggleTheme is not defined as a function in this scope.",
+        "applySystemTheme is not defined as a function in this scope.",
         "The page's dark-mode CSS variables would have no way to be triggered if this was removed or renamed.",
         "Confirm the theme-toggle button's onclick handler still resolves to a real function.",
-        "toggleTheme()",
+        "applySystemTheme()",
       );
     }
   }
@@ -37662,7 +37655,7 @@ const EngineAuditor = (function () {
         critical: false,
       },
       { name: "Config export (text report)", fn: "copyConfigsData", critical: false },
-      { name: "Theme toggle", fn: "toggleTheme", critical: false },
+      { name: "System theme sync", fn: "applySystemTheme", critical: false },
     ];
 
     tally();
@@ -37739,6 +37732,60 @@ const EngineAuditor = (function () {
     const AREA = "REGRESSION_LOCKS";
     const src = getConcatenatedScriptSource() || "";
     const full = getFullPageSource() || src;
+
+    // Fix-pass probes #15/#16/#17 — previously missed soft-tracker / venueReliable / snapshot shape.
+    tally();
+    pass();
+    {
+      const softBody = extractFunctionBody(src, "applySoftTrackerInfluenceToPicks") || "";
+      const hasDeadBoost = /confidenceShift\s*>\s*0/.test(softBody) && /action:\s*"boost"/.test(softBody);
+      const noPlayOnly = /no_play|NO PLAY/.test(softBody) && !hasDeadBoost;
+      if (noPlayOnly || /Soft-tracker policy: no-play-only/.test(softBody)) {
+        add("INFO", AREA, "Soft-tracker is no-play-only (boost/downgrade removed)",
+          "applySoftTrackerInfluenceToPicks no longer carries dead confidenceShift boost/downgrade branches.",
+          "Confirms finding #3/#21 policy.", "No action.", "REGRESSION_SOFT_TRACKER_NO_PLAY_ONLY");
+      } else if (hasDeadBoost) {
+        add("MEDIUM", AREA, "Soft-tracker still has dead boost/downgrade branches",
+          "confidenceShift boost path still present in applySoftTrackerInfluenceToPicks.",
+          "Dead confidenceShift stays 0 so boost never fires.",
+          "Delete boost/downgrade branches; keep no-play-only.",
+          "REGRESSION_SOFT_TRACKER_DEAD_BOOST");
+      }
+    }
+    tally();
+    pass();
+    {
+      const badVenueForce = src.indexOf("usedVenueFallback === false") >= 0 || src.indexOf("usedVenueFallback===false") >= 0;
+      const cleanVenue = /venueReliable\s*:\s*!![ab]VenueStats\?\.venueReliable/.test(src)
+      if (!badVenueForce && cleanVenue) {
+        add("INFO", AREA, "fetchMeta venueReliable uses venueReliable only",
+          "usedVenueFallback===false no longer forces venueReliable true.",
+          "Confirms finding #4/#19/#48.", "No action.", "REGRESSION_VENUE_RELIABLE_CLEAN");
+      } else if (badVenueForce) {
+        add("MEDIUM", AREA, "fetchMeta still forces venueReliable via usedVenueFallback===false",
+          "Found usedVenueFallback===false OR-force in fetchMeta venueReliable assignment.",
+          "Unreliable venue samples are reported as reliable.",
+          "Use only !!venueStats?.venueReliable.",
+          "REGRESSION_VENUE_RELIABLE_FORCE");
+      }
+    }
+    tally();
+    pass();
+    {
+      const snapBody = extractFunctionBody(src, "recordLiveCalculationSnapshot") || "";
+      const singleObject = /pick === undefined/.test(snapBody) || /metaOrGameId/.test(snapBody) || /Object\.assign\(\{\}, meta/.test(snapBody);
+      if (singleObject) {
+        add("INFO", AREA, "Live calculation snapshot accepts single metadata object",
+          "recordLiveCalculationSnapshot persists the call-site metadata object.",
+          "Confirms finding #5.", "No action.", "REGRESSION_SNAPSHOT_SINGLE_OBJECT");
+      } else {
+        add("MEDIUM", AREA, "Live calculation snapshot arity still mismatched",
+          "recordLiveCalculationSnapshot still looks like (gameId, pick, state) without single-object handling.",
+          "Call site passes one object; pick/state end up undefined.",
+          "Accept single metadata object and persist it.",
+          "REGRESSION_SNAPSHOT_ARITY");
+      }
+    }
 
     tally();
     pass();
@@ -39225,10 +39272,10 @@ const EngineAuditor = (function () {
 
     const registryComplete = lockRegComplete;
     if (registryComplete) {
-      forensicAdd("INFO", "Lock registry complete",
-        "BB_LOCK_REGISTRY resolves to all 45 LOCK-1..LOCK-45 contract seats (" + lockRegDetail + ").",
-        "The registry establishes the closed contracts; implementation compliance is tested by the regression and section-specific checks.",
-        "No action. Do not require literal LOCK-N strings in production code.",
+      forensicAdd("INFO", "Lock registry complete (checklist seats, not runtime ids)",
+        "BB_LOCK_REGISTRY lists all 45 LOCK-1..LOCK-45 auditor checklist seats (" + lockRegDetail + "). Runtime locking uses league+market bags via getTunableParam/promoteConfigToLock — not per LOCK-N id enforcement.",
+        "PASS here means the checklist is complete; it does not prove each LOCK-N string is wired as a runtime gate.",
+        "No action. Do not fake-wire LOCK-N seats into getTunableParam.",
         null, "", { ruleId: "LOCK_REGISTRY_COMPLETE" });
     } else {
       forensicAdd("HIGH", "LOCK-REGISTRY-INCOMPLETE",
@@ -40163,8 +40210,7 @@ const EngineAuditor = (function () {
       kindL === "team_total" ||
       kindL === "total" ||
       /^q[1-4]$/.test(kindL) ||
-      kindL === "high_q_ou" ||
-      kindL === "low_q_ou";
+      false;
     if (isOu) {
       if (s.indexOf("over") >= 0 || /\bover\b/i.test(pt)) return "OVER";
       if (s.indexOf("under") >= 0 || /\bunder\b/i.test(pt)) return "UNDER";
@@ -40319,8 +40365,7 @@ const EngineAuditor = (function () {
       kindL === "team_total" ||
       kindL === "total" ||
       /^q[1-4]$/.test(kindL) ||
-      kindL === "high_q_ou" ||
-      kindL === "low_q_ou";
+      false;
     if (isOu) {
       let a = typeof actualForMarket === "function" ? actualForMarket(p) : NaN;
       if (Number.isFinite(a)) return a;
@@ -40365,7 +40410,7 @@ const EngineAuditor = (function () {
     const L = Number(line);
     const A = Number(actual);
     const kind = String(marketKind || "total").toLowerCase();
-    if (kind === "total" || kind === "team_total" || kind === "ft_total" || kind === "h1_total" || kind === "h2_total" || kind === "h1_team_a" || kind === "h1_team_b" || kind === "q1" || kind === "q2" || kind === "q3" || kind === "q4" || kind === "high_q_ou" || kind === "low_q_ou") {
+    if (kind === "total" || kind === "team_total" || kind === "ft_total" || kind === "h1_total" || kind === "h2_total" || kind === "h1_team_a" || kind === "h1_team_b" || kind === "q1" || kind === "q2" || kind === "q3" || kind === "q4") {
       if (s.indexOf("over") >= 0) {
         if (A > L) return "win";
         if (A < L) return "loss";
@@ -41893,7 +41938,7 @@ const EngineAuditor = (function () {
           if (rates[i] > rates[i - 1] + 0.05) desc = false;
         }
         // Empirical tracker-history quality — INFO on integrity builds (not a live projection bug).
-        const _calSev = (typeof window !== "undefined" && window.__BB_INTEGRITY_BUILD__) ? "INFO" : "INFO";
+        const _calSev = desc ? "INFO" : "MEDIUM";
         forensicAssert(desc,
           "Confidence grade empirical calibration weak",
           "Win rates by grade (A→D): " + rates.map(function (r) { return r == null ? "n<a" : (r * 100).toFixed(1) + "%"; }).join(" → "),
@@ -41903,7 +41948,7 @@ const EngineAuditor = (function () {
             bankrollRisk: "LOW — historical calibration note", calculationPath: "grade→settled outcomes" });
         _forensicState.layerStatus = _forensicState.layerStatus || {};
         // Soft-pass layer on integrity builds so board stays clean for empirical history noise
-        _forensicState.layerStatus.CONF_CALIBRATION = desc ? "PASSED" : (window.__BB_INTEGRITY_BUILD__ ? "PASSED" : "PASSED");
+        _forensicState.layerStatus.CONF_CALIBRATION = desc ? "PASSED" : "FAILED";
         } 
       } else {
         forensicAdd("INFO", "Confidence calibration deferred",
@@ -42247,9 +42292,12 @@ const EngineAuditor = (function () {
       CONF_CALIBRATION_SMALL_N: 1,
       CONF_CALIBRATION_DEFERRED: 1,
     };
+    const lowCount = list.filter(function (f) { return String(f && f.severity || "") === "LOW"; }).length;
     const engineFindings = list.filter(function (f) {
       const sev = String(f && f.severity || "");
-      if (sev === "INFO" || sev === "LOW") return false;
+      if (sev === "INFO") return false;
+      // LOW findings are scored (SEV_WEIGHT.LOW) and block ENGINE OK when any remain.
+      if (sev === "LOW") return true;
       const rid = String((f && f.ruleId) || (f && f.meta && f.meta.ruleId) || "");
       if (noise[rid]) return false;
       const title = String(f && f.title || "");
@@ -42310,9 +42358,12 @@ const EngineAuditor = (function () {
     } else if (!asOfOk) {
       label = "AS-OF PROOF FAIL";
       color = "#ff5c61";
-    } else if (engineScore >= 90) {
+    } else if (engineScore >= 90 && lowCount === 0) {
       label = "ENGINE OK";
       color = "#49d45f";
+    } else if (engineScore >= 90 && lowCount > 0) {
+      label = "ENGINE WATCH";
+      color = "#ffcf73";
     } else if (engineScore >= 70) {
       label = "ENGINE WATCH";
       color = "#ffcf73";
@@ -42955,6 +43006,7 @@ const EngineAuditor = (function () {
       '" style="background:#1a1206;border:1px solid #d4af37;color:#ffd75e;padding:6px 10px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">' +
       (_viewMode === "info" ? "📋 Copy Info" : "📋 Copy Severity View") +
       "</button>" +
+      '<button id="auditorCopyFullBtn" onclick="EngineAuditor.copyFullReport()" title="Copies the complete audit report (all severities + INFO)." style="background:#1a1206;border:1px solid #d4af37;color:#ffd75e;padding:6px 10px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">📋 Copy Full</button>' +
       '<button onclick="EngineAuditor.run()" style="background:#0a1f0a;border:1px solid #2f8f4a;color:#49ff7a;padding:6px 10px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">↻ Re-run All</button>' +
       '<button onclick="EngineAuditor.exportJSON()" style="background:#0a1420;border:1px solid #2f6f8f;color:#8fd3ff;padding:6px 10px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">⬇ JSON</button>' +
       '<button onclick="EngineAuditor.exportText()" style="background:#0a1420;border:1px solid #2f6f8f;color:#8fd3ff;padding:6px 10px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">⬇ Text</button>' +
