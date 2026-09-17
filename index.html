@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17539,12 +17540,14 @@ function closeTrackerModal() {
 
 function renderTrackedPicks() {
   const summaryEl = document.getElementById("trackerSummary");
-  const marketSummaryEl = document.getElementById("trackerMarketSummary");
+  const marketSummaryEl = document.getElementById("trackerMarketSummary"); // optional — DOM node removed (JC-1)
   const emptyEl = document.getElementById("trackerEmpty");
   const wrapEl = document.getElementById("trackedPicksWrap");
   const bodyEl = document.getElementById("trackedPicksBody");
 
-  if (!summaryEl || !marketSummaryEl || !emptyEl || !wrapEl || !bodyEl) return;
+  // Do NOT require marketSummaryEl — that node was permanently deleted; requiring it
+  // aborted render and left the static "0 saved • 0 settled • 0 wins" forever.
+  if (!summaryEl || !emptyEl || !wrapEl || !bodyEl) return;
 
   const active = Array.isArray(AppState.tracker.state.activePicks)
     ? AppState.tracker.state.activePicks
@@ -17631,7 +17634,11 @@ function renderTrackedPicks() {
       g_liveGameStatus.has(p.eventId),
   ).length;
 
-  summaryEl.innerHTML = `${liveCount} live • ${stats.wins} wins • ${stats.losses} losses`;
+  const savedCount = Array.isArray(AppState.tracker.state.activePicks)
+    ? AppState.tracker.state.activePicks.length
+    : 0;
+  const settledCount = Number(stats.settled || 0);
+  summaryEl.innerHTML = `${savedCount} saved • ${settledCount} settled • ${stats.wins || 0} wins • ${liveCount} live`;
 
   try {
     const _qfStats = getQuarterFormBacktestStats();
@@ -17656,7 +17663,9 @@ function renderTrackedPicks() {
 
   if (!displayPicks.length) {
     emptyEl.style.display = isTrackerPicksView() ? "block" : "none";
-    emptyEl.textContent = "No live/recent picks. Older picks moved to record.";
+    emptyEl.textContent = savedCount
+      ? "No live/recent picks in this window. Older picks are still saved — check Record / wait for game window."
+      : "No tracked picks saved yet.";
     wrapEl.style.display = isTrackerPicksView() ? "none" : "block";
     bodyEl.innerHTML = "";
     return;
@@ -32902,6 +32911,47 @@ async function runEngine() {
             marketKey: "q4",
             finalGrade: q4?.confidence || "NaN",
           },
+          ...((function () {
+            const byKey = {};
+            (finalPicksForDisplay || []).forEach(function (row) {
+              if (!row || !row.marketKey) return;
+              byKey[row.marketKey] = row;
+            });
+            function mk(key) {
+              const row = byKey[key];
+              if (!row) return null;
+              return {
+                pick: row.pick || "NO PLAY",
+                note: row.note || null,
+                line: row.line,
+                edge: row.edge,
+                edgePct:
+                  isFinite(row.edge) && isFinite(row.line) && row.line
+                    ? Math.abs(row.edge / row.line)
+                    : null,
+                sampleTier: row.sampleTier || row.tier || null,
+                projectionOnly: !!row.projectionOnly,
+                fullModel: !!row.fullModel,
+                trap: !!row.trap,
+                hasH2H: !!row.hasH2H,
+                marketKey: key,
+                finalGrade: row.confidence || "NaN",
+                winProbability: isFinite(row.winProbability) ? row.winProbability : null,
+              };
+            }
+            const extra = {};
+            const h2 = mk("h2");
+            const w = mk("winner");
+            const hc = mk("handicap");
+            const hc1 = mk("handicap_h1");
+            const hc2 = mk("handicap_h2");
+            if (h2) extra.H2 = h2;
+            if (w) extra.WINNER = w;
+            if (hc) extra.HANDICAP = hc;
+            if (hc1) extra.HANDICAP_H1 = hc1;
+            if (hc2) extra.HANDICAP_H2 = hc2;
+            return extra;
+          })()),
         },
       },
 
