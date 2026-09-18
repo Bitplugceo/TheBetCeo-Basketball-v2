@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5559,7 +5558,7 @@ function searchSofascorePlayer(side) {
     st.textContent =
       "🔍 Basketball-only search opened for " +
       side +
-      " — find the team ID in the JSON and paste it above.";
+      " — paste that search JSON here, or copy the team ID into the ID box.";
   }
 }
 
@@ -6361,7 +6360,129 @@ function queueSofascorePasteParse(side) {
   }, 280);
 }
 
-function parseSofascoreIndividual(side) {
+function ssExtractPastedEvents(parsed) {
+  if (!parsed || typeof parsed !== "object") return [];
+  if (Array.isArray(parsed.events)) return parsed.events;
+  if (Array.isArray(parsed.event)) return parsed.event;
+  if (parsed.events && Array.isArray(parsed.events.events)) return parsed.events.events;
+  return [];
+}
+
+function ssCollectSearchTeams(parsed) {
+  const out = [];
+  const push = function (row) {
+    if (!row) return;
+    const ent = row.entity || row.team || row;
+    if (!ent || ent.id == null) return;
+    const sportSlug = String((ent.sport && (ent.sport.slug || ent.sport.name)) || "").toLowerCase();
+    if (sportSlug && sportSlug !== "basketball") return;
+    const type = String(row.type || "").toLowerCase();
+    if (type && type !== "team") return;
+    out.push({
+      id: String(ent.id),
+      name: String(ent.name || ""),
+      gender: String(ent.gender || "").toUpperCase(),
+      slug: String(ent.slug || ""),
+      userCount: Number(ent.userCount || 0),
+      score: Number(row.score || 0),
+      country: String((ent.country && (ent.country.name || ent.country.slug)) || ""),
+      national: !!ent.national,
+    });
+  };
+  if (Array.isArray(parsed && parsed.results)) parsed.results.forEach(push);
+  else if (Array.isArray(parsed && parsed.teams)) parsed.teams.forEach(push);
+  else if (parsed && parsed.entity) push(parsed);
+  return out;
+}
+
+function ssPickTeamFromSearch(teams, leagueKey) {
+  const listIn = Array.isArray(teams) ? teams.slice() : [];
+  if (!listIn.length) return null;
+  const wantWomen = typeof isWomenLeagueKey === "function" && isWomenLeagueKey(leagueKey);
+  const youthRe = /esport|e-sport|e sport|cyber|u16|u17|u18|u19|u20|u21|youth|junior|academy/i;
+  let list = listIn.filter(function (t) {
+    return !youthRe.test((t.name || "") + " " + (t.slug || ""));
+  });
+  if (!list.length) list = listIn.slice();
+  const gendered = list.filter(function (t) {
+    if (!t.gender) return true;
+    return wantWomen ? t.gender === "F" : t.gender === "M";
+  });
+  if (gendered.length) list = gendered;
+  list.sort(function (a, b) {
+    return (b.userCount || 0) - (a.userCount || 0) || (b.score || 0) - (a.score || 0);
+  });
+  return list[0] || null;
+}
+
+async function ssFetchTeamLastEvents(teamId) {
+  const id = String(teamId || "").trim();
+  if (!/^[0-9]+$/.test(id)) return [];
+  if (typeof proxyFetch !== "function") return [];
+  const pages = [];
+  try {
+    const first = await proxyFetch("https://api.sofascore.com/api/v1/team/" + id + "/events/last/0");
+    pages.push(first);
+    if (first && first.hasNextPage) {
+      try {
+        pages.push(await proxyFetch("https://api.sofascore.com/api/v1/team/" + id + "/events/last/1"));
+      } catch (_e1) {}
+    }
+  } catch (_e0) {
+    return [];
+  }
+  const merged = new Map();
+  pages.forEach(function (payload) {
+    ssExtractPastedEvents(payload).forEach(function (ev) {
+      if (ev && ev.id != null) merged.set(ev.id, ev);
+    });
+  });
+  return Array.from(merged.values());
+}
+
+async function ssApplySearchPaste(side, parsed, st) {
+  const leagueSelect = document.getElementById("leagueSelect")?.value || "";
+  const teams = ssCollectSearchTeams(parsed);
+  if (!teams.length) return null;
+  const picked = ssPickTeamFromSearch(teams, leagueSelect);
+  if (!picked) return null;
+
+  const nameEl = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
+  const idEl = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
+  const mainEl = document.getElementById(side === "A" ? "teamAName" : "teamBName");
+  if (nameEl) nameEl.value = picked.name;
+  if (mainEl && picked.name) mainEl.value = picked.name;
+  if (idEl) idEl.value = picked.id;
+  if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
+
+  if (st) {
+    st.style.color = "#d98a00";
+    st.textContent =
+      "🔍 Search JSON detected — locked " +
+      picked.name +
+      " (" +
+      picked.id +
+      "). Fetching last events…";
+  }
+
+  const events = await ssFetchTeamLastEvents(picked.id);
+  if (events.length) return { resolvedTeam: picked, events: events };
+
+  if (st) {
+    st.style.color = "#2f8f4a";
+    st.textContent =
+      "✅ Team locked: " +
+      picked.name +
+      " (" +
+      picked.id +
+      "). This paste was a SEARCH result, not games. Open JSON " +
+      side +
+      " and paste /events/last/0.";
+  }
+  return { resolvedTeam: picked, events: [] };
+}
+
+async function parseSofascoreIndividual(side) {
   const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
   let rawText = (pasteEl?.value || "").trim();
   const st = document.getElementById("ssFetchStatus");
@@ -6379,8 +6500,20 @@ function parseSofascoreIndividual(side) {
       }
     }
     const parsed = JSON.parse(rawText);
-    const events = parsed.events || [];
-    if (!events.length) throw new Error("No events found in pasted JSON.");
+    let events = ssExtractPastedEvents(parsed);
+    if (!events.length) {
+      const applied = await ssApplySearchPaste(side, parsed, st);
+      if (applied && applied.events && applied.events.length) {
+        events = applied.events;
+      } else if (applied && applied.resolvedTeam) {
+        if (pasteEl) pasteEl.value = "";
+        return;
+      } else {
+        throw new Error(
+          "No events found in pasted JSON. If this is a team search result, keep the team ID and paste /events/last/0 instead.",
+        );
+      }
+    }
 
     const leagueSelect = document.getElementById("leagueSelect")?.value || "";
     const isWomenLeague = isWomenLeagueKey(leagueSelect);
@@ -23190,15 +23323,7 @@ function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKe
   if (winProb >= threshA) grade = "A";
   else if (winProb >= threshB) grade = "B";
   else if (winProb >= threshC) grade = "C";
-  // H3: unfitted logistic cannot mint Grade A from distribution-only winProb.
-  if (
-    grade === "A" &&
-    typeof isConfidenceModelFitted === "function" &&
-    !isConfidenceModelFitted(league)
-  ) {
-    grade = "B";
-    if (outMeta && typeof outMeta === "object") outMeta._gradeCappedUnfitted = true;
-  }
+  // Unfitted A-cap removed by request: grade follows winProb thresholds only.
   return grade;
 }
 
@@ -30921,15 +31046,21 @@ try {
 } catch (_exposeErr) {}
 
 function scrollResultsIntoViewNow(table) {
-  const target = document.getElementById("syndicateDashboard") || table;
+  const target = table || document.getElementById("results");
   if (!target) return;
-  try {
-    target.scrollIntoView({ behavior: "auto", block: "start" });
-  } catch (_e) {
+  const run = function () {
     try {
-      target.scrollIntoView(true);
-    } catch (_e2) {}
-  }
+      const rect = target.getBoundingClientRect();
+      const isInView = rect.top >= 0 && rect.bottom <= window.innerHeight;
+      if (isInView) return;
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    } catch (_e) {
+      try {
+        target.scrollIntoView(true);
+      } catch (_e2) {}
+    }
+  };
+  setTimeout(run, 300);
 }
 
 /* SECTION 338 — run-engine */
@@ -33553,7 +33684,7 @@ async function runEngine() {
       confidenceBuild: {
         gradeThresholds: _aud_gradeThresholds,
         scoringFormula:
-          "DOC FIX (item 32 / H3 harden, " + new Date().toISOString().slice(0,10) + "): Unfitted-model Grade A cap IS NOW IMPLEMENTED in resolveConfidenceGradeFromWinProbability (also enforced via getConfidenceGrade / getMarginConfidenceGrade): if !isConfidenceModelFitted(league) and the resolved grade would be A, grade is capped to B and params._gradeCappedUnfitted may be set. This closes the prior distribution-only path that could mint Grade A before logistic calibration. ECE-based D13 cap on B/C is still not implemented. Actual live grading: winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope]). Separately, if injury data failed to fetch OR ESPN injury feed returned empty (emptyFeed), winProb is capped at 0.62 (min(winProb, 0.62)) via injuryFetchFailed. Wide-range market inputs and Q1+Q2 vs H1 / Q3+Q4 vs H2 line contradictions force NO PLAY (confidence NaN) and never publish Grade A/B/C on a wide midpoint. Thresholds: winProb>=aThresh->A (capped to B when unfitted), >=bThresh->B, >=cThresh->C, else D.",
+          "DOC FIX (item 32 / H3 harden, " + new Date().toISOString().slice(0,10) + "): Unfitted-model Grade A cap IS NOW IMPLEMENTED in resolveConfidenceGradeFromWinProbability (also enforced via getConfidenceGrade / getMarginConfidenceGrade): Unfitted-model Grade A cap REMOVED: grade follows winProb thresholds only (A>=aThresh, B>=bThresh, C>=cThresh) even when the logistic is unfitted. ECE-based D13 cap on B/C is still not implemented. Actual live grading: winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope]). Separately, if injury data failed to fetch OR ESPN injury feed returned empty (emptyFeed), winProb is capped at 0.62 (min(winProb, 0.62)) via injuryFetchFailed. Wide-range market inputs and Q1+Q2 vs H1 / Q3+Q4 vs H2 line contradictions force NO PLAY (confidence NaN) and never publish Grade A/B/C on a wide midpoint. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D. Unfitted A-cap disabled.",
         markets: {
           FT: {
             pick: _auditFinalPick("ft", ftPick),
