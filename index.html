@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -22622,9 +22623,13 @@ function detectMarginTrap(edge, referenceScale, league, marketKey, combinedStdDe
 /* SECTION 269 — compute-lineup-quality */
 function computeLineupQuality(roster, injuryMeta) {
   let score = 1.0;
-  const injImpact = isFinite(Number(injuryMeta?.scoringMult))
-    ? 1 - Number(injuryMeta.scoringMult)
-    : 0;
+  // BUGFIX (audit item #13/#14): scoringMult must be a haircut (<=1), never a boost. Clamp
+  // it here too (not just at the source in fetchInjuryMeta) so injImpact can never go
+  // negative and "injuries" can never increase lineup quality, regardless of caller.
+  const _clampedScoringMult = isFinite(Number(injuryMeta?.scoringMult))
+    ? Math.max(0, Math.min(1, Number(injuryMeta.scoringMult)))
+    : 1;
+  const injImpact = 1 - _clampedScoringMult;
   score -= Math.min(0.25, injImpact);
   if (Array.isArray(roster) && roster.length) {
     const withPM = roster.filter(
@@ -24658,6 +24663,12 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
     unknownImpactCount: 0,
     hasUnknownImpact: false,
     highUncertainty: false,
+    // BUGFIX (audit items #9/#10): outCount/dtdCount default to 0 because the counters simply
+    // haven't run yet, NOT because zero injuries were confirmed. countsConfirmed distinguishes
+    // "we actually parsed a real injury list and counted OUT/DTD players" (true) from "the
+    // counts above are meaningless placeholders because the fetch failed or the feed was empty"
+    // (false). Consumers of outCount/dtdCount should check this flag before trusting them.
+    countsConfirmed: false,
   };
 
   try {
@@ -24668,18 +24679,29 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
       result.fetchFailed = true;
       result.highUncertainty = true;
       result.minutesUnknownDTD = true;
+      result.countsConfirmed = false;
       result.notes.push({ type: "meta", text: "Injury fetch failed — treating impact as unknown; offense haircut 0.94" });
       return result;
     }
     const items = data?.injuries || data?.items || [];
     if (!items.length) {
-      // Empty ESPN injury list is NOT proof of full strength — treat as injury-blind for grading.
-      result.confirmedNone = true;
+      // BUGFIX (audit items #10/#11/#12): an empty ESPN injury list is NOT proof of full
+      // strength. It previously set confirmedNone=true (implying certainty) in the same
+      // breath as fetchFailed=true (implying uncertainty) — a direct contradiction — and it
+      // left scoringMult at 1 (no offense haircut) even though the confidence-grade cap
+      // (getConfidenceGrade's injuryFetchFailed check, 0.62 winProb ceiling) treats this
+      // exactly like a real fetch failure. An empty feed and a failed fetch carry the same
+      // "we don't actually know this roster's availability" uncertainty, so they now get the
+      // same 0.94 offense haircut and the same (renamed, non-contradictory) flags.
+      result.scoringMult = 0.94;
+      result.confirmedNone = false; // never actually confirmed — renamed intent kept for back-compat callers
       result.emptyFeed = true;
       result.fetchFailed = true; // triggers existing 0.62 winProb cap in getConfidenceGrade
+      result.highUncertainty = true;
+      result.countsConfirmed = false;
       result.notes.push({
         type: "meta",
-        text: "Injury feed empty — grades capped",
+        text: "Injury feed empty — availability unconfirmed, not full strength; offense haircut 0.94, grades capped",
       });
       return result;
     }
@@ -24811,6 +24833,15 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
     }
     result.netReduction = Math.min(_netReduction, maxInjCap);
     result.hasUnknownImpact = result.unknownImpactCount > 0;
+    // BUGFIX (audit item #9): we actually parsed a real, non-empty injury list and counted
+    // OUT/DTD players from it, so outCount/dtdCount are now meaningful — mark them as such.
+    result.countsConfirmed = true;
+    // BUGFIX (audit item #13/#14, defense-in-depth): scoringMult feeds computeLineupQuality
+    // as injImpact = 1 - scoringMult; injImpact must never go negative (which would let
+    // "injuries" raise lineup quality) and must never exceed 1. Explicitly clamp here rather
+    // than relying on every call site (and every getParam("injuryMult", ...) config value)
+    // to keep it in range.
+    result.scoringMult = Math.max(0.3, Math.min(1, result.scoringMult));
 
     result.highUncertainty =
       result.dtdCount >= 2 ||
@@ -24835,6 +24866,7 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
     result.fetchFailed = true;
     result.highUncertainty = true;
     result.minutesUnknownDTD = true;
+    result.countsConfirmed = false;
     result.notes.push({ type: "meta", text: "Injury fetch error — impact unknown; offense haircut 0.94" });
   }
 
@@ -30128,6 +30160,17 @@ function suppressCorrelatedHalfPlays(picks) {
   drop.displayPick = "NO PLAY";
   drop.bufferedPickText = "NO PLAY";
   drop.confidence = "NaN";
+  // BUGFIX (correlated-suppression stale metadata): a suppressed pick used to keep its
+  // pre-suppression edge/projection/winProbability, so anything that reads those numeric
+  // fields directly (instead of gating on p.pick) could still surface a "live" number for a
+  // market that was just forced to NO PLAY. Clear the derived numeric/lock fields too.
+  drop.winProbability = null;
+  drop.rawWinProbability = null;
+  drop.distributionWinProbability = null;
+  drop.marginEdgePct = null;
+  drop.isLock = false;
+  drop.lockRestricted = true;
+  drop.correlatedSuppressed = true;
   drop.note = "CORRELATED with " + String(keep.marketKey).toUpperCase() + " — same first-half scoring thesis";
   return picks;
 }
@@ -32750,6 +32793,34 @@ async function runEngine() {
       cThresh: getParam("confidenceCThresh", league) ?? 0.51,
     };
 
+    // BUGFIX (audit item #1 — H1 stale-grade desync, and the same class of bug for
+    // FT / TEAM_A / TEAM_B / Q1-Q4): confidenceBuild used to read pre-gate snapshot
+    // variables (ftPick, h1Pick, h1ConfidenceFinal, aPick, aConfidence, bPick, bConfidence,
+    // q1..q4) that are frozen BEFORE the wide-range gate, sibling-market-contradiction gate,
+    // tracker-soft-effects, invariant-safety gate, and correlated-half-play suppression run.
+    // Those later gates only mutate the row objects inside finalPicksForDisplay, so the
+    // audit could report e.g. H1 finalGrade "C" while the tracked/displayed pick had already
+    // been forced to NO PLAY (reproducibility.calculatedWinProbabilities showed
+    // "suppressed_no_play" for the same market). WINNER / HANDICAP / HANDICAP_H1 /
+    // HANDICAP_H2 / H2 already read from finalPicksForDisplay further down — this brings
+    // FT / H1 / TEAM_A / TEAM_B / Q1-Q4 in line with that same, correct pattern so there is
+    // a single authoritative source for "pick" and "finalGrade" everywhere in the audit JSON.
+    const _auditFinalByKey = {};
+    (Array.isArray(finalPicksForDisplay) ? finalPicksForDisplay : []).forEach(function (row) {
+      if (row && row.marketKey) _auditFinalByKey[row.marketKey] = row;
+    });
+    function _auditFinalPick(marketKey, fallbackPick) {
+      const row = _auditFinalByKey[marketKey];
+      return row ? (row.pick || "NO PLAY") : fallbackPick;
+    }
+    function _auditFinalGrade(marketKey, fallbackGrade) {
+      const row = _auditFinalByKey[marketKey];
+      if (!row) return fallbackGrade;
+      return typeof auditFinalGradeSentinel === "function"
+        ? auditFinalGradeSentinel(row.confidence, row.pick)
+        : (row.confidence || "NaN");
+    }
+
     window.__LAST_AUDIT_STATE = {
       meta: {
         timestamp: new Date().toISOString(),
@@ -33271,7 +33342,7 @@ async function runEngine() {
           "DOC FIX (item 32 / H3 harden, " + new Date().toISOString().slice(0,10) + "): Unfitted-model Grade A cap IS NOW IMPLEMENTED in resolveConfidenceGradeFromWinProbability (also enforced via getConfidenceGrade / getMarginConfidenceGrade): if !isConfidenceModelFitted(league) and the resolved grade would be A, grade is capped to B and params._gradeCappedUnfitted may be set. This closes the prior distribution-only path that could mint Grade A before logistic calibration. ECE-based D13 cap on B/C is still not implemented. Actual live grading: winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope]). Separately, if injury data failed to fetch OR ESPN injury feed returned empty (emptyFeed), winProb is capped at 0.62 (min(winProb, 0.62)) via injuryFetchFailed. Wide-range market inputs and Q1+Q2 vs H1 / Q3+Q4 vs H2 line contradictions force NO PLAY (confidence NaN) and never publish Grade A/B/C on a wide midpoint. Thresholds: winProb>=aThresh->A (capped to B when unfitted), >=bThresh->B, >=cThresh->C, else D.",
         markets: {
           FT: {
-            pick: ftPick,
+            pick: _auditFinalPick("ft", ftPick),
             note: ftNote,
             line: ftLine,
             edge: ftCalc.ftEdge,
@@ -33282,10 +33353,10 @@ async function runEngine() {
             trap: ftTrap,
             hasH2H: ftCalc.ftHasH2H,
             marketKey: "ft",
-            finalGrade: ftConfidence,
+            finalGrade: _auditFinalGrade("ft", ftConfidence),
           },
           H1: {
-            pick: h1Pick,
+            pick: _auditFinalPick("h1", h1Pick),
             note: h1Note,
             line: h1Line,
             edge: h1Calc.h1Edge,
@@ -33296,10 +33367,10 @@ async function runEngine() {
             trap: h1Trap,
             hasH2H: h1Calc.h1HasH2H,
             marketKey: "h1",
-            finalGrade: h1ConfidenceFinal,
+            finalGrade: _auditFinalGrade("h1", h1ConfidenceFinal),
           },
           TEAM_A: {
-            pick: aPick,
+            pick: _auditFinalPick("team_a", aPick),
             note: ftNote,
             line: aLine,
             edge: ftCalc.aEdge,
@@ -33310,10 +33381,10 @@ async function runEngine() {
             trap: aTrap,
             hasH2H: ftCalc.ftHasH2H,
             marketKey: "team_a",
-            finalGrade: aConfidence,
+            finalGrade: _auditFinalGrade("team_a", aConfidence),
           },
           TEAM_B: {
-            pick: bPick,
+            pick: _auditFinalPick("team_b", bPick),
             note: ftNote,
             line: bLine,
             edge: ftCalc.bEdge,
@@ -33324,10 +33395,10 @@ async function runEngine() {
             trap: bTrap,
             hasH2H: ftCalc.ftHasH2H,
             marketKey: "team_b",
-            finalGrade: bConfidence,
+            finalGrade: _auditFinalGrade("team_b", bConfidence),
           },
           Q1: {
-            pick: q1?.pick || "NO PLAY",
+            pick: _auditFinalPick("q1", q1?.pick || "NO PLAY"),
             note: null,
             line: q1?.line,
             edge: q1?.edge,
@@ -33338,10 +33409,10 @@ async function runEngine() {
             trap: q1?.trap ?? false,
             hasH2H: q1?.hasH2H,
             marketKey: "q1",
-            finalGrade: q1?.confidence || "NaN",
+            finalGrade: _auditFinalGrade("q1", q1?.confidence || "NaN"),
           },
           Q2: {
-            pick: q2?.pick || "NO PLAY",
+            pick: _auditFinalPick("q2", q2?.pick || "NO PLAY"),
             note: null,
             line: q2?.line,
             edge: q2?.edge,
@@ -33352,10 +33423,10 @@ async function runEngine() {
             trap: q2?.trap ?? false,
             hasH2H: q2?.hasH2H,
             marketKey: "q2",
-            finalGrade: q2?.confidence || "NaN",
+            finalGrade: _auditFinalGrade("q2", q2?.confidence || "NaN"),
           },
           Q3: {
-            pick: q3?.pick || "NO PLAY",
+            pick: _auditFinalPick("q3", q3?.pick || "NO PLAY"),
             note: null,
             line: q3?.line,
             edge: q3?.edge,
@@ -33366,10 +33437,10 @@ async function runEngine() {
             trap: q3?.trap ?? false,
             hasH2H: q3?.hasH2H,
             marketKey: "q3",
-            finalGrade: q3?.confidence || "NaN",
+            finalGrade: _auditFinalGrade("q3", q3?.confidence || "NaN"),
           },
           Q4: {
-            pick: q4?.pick || "NO PLAY",
+            pick: _auditFinalPick("q4", q4?.pick || "NO PLAY"),
             note: null,
             line: q4?.line,
             edge: q4?.edge,
@@ -33380,7 +33451,7 @@ async function runEngine() {
             trap: q4?.trap ?? false,
             hasH2H: q4?.hasH2H,
             marketKey: "q4",
-            finalGrade: q4?.confidence || "NaN",
+            finalGrade: _auditFinalGrade("q4", q4?.confidence || "NaN"),
           },
           ...((function () {
             const byKey = {};
