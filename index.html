@@ -15297,7 +15297,8 @@ function _proxyFetchCacheEvictIfNeeded() {
   for (const [k, v] of _proxyFetchCache) {
     const ttl = (() => {
       const s = String(k || "");
-      if (/\/injuries|\/scoreboard|\/summary\?event=/i.test(s)) return 3 * 60 * 1000;
+      if (/\/injuries/i.test(s)) return 3 * 60 * 1000;
+    if (/\/scoreboard|\/summary\?event=/i.test(s)) return 10 * 1000;
       return 15 * 60 * 1000;
     })();
     if (!v || now - (v.timestamp || 0) >= ttl) _proxyFetchCache.delete(k);
@@ -15321,7 +15322,8 @@ async function proxyFetch(url, timeoutMs = 12000) {
   const cacheKey = url;
   function proxyFetchCacheTtlMs(requestUrl) {
     const s = String(requestUrl || "");
-    if (/\/injuries|\/scoreboard|\/summary\?event=/i.test(s)) return 3 * 60 * 1000;
+    if (/\/injuries/i.test(s)) return 3 * 60 * 1000;
+    if (/\/scoreboard|\/summary\?event=/i.test(s)) return 10 * 1000;
     return 15 * 60 * 1000;
   }
   if (_proxyFetchCache.has(cacheKey)) {
@@ -17278,21 +17280,63 @@ function stopLiveClockTicker() {
   }
 }
 
-function scheduleLiveClockPoll() {
+function isEspnCompetitionLive(status) {
+  const t = (status && status.type) || status || {};
+  const state = String(t.state || "").toLowerCase();
+  const name = String(t.name || "").toUpperCase();
+  const desc = String(t.description || t.detail || t.shortDetail || "").toUpperCase();
+  const blob = name + " " + desc;
+  if (t.completed === true || state === "post" || name === "STATUS_FINAL" || blob.includes("FINAL"))
+    return { live: false, half: false };
+  if (state === "pre" || name === "STATUS_SCHEDULED") return { live: false, half: false };
+  const half =
+    blob.includes("HALFTIME") ||
+    blob.includes("HALF TIME") ||
+    blob.includes("HALF-TIME") ||
+    /\bHT\b/.test(blob);
+  const breakish =
+    half ||
+    blob.includes("END_PERIOD") ||
+    blob.includes("END OF") ||
+    blob.includes("END PERIOD") ||
+    blob.includes("INTERMISSION") ||
+    blob.includes("TIMEOUT") ||
+    blob.includes("BREAK");
+  const live =
+    state === "in" ||
+    blob.includes("PROGRESS") ||
+    blob.includes("IN-PROGRESS") ||
+    breakish;
+  return { live: !!live, half: !!half };
+}
+
+function pendingTrackedEventIdsByLeague() {
+  const byLeague = new Map();
+  const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
+  active.forEach((p) => {
+    if (!p?.eventId) return;
+    if (String(p.resultStatus || "pending").toLowerCase() !== "pending") return;
+    const lg = p.league || "";
+    if (!byLeague.has(lg)) byLeague.set(lg, new Set());
+    byLeague.get(lg).add(String(p.eventId));
+  });
+  return byLeague;
+}
+
+function scheduleLiveClockPoll(delayMs) {
   clearTimeout(_liveClockPollTimer);
   _liveClockPollTimer = null;
-  if (g_liveGameStatus.size === 0) return;
+  const wait = Number.isFinite(delayMs) ? Math.max(0, delayMs) : 28000;
   _liveClockPollTimer = setTimeout(async () => {
     _liveClockPollTimer = null;
     await pollLiveGameClocks();
-  }, 28000);
+  }, wait);
 }
 
 let _liveClockPollInFlight = false;
 let _liveClockPollAbort = null;
 async function pollLiveGameClocks() {
   if (_liveClockPollInFlight) return;
-  if (g_liveGameStatus.size === 0) return;
   _liveClockPollInFlight = true;
   if (_liveClockPollAbort) {
     try { _liveClockPollAbort.abort(); } catch (_eAbort) {}
@@ -17300,16 +17344,12 @@ async function pollLiveGameClocks() {
   _liveClockPollAbort = (typeof AbortController !== "undefined") ? new AbortController() : null;
   const _liveClockSignal = _liveClockPollAbort ? _liveClockPollAbort.signal : undefined;
   try {
-  const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
-  const byLeague = new Map();
-  active.forEach((p) => {
-    if (!p?.eventId || !g_liveGameStatus.has(p.eventId)) return;
-    if (!byLeague.has(p.league)) byLeague.set(p.league, new Set());
-    byLeague.get(p.league).add(p.eventId);
-  });
+  const byLeague = pendingTrackedEventIdsByLeague();
   if (!byLeague.size) {
-    g_liveGameStatus.clear();
-    renderTrackedPicks();
+    if (g_liveGameStatus.size) {
+      g_liveGameStatus.clear();
+      renderTrackedPicks();
+    }
     return;
   }
   let didChange = false;
@@ -17345,8 +17385,9 @@ async function pollLiveGameClocks() {
         const statusName = String(comp?.status?.type?.name || "");
         const clock = String(comp?.status?.displayClock || "");
         const period = Number(comp?.status?.period || 0);
-        const isHalf = statusName.toUpperCase().includes("HALFTIME");
-        const isLive = state === "in" || isHalf || statusName.toUpperCase().includes("PROGRESS");
+        const _liveMeta = isEspnCompetitionLive(comp && comp.status);
+        const isHalf = !!_liveMeta.half;
+        const isLive = !!_liveMeta.live;
         if (isLive) {
           const existing = g_liveGameStatus.get(eid);
           const newClock = isHalf ? "HALF" : clock;
@@ -18173,8 +18214,8 @@ async function openTrackerModal() {
   updateTrackerInsightsButton();
   syncTrackerModalView();
   await window.primeTrackerStateForRun();
-  refreshTrackerInBackground(false);
-  scheduleLiveClockPoll();
+  refreshTrackerInBackground(true);
+  scheduleLiveClockPoll(0);
   startLiveClockTicker();
 }
 
@@ -18186,7 +18227,6 @@ function closeTrackerModal() {
   clearTimeout(_liveClockPollTimer);
   _liveClockPollTimer = null;
   stopLiveClockTicker();
-  g_liveGameStatus.clear();
   modal.classList.remove("open");
   syncTrackerModalView();
   modal.setAttribute("aria-hidden", "true");
@@ -21625,18 +21665,10 @@ async function refreshTrackedPickResults() {
             line: pick.lineAtPick || pick.line,
             ts: new Date().toLocaleTimeString([], { hour12: false }),
           });
-          const _isLiveNow =
-            stateName === "in" ||
-            String(statusName || "")
-              .toUpperCase()
-              .includes("PROGRESS") ||
-            String(statusName || "")
-              .toUpperCase()
-              .includes("HALFTIME");
+          const _liveMeta = isEspnCompetitionLive(competition && competition.status);
+          const _isLiveNow = !!_liveMeta.live;
           if (_isLiveNow && pick.eventId) {
-            const _isHalf = String(statusName || "")
-              .toUpperCase()
-              .includes("HALFTIME");
+            const _isHalf = !!_liveMeta.half;
             const _existingLive = g_liveGameStatus.get(pick.eventId);
             const _rlCompetitors = competition?.competitors || [];
             const _rlHome = _rlCompetitors.find((c) => c.homeAway === "home");
@@ -34606,13 +34638,14 @@ document.addEventListener("DOMContentLoaded", () => {
     (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)
   );
 
-  window.addEventListener("focus", () =>
-    _isPWA ? refreshTrackerInBackground(true) : debouncedRefreshBackground(false),
-  );
-  window.addEventListener("pageshow", (e) => {
-    if (e.persisted || _isPWA) refreshTrackerInBackground(true);
-    else debouncedRefreshBackground(false);
-  });
+  function resumeLiveTrackerNow() {
+    refreshTrackerInBackground(true);
+    scheduleLiveClockPoll(0);
+    const modalOpen = document.getElementById("trackerModal")?.classList.contains("open");
+    if (modalOpen) startLiveClockTicker();
+  }
+  window.addEventListener("focus", () => resumeLiveTrackerNow());
+  window.addEventListener("pageshow", () => resumeLiveTrackerNow());
   window.addEventListener("online", () => refreshTrackerInBackground(true));
 
   window.addEventListener("offline", function () {
@@ -34652,15 +34685,7 @@ document.addEventListener("DOMContentLoaded", () => {
       handleExit();
       stopLiveClockTicker();
     } else {
-      debouncedRefreshBackground(false);
-      if (g_liveGameStatus.size > 0) {
-        stopLiveClockTicker();
-        pollLiveGameClocks().then(() => {
-          if (document.getElementById("trackerModal")?.classList.contains("open")) {
-            startLiveClockTicker();
-          }
-        });
-      }
+      resumeLiveTrackerNow();
     }
   });
 
