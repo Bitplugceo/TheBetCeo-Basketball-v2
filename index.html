@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1071,6 +1072,60 @@ body.dark-mode .tracker-manual-btn {
   background: #1a1a1a !important;
   color: #ffffff !important;
   border-color: #2a2a2a !important;
+}
+
+
+.manual-settle-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10050;
+  background: rgba(0,0,0,0.55);
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  box-sizing: border-box;
+}
+.manual-settle-overlay.open { display: flex; }
+.manual-settle-card {
+  width: min(420px, 100%);
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--shadow);
+  padding: 16px 14px 12px;
+}
+.manual-settle-title {
+  font-size: 15px;
+  font-weight: 900;
+  margin: 0 0 8px;
+}
+.manual-settle-match {
+  font-size: 13px;
+  font-weight: 800;
+  margin: 0 0 4px;
+}
+.manual-settle-market {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+  margin: 0 0 12px;
+}
+.manual-settle-card input {
+  width: 100%;
+  max-width: none;
+  margin: 0 0 12px;
+  font-size: 16px;
+  padding: 10px 8px;
+}
+.manual-settle-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.manual-settle-actions button {
+  margin: 0;
+  min-width: 72px;
 }
 
 .tracker-manual-hint {
@@ -4245,6 +4300,20 @@ const BB_LOCK_REGISTRY = Object.freeze([
     </div>
   </div>
 </div>
+
+<div id="manualSettleOverlay" class="manual-settle-overlay" aria-hidden="true">
+  <div class="manual-settle-card" role="dialog" aria-modal="true">
+    <p id="manualSettleTitle" class="manual-settle-title"></p>
+    <p id="manualSettleMatch" class="manual-settle-match"></p>
+    <p id="manualSettleMarket" class="manual-settle-market"></p>
+    <input id="manualSettleInput" type="text" autocomplete="off" autocapitalize="characters" />
+    <div class="manual-settle-actions">
+      <button type="button" id="manualSettleCancelBtn">Cancel</button>
+      <button type="button" id="manualSettleOkBtn">OK</button>
+    </div>
+  </div>
+</div>
+
 <div
   id="afdbOverlay"
   style="
@@ -18004,8 +18073,9 @@ function archiveExpiredTrackedPicks() {
     const p = ensureTrackedPickKeys({ ...pick });
     const isSettled = ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase());
     const gameTs = safeParseDate(p.eventDate) || safeParseDate(p.createdAt) || 0;
-    const refTs = gameTs > 0 ? gameTs : safeParseDate(p.settledAt) || 0;
-    const isExpired = refTs > 0 && now - (refTs + 3 * 60 * 60 * 1000) >= cutoffMs;
+    const settledTs = safeParseDate(p.settledAt) || safeParseDate(p.manualSettledAt) || 0;
+    const refTs = isSettled ? (settledTs || gameTs) : gameTs;
+    const isExpired = refTs > 0 && now - refTs >= cutoffMs;
     const isTimestamplessSettled = refTs === 0 && isSettled;
     const isGhost = isSettled && gameTs > 0 && (now - gameTs) / (1000 * 60 * 60 * 24) > 7;
     if ((isSettled && isExpired) || isTimestamplessSettled || isGhost) {
@@ -18100,9 +18170,12 @@ function isTrackedPickVisibleOnPage(pick) {
 
   if (status === "pending") {
     return (now - gameTs) / (1000 * 60 * 60) < 48;
-  } else {
-    return (now - gameTs) / (1000 * 60 * 60) < 13;
   }
+  const settledTs =
+    safeParseDate(pick.settledAt) ||
+    safeParseDate(pick.manualSettledAt) ||
+    gameTs;
+  return (now - settledTs) / (1000 * 60 * 60) < 10;
 }
 
 function getCurrentFixtureMeta() {
@@ -20622,6 +20695,108 @@ function isTrackerSupportedLeague(league) {
 }
 
 /* SECTION 235 — settle-tracked-pick */
+function isWinnerMarketKey(mk) {
+  return String(mk || "").toLowerCase() === "winner";
+}
+
+function manualSettlePlaceholder(pick) {
+  const mk = String(pick && pick.marketKey || "").toLowerCase();
+  if (isWinnerMarketKey(mk)) return "HOME/AWAY";
+  if (mk === "team_a" || mk === "team_b") return "84";
+  if (mk === "h1_team_a" || mk === "h1_team_b") return "42";
+  if (mk === "q1" || mk === "q2" || mk === "q3" || mk === "q4") return "22-19";
+  if (mk === "h1" || mk === "h2") return "42-40";
+  if (mk.indexOf("handicap") === 0) return "84-82";
+  return "84-82";
+}
+
+function manualSettleMarketLabel(pick) {
+  const name = String((pick && pick.marketName) || (pick && pick.marketKey) || "Pick")
+    .split("<")[0]
+    .trim();
+  const pred = String((pick && pick.predictionText) || "").trim();
+  return pred ? name + " · " + pred : name;
+}
+
+function normalizeManualSettleValue(pick, raw) {
+  const s = String(raw || "").trim();
+  if (!s) return "";
+  if (isWinnerMarketKey(pick && pick.marketKey)) {
+    const u = s.toUpperCase().replace(/\s+/g, "");
+    if (u === "H" || u === "HOME") return "HOME";
+    if (u === "A" || u === "AWAY") return "AWAY";
+    return null;
+  }
+  return s;
+}
+
+function promptManualSettleValue(pick, status) {
+  return new Promise((resolve) => {
+    const overlay = document.getElementById("manualSettleOverlay");
+    const titleEl = document.getElementById("manualSettleTitle");
+    const matchEl = document.getElementById("manualSettleMatch");
+    const marketEl = document.getElementById("manualSettleMarket");
+    const inputEl = document.getElementById("manualSettleInput");
+    const okBtn = document.getElementById("manualSettleOkBtn");
+    const cancelBtn = document.getElementById("manualSettleCancelBtn");
+    if (!overlay || !inputEl) {
+      resolve(null);
+      return;
+    }
+    const home = pick.homeTeam && pick.homeTeam !== "—" ? pick.homeTeam : "A";
+    const away = pick.awayTeam && pick.awayTeam !== "—" ? pick.awayTeam : "B";
+    const winner = isWinnerMarketKey(pick.marketKey);
+    if (titleEl)
+      titleEl.textContent = winner
+        ? String(status || "SETTLE").toUpperCase() + " — Enter winner"
+        : String(status || "SETTLE").toUpperCase() + " — Enter final score";
+    if (matchEl) matchEl.textContent = home + " vs " + away;
+    if (marketEl) marketEl.textContent = manualSettleMarketLabel(pick);
+    inputEl.value = "";
+    inputEl.placeholder = manualSettlePlaceholder(pick);
+    overlay.classList.add("open");
+    overlay.setAttribute("aria-hidden", "false");
+    setTimeout(() => {
+      try { inputEl.focus(); } catch (_e) {}
+    }, 30);
+
+    const cleanup = function () {
+      overlay.classList.remove("open");
+      overlay.setAttribute("aria-hidden", "true");
+      okBtn && okBtn.removeEventListener("click", onOk);
+      cancelBtn && cancelBtn.removeEventListener("click", onCancel);
+      overlay.removeEventListener("click", onBackdrop);
+      inputEl.removeEventListener("keydown", onKey);
+    };
+    const onCancel = function () {
+      cleanup();
+      resolve(null);
+    };
+    const onOk = function () {
+      const norm = normalizeManualSettleValue(pick, inputEl.value);
+      if (norm === null) {
+        inputEl.style.borderColor = "#d91f26";
+        inputEl.placeholder = "HOME/AWAY";
+        inputEl.value = "";
+        return;
+      }
+      cleanup();
+      resolve(norm);
+    };
+    const onBackdrop = function (e) {
+      if (e.target === overlay) onCancel();
+    };
+    const onKey = function (e) {
+      if (e.key === "Enter") onOk();
+      if (e.key === "Escape") onCancel();
+    };
+    okBtn && okBtn.addEventListener("click", onOk);
+    cancelBtn && cancelBtn.addEventListener("click", onCancel);
+    overlay.addEventListener("click", onBackdrop);
+    inputEl.addEventListener("keydown", onKey);
+  });
+}
+
 async function settleTrackedPick(signature, status) {
   const _sigMatch = (p) =>
     p.signature === signature ||
@@ -20629,19 +20804,14 @@ async function settleTrackedPick(signature, status) {
   let pick = AppState.tracker.state.activePicks.find(_sigMatch);
   if (!pick) pick = AppState.tracker.state.archivedPicks.find(_sigMatch);
   if (!pick) return;
-  const _sA = pick.homeTeam && pick.homeTeam !== "—" ? pick.homeTeam : "A";
-  const _sB = pick.awayTeam && pick.awayTeam !== "—" ? pick.awayTeam : "B";
-  const score = prompt(
-    `${status.toUpperCase()} — Enter final score:\n${_sA} vs ${_sB}\n(e.g. 110-105 — or leave blank)`,
-    pick.actualScore || "",
-  );
+  const score = await promptManualSettleValue(pick, status);
   if (score === null) return;
-  if (score.trim()) pick.actualScore = score.trim();
+  if (String(score).trim()) pick.actualScore = String(score).trim();
   await applyManualSettlementToTrackedPick(signature, status);
 }
 
 /* SECTION 236 — settle-tracked-pick-manual-full */
-async function settleTrackedPickManualFull(signature) {
+async async function settleTrackedPickManualFull(signature) {
   const _sigMatch = (p) =>
     p.signature === signature ||
     (typeof makeTrackedSignature === "function" && makeTrackedSignature(p) === signature);
@@ -20651,10 +20821,7 @@ async function settleTrackedPickManualFull(signature) {
 
   const _tA = pick.homeTeam && pick.homeTeam !== "—" ? pick.homeTeam : "A";
   const _tB = pick.awayTeam && pick.awayTeam !== "—" ? pick.awayTeam : "B";
-  const score = prompt(
-    `Enter final score for ${_tA} vs ${_tB}\n(e.g. 110-105 — or leave blank to skip):`,
-    pick.actualScore || "",
-  );
+  const score = await promptManualSettleValue(pick, pick.resultStatus || "SETTLE");
   if (score === null) return;
 
   const _clvHint =
