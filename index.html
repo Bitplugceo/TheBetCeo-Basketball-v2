@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4582,6 +4583,7 @@ window.__BETCEO_SESSION_ID = "sess_" + Date.now() + "_" + Math.random().toString
 
 /* SECTION 100 — clamp-number */
 function clampNumber(val, min, max) {
+  if (val == null || val === "" || typeof val === "boolean" || Array.isArray(val)) return Number.NaN;
   const n = Number(val);
   let lo = Number(min);
   let hi = Number(max);
@@ -6957,7 +6959,13 @@ function extractH2HFromPastedEvents() {
           bQ3: _twoP ? NaN : (Number.isFinite(oQ3) ? oQ3 : NaN),
           aQ4: _twoP ? NaN : (Number.isFinite(mQ4) ? mQ4 : NaN),
           bQ4: _twoP ? NaN : (Number.isFinite(oQ4) ? oQ4 : NaN),
-          hasH1: Number.isFinite(mQ1) && Number.isFinite(oQ1),
+          hasH1: _twoP
+            ? (Number.isFinite(mQ1) && Number.isFinite(oQ1))
+            : (Number.isFinite(mQ1) && Number.isFinite(mQ2) && Number.isFinite(oQ1) && Number.isFinite(oQ2)),
+          hasQ1: !_twoP && Number.isFinite(mQ1) && Number.isFinite(oQ1),
+          hasQ2: !_twoP && Number.isFinite(mQ2) && Number.isFinite(oQ2),
+          hasQ3: !_twoP && Number.isFinite(mQ3) && Number.isFinite(oQ3),
+          hasQ4: !_twoP && Number.isFinite(mQ4) && Number.isFinite(oQ4),
           hasQ: !_twoP && Number.isFinite(mQ1) && Number.isFinite(mQ2) && Number.isFinite(oQ1) && Number.isFinite(oQ2),
         }); 
       }
@@ -6989,14 +6997,14 @@ function extractH2HFromPastedEvents() {
     const h2hB = merged.map((e) => e.bFT);
     const h2hA1H = merged.filter((e) => e.hasH1).map((e) => e.aH1);
     const h2hB1H = merged.filter((e) => e.hasH1).map((e) => e.bH1);
-    const h2hAQ1 = merged.filter((e) => e.hasQ).map((e) => e.aQ1);
-    const h2hBQ1 = merged.filter((e) => e.hasQ).map((e) => e.bQ1);
-    const h2hAQ2 = merged.filter((e) => e.hasQ).map((e) => e.aQ2);
-    const h2hBQ2 = merged.filter((e) => e.hasQ).map((e) => e.bQ2);
-    const h2hAQ3 = merged.filter((e) => e.hasQ).map((e) => e.aQ3);
-    const h2hBQ3 = merged.filter((e) => e.hasQ).map((e) => e.bQ3);
-    const h2hAQ4 = merged.filter((e) => e.hasQ).map((e) => e.aQ4);
-    const h2hBQ4 = merged.filter((e) => e.hasQ).map((e) => e.bQ4);
+    const h2hAQ1 = merged.filter((e) => e.hasQ1).map((e) => e.aQ1);
+    const h2hBQ1 = merged.filter((e) => e.hasQ1).map((e) => e.bQ1);
+    const h2hAQ2 = merged.filter((e) => e.hasQ2).map((e) => e.aQ2);
+    const h2hBQ2 = merged.filter((e) => e.hasQ2).map((e) => e.bQ2);
+    const h2hAQ3 = merged.filter((e) => e.hasQ3).map((e) => e.aQ3);
+    const h2hBQ3 = merged.filter((e) => e.hasQ3).map((e) => e.bQ3);
+    const h2hAQ4 = merged.filter((e) => e.hasQ4).map((e) => e.aQ4);
+    const h2hBQ4 = merged.filter((e) => e.hasQ4).map((e) => e.bQ4);
 
     if (h2hA.length >= 2) {
       document.getElementById("aFTH2H").value = h2hA.join(",");
@@ -7098,7 +7106,7 @@ function getUnifiedVolatilityState(aSeries, bSeries, volLimit) {
 
 /* SECTION 104 — injury-opponent-boost */
 function injuryOpponentBoostMultiplier(injMult, factor) {
-  // Shared 0.2 cap for live opp boost AND post-H2H volatility baselines (FT/H1/H2/Q).
+  if (injMult == null || injMult === "") return 1;
   const inj = Number(injMult);
   const f = Number(factor);
   if (!(inj < 1) || !Number.isFinite(inj) || !Number.isFinite(f)) return 1;
@@ -7110,7 +7118,8 @@ function applyDampedIntelSignal(baseProj, rawSignal, opponentVolRatio) {
   
   if (!isFinite(rawSignal) || rawSignal === 0) return baseProj;
   const pts = Math.max(-8, Math.min(8, Number(rawSignal)));
-  const dampening = Math.max(0.3, 1.0 - (opponentVolRatio || 0.5) * 0.5);
+  const _volR = Number.isFinite(Number(opponentVolRatio)) ? Number(opponentVolRatio) : 0.5;
+  const dampening = Math.max(0.3, 1.0 - _volR * 0.5);
   const sign = Math.sign(pts);
   const absSig = Math.abs(pts);
   const scaledSignal = sign * Math.log1p(absSig) * 1.5;
@@ -9278,6 +9287,17 @@ function getTunableConstant(constantName, defaultValue) {
 }
 
 function setTunableConstant(constantName, value, netDelta, sampleCount) {
+  const CONST_TO_PARAM = { INJURY_OPPONENT_BOOST_FACTOR: "injuryOppBoostFactor", UNDER_EDGE_FACTOR: "underEdgeFactor" };
+  const _pk = CONST_TO_PARAM[String(constantName || "").toUpperCase()] || CONST_TO_PARAM[constantName];
+  let _v = Number(value);
+  try {
+    const _reg = (typeof TUNABLE_PARAM_REGISTRY !== "undefined" && _pk) ? TUNABLE_PARAM_REGISTRY[_pk] : null;
+    if (_reg && Number.isFinite(_reg.min) && Number.isFinite(_reg.max) && Number.isFinite(_v)) {
+      _v = Math.max(_reg.min, Math.min(_reg.max, _v));
+    }
+  } catch (_ce) {}
+  if (!Number.isFinite(_v)) return;
+  value = _v;
   const store = getLearnedConstantsStore();
   store[constantName] = {
     value,
@@ -9498,12 +9518,16 @@ function calibrateEngineConstants() {
 /* SECTION 141 — candidate-score-key */
 function getCandidateScoreKey(config) {
   const { h2hFactor, recencyProfile, paceDampening, edgeMult, injuryMult } = config;
-  const recencyId =
-    recencyProfile === TUNING_GRID.recencyProfiles[0]
-      ? "std"
-      : recencyProfile === TUNING_GRID.recencyProfiles[1]
-        ? "agg"
-        : "flat";
+  const sameArr = function (a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (Number(a[i]) !== Number(b[i])) return false;
+    return true;
+  };
+  const profiles = (typeof TUNING_GRID !== "undefined" && Array.isArray(TUNING_GRID.recencyProfiles))
+    ? TUNING_GRID.recencyProfiles : [];
+  const idx = profiles.findIndex(function (p) { return sameArr(p, recencyProfile); });
+  const recencyId = idx === 0 ? "std" : idx === 1 ? "agg" : idx === 2 ? "flat" : (idx >= 0 ? "p" + idx : null);
+  if (recencyId == null) return null;
   return `h2h${h2hFactor}_rec${recencyId}_pace${paceDampening}_edge${edgeMult}_inj${injuryMult}`;
 }
 
@@ -9521,6 +9545,7 @@ function updateCandidateScore(league, marketKey, config, delta, winProbability, 
       { league, marketKey, error: e },
     );
   }
+  if (!key) return;
   if (!scores[key]) scores[key] = { netDelta: 0, count: 0, brierSum: 0, brierCount: 0, deltas: [] };
   scores[key].netDelta += delta;
   scores[key].count++;
@@ -9550,7 +9575,7 @@ function getTotalSettledCountForLeagueMarket(league, marketKey) {
     (p) =>
       p.league === league &&
       p.marketKey === marketKey &&
-      (p.resultStatus === "win" || p.resultStatus === "loss" || p.resultStatus === "push"),
+      (p.resultStatus === "win" || p.resultStatus === "loss"),
   ).length;
 }
 
@@ -9784,16 +9809,16 @@ function updateEnginePerformanceScore() {
 
     const badge = document.getElementById("enginePerfPct");
     const fill = document.getElementById("enginePerfFill");
-    if (!badge || !fill) return null;
-
     const enginePerfWrap = document.getElementById("engineHealthBatteryWrap");
 
     if (decisive.length < MIN_N) {
       if (enginePerfWrap) enginePerfWrap.style.display = "none";
-      badge.textContent = "—";
-      fill.style.width = "0%";
-      fill.style.background = "rgba(255,255,255,0.35)";
-      badge.title = "Gathering data — needs " + MIN_N + "+ settled picks";
+      if (badge) badge.textContent = "—";
+      if (fill) {
+        fill.style.width = "0%";
+        fill.style.background = "rgba(255,255,255,0.35)";
+      }
+      if (badge) badge.title = "Gathering data — needs " + MIN_N + "+ settled picks";
       return null;
     }
 
@@ -9816,10 +9841,14 @@ function updateEnginePerformanceScore() {
     if (enginePerfWrap) enginePerfWrap.style.display = "flex";
     const batteryColor = score < 50 ? "#e0433a" : score < 80 ? "#ffffff" : "#49d45f";
 
-    badge.textContent = score + "%";
-    fill.style.width = score + "%";
-    fill.style.background = batteryColor;
-    badge.title = `Rolling ${decisive.length}-pick performance · win rate ${(winRate * 100).toFixed(0)}% · Brier ${brier !== null ? brier.toFixed(3) : "n/a"}`;
+    if (badge) {
+      badge.textContent = score + "%";
+      badge.title = `Rolling ${decisive.length}-pick performance · win rate ${(winRate * 100).toFixed(0)}% · Brier ${brier !== null ? brier.toFixed(3) : "n/a"}`;
+    }
+    if (fill) {
+      fill.style.width = score + "%";
+      fill.style.background = batteryColor;
+    }
 
     try {
       localStorage.setItem(
@@ -9871,6 +9900,7 @@ function actualForMarket(pick) {
   const mk = String(pick.marketKey || pick.snapshot?.marketKey || "").toLowerCase();
   const raw = pick.actualScore;
   if (raw == null || raw === "") return NaN;
+  if (mk === "winner" || mk === "htft" || mk.indexOf("handicap") === 0 || mk.indexOf("margin") === 0) return NaN;
   if (typeof raw === "number" && Number.isFinite(raw)) return raw;
   const s = String(raw).trim();
   const parsed = typeof parseFinalScore === "function" ? parseFinalScore(s) : { total: parseFloat(s), home: NaN, away: NaN };
@@ -11106,7 +11136,7 @@ async function runRetrospectiveAnalysis(pick) {
                 proj = calc.projAFT;
                 line = lines.aLine;
                 edge = calc.aEdge;
-                pickDecision = getPick(edge, line, league, "team", { teamSc: calc.aS });
+                pickDecision = getPick(edge, line, league, "team_a", { teamSc: calc.aS, blowoutGap: calc.blowoutGap });
               } else if (marketKey === "team_b") {
                 const calc = computeFTProjection({
                   league,
@@ -11119,7 +11149,7 @@ async function runRetrospectiveAnalysis(pick) {
                 proj = calc.projBFT;
                 line = lines.bLine;
                 edge = calc.bEdge;
-                pickDecision = getPick(edge, line, league, "team", { teamSc: calc.bS });
+                pickDecision = getPick(edge, line, league, "team_b", { teamSc: calc.bS, blowoutGap: calc.blowoutGap });
               } else if (
                 marketKey === "q1" ||
                 marketKey === "q2" ||
@@ -11268,7 +11298,7 @@ async function runRetrospectiveAnalysis(pick) {
 function saveLearnedRecencyWeights(league, marketSilo, weights, metadata = {}) {
   if (
     !Array.isArray(weights) ||
-    !weights.length ||
+    !(weights.length === 5 || weights.length === 10) ||
     weights.some((v) => !isFinite(Number(v)) || Number(v) <= 0)
   )
     return false;
@@ -11308,6 +11338,7 @@ function getLearnedRecencyWeights(league, marketSilo) {
       if (!raw) continue;
       const parsed = JSON.parse(raw);
       const weights = Array.isArray(parsed) ? parsed : parsed?.weights;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.applied === false) continue;
       if (
         Array.isArray(weights) &&
         (weights.length === 5 || weights.length === 10) &&
@@ -12329,11 +12360,18 @@ function updateLeagueVolCache(league, values, sampleIds) {
   if (!entry.seen || typeof entry.seen !== "object") entry.seen = {};
 
   samples.forEach(({ value, id }) => {
-    if (entry.n >= VOL_CACHE_MAX_SAMPLES) return;
-
     const sid = id;
     if (entry.seen[sid]) return;
     entry.seen[sid] = 1;
+    if (entry.n >= VOL_CACHE_MAX_SAMPLES) {
+      const alpha = 1 / VOL_CACHE_MAX_SAMPLES;
+      const d = value - entry.mean;
+      entry.mean += alpha * d;
+      const variance = entry.n > 1 ? entry.m2 / (entry.n - 1) : 0;
+      const nextVar = (1 - alpha) * (variance + alpha * d * d);
+      entry.m2 = nextVar * (VOL_CACHE_MAX_SAMPLES - 1);
+      return;
+    }
     entry.n += 1;
     const delta = value - entry.mean;
     entry.mean += delta / entry.n;
@@ -13547,6 +13585,13 @@ function getLiveConfigFingerprint(league) {
       "confidenceAThresh",
       "confidenceBThresh",
       "confidenceCThresh",
+      "recencyWeights",
+      "paceDampening",
+      "edgeMult",
+      "injuryMult",
+      "edgeH2PointThreshold",
+      "pickBlowoutThresholdMult",
+      "h2hBlowoutGapThreshold",
     ];
     const parts = keys.map((k) => {
       const v = getParam(k, league);
@@ -13658,7 +13703,7 @@ function getTotalSettledCountForLeague(league) {
   return all.filter(
     (p) =>
       p.league === league &&
-      (p.resultStatus === "win" || p.resultStatus === "loss" || p.resultStatus === "push"),
+      (p.resultStatus === "win" || p.resultStatus === "loss"),
   ).length;
 }
 
@@ -13736,7 +13781,7 @@ function getStabilizedBucketWinRate(wins = 0, losses = 0, priorGames = 12, prior
 
 /* SECTION 192 — bucket-signal-strength */
 function getBucketSignalStrength(stabilizedWinRate = null, reliabilityScore = 0, decisive = 0) {
-  if (!isFinite(stabilizedWinRate)) return null;
+  if (!Number.isFinite(stabilizedWinRate)) return null;
   const n = Math.max(1, Number(decisive) || 0);
   const stdErr = Math.sqrt(0.25 / n) * 100;
   return Number(((stabilizedWinRate - 50) / stdErr).toFixed(2));
@@ -16060,6 +16105,8 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
       if (isFinite(dateAware)) return dateAware;
     }
     if (clean.length) return weightedRecentAverage(clean, recencyWeights, league, marketKey);
+    const datesUsable = Array.isArray(dates) && dates.some(function (d) { return Number.isFinite(Date.parse(d)); });
+    if (datesUsable) return NaN;
     if (preFilterClean.length) return weightedRecentAverage(preFilterClean, recencyWeights, league, marketKey);
     return NaN;
   }
@@ -16189,8 +16236,9 @@ function ensureTrackedPickKeys(pick = {}) {
       const cl = Number(next.closingLine);
       const lp = Number(next.lineAtPick ?? next.line);
       const s = String(next.side || "").toLowerCase();
-      if (s === "under") return Math.round((lp - cl) * 100) / 100;
-      if (s === "over") return Math.round((cl - lp) * 100) / 100;
+      const d = lp - cl;
+      if (s === "under" || s === "home") return Math.round(d * 100) / 100;
+      if (s === "over" || s === "away") return Math.round(-d * 100) / 100;
     }
     return null;
   })();
@@ -16447,7 +16495,7 @@ function rebuildTrackerStats() {
 
   AppState.tracker.state.stats = {
     total: all.length,
-    settled: all.filter((p) => p.resultStatus && p.resultStatus !== "pending").length,
+    settled: all.filter((p) => ["win","loss","push"].includes(String(p.resultStatus||"").toLowerCase())).length,
     wins: all.filter((p) => p.resultStatus === "win").length,
     losses: all.filter((p) => p.resultStatus === "loss").length,
     pushes: all.filter((p) => p.resultStatus === "push").length,
@@ -16557,7 +16605,9 @@ function getQuarterFormBacktestStats() {
 window.getQuarterFormBacktestStats = getQuarterFormBacktestStats;
 
 /* SECTION 219 — repair-misclassified-noplay */
-function repairMisclassifiedNoPlayTrackedPicks(activeList, archivedList) {
+function repairMisclassifiedNoPlayTrackedPicks(activeList, archivedList, opts) {
+  opts = opts || {};
+  const mutateLive = opts.mutateLive === true;
   // Live repair (early `return 0` removed). No-arg form reads AppState.tracker.state.
   if (arguments.length < 2) {
     try {
@@ -16570,6 +16620,10 @@ function repairMisclassifiedNoPlayTrackedPicks(activeList, archivedList) {
       activeList = Array.isArray(activeList) ? activeList : [];
       archivedList = Array.isArray(archivedList) ? archivedList : [];
     }
+  }
+  if (!mutateLive) {
+    activeList = (Array.isArray(activeList) ? activeList : []).map(function (p) { return p && typeof p === "object" ? Object.assign({}, p) : p; });
+    archivedList = (Array.isArray(archivedList) ? archivedList : []).map(function (p) { return p && typeof p === "object" ? Object.assign({}, p) : p; });
   }
   const marginMarkets = new Set(["winner", "handicap", "handicap_h1", "handicap_h2"]);
   let repaired = 0;
@@ -16591,7 +16645,7 @@ function repairMisclassifiedNoPlayTrackedPicks(activeList, archivedList) {
       if (!isWinnerMkt && (!isFinite(lineVal) || lineVal <= 0)) return;
       const fixedPick = isMargin
         ? getMarginPick(edgeVal, p.league, p.marketKey)
-        : getPick(edgeVal, lineVal, p.league, p.marketKey, {});
+        : getPick(edgeVal, lineVal, p.league, p.marketKey, { blowoutGap: p.gameBlowoutGap, _edgeAlreadyScaled: true });
       if (!fixedPick || fixedPick === "NO PLAY") return;
       p.predictionText = formatMarginPickForDisplay(
         fixedPick,
@@ -16903,7 +16957,7 @@ function normalizeTrackerState(raw) {
     ? raw.archivedPicks.map((p) => ensureTrackedPickKeys(p)).slice(0, TRACKER_ARCHIVED_LIMIT)
     : [];
   const reconciled = reconcileTrackerBucketConflicts(normalizedActive, normalizedArchived);
-  repairMisclassifiedNoPlayTrackedPicks(reconciled.activePicks, reconciled.archivedPicks);
+  repairMisclassifiedNoPlayTrackedPicks(reconciled.activePicks, reconciled.archivedPicks, { mutateLive: true });
 
   AppState.tracker.state = {
     vId: raw?.vId || Date.now(),
@@ -18074,9 +18128,9 @@ function archiveExpiredTrackedPicks() {
     const isSettled = ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase());
     const gameTs = safeParseDate(p.eventDate) || safeParseDate(p.createdAt) || 0;
     const settledTs = safeParseDate(p.settledAt) || safeParseDate(p.manualSettledAt) || 0;
-    const refTs = isSettled ? (settledTs || gameTs) : gameTs;
+    const refTs = isSettled ? (settledTs || now) : gameTs;
     const isExpired = refTs > 0 && now - refTs >= cutoffMs;
-    const isTimestamplessSettled = refTs === 0 && isSettled;
+    const isTimestamplessSettled = false;
     const isGhost = isSettled && gameTs > 0 && (now - gameTs) / (1000 * 60 * 60 * 24) > 7;
     if ((isSettled && isExpired) || isTimestamplessSettled || isGhost) {
       moveToArchived.push(stripHeavyData(p));
@@ -18556,6 +18610,20 @@ function renderTrackedPicks() {
       })
       .join("");
 
+    try {
+      const _open = window.__bbTrackerOpenSettle || {};
+      Object.keys(_open).forEach(function (pid) {
+        if (!_open[pid]) return;
+        const tog = bodyEl.querySelector('.tracker-disp-toggle[data-pid="' + pid + '"]');
+        const act = document.getElementById("act-" + pid);
+        if (act) {
+          act.style.display = "flex";
+          if (tog) tog.style.display = "none";
+        } else {
+          delete _open[pid];
+        }
+      });
+    } catch (_openE) {}
     if (visiblePicks.length > window.__trackerRenderLimit) {
       bodyEl.innerHTML += `
       <tr>
@@ -19484,9 +19552,9 @@ function renderTrackerAnalytics() {
   const clvPicks = learningPicks.filter(
     (p) => p.closingLine !== null && p.closingLine !== undefined && isFinite(Number(p.closingLine)),
   );
-  const clvPositive = clvPicks.filter((p) => isFinite(Number(p.clv)) && Number(p.clv) > 0);
-  const clvNeutral = clvPicks.filter((p) => isFinite(Number(p.clv)) && Number(p.clv) === 0);
-  const clvNegative = clvPicks.filter((p) => isFinite(Number(p.clv)) && Number(p.clv) < 0);
+  const clvPositive = clvPicks.filter((p) => Number.isFinite(p.clv) && Number(p.clv) > 0);
+  const clvNeutral = clvPicks.filter((p) => Number.isFinite(p.clv) && Number(p.clv) === 0);
+  const clvNegative = clvPicks.filter((p) => Number.isFinite(p.clv) && Number(p.clv) < 0);
   const clvPositiveRecord = buildRecord(clvPositive);
   const clvNeutralRecord = buildRecord(clvNeutral);
   const clvNegativeRecord = buildRecord(clvNegative);
@@ -21198,6 +21266,8 @@ function handleTrackedPicksActionClick(event) {
   if (dispToggle) {
     const pid = dispToggle.dataset.pid;
     if (pid) {
+      window.__bbTrackerOpenSettle = window.__bbTrackerOpenSettle || {};
+      window.__bbTrackerOpenSettle[pid] = true;
       dispToggle.style.display = "none";
       const actEl = document.getElementById("act-" + pid);
       if (actEl) actEl.style.display = "flex";
@@ -22794,9 +22864,10 @@ function applyEdgeMult(edge, league) {
   if (!Number.isFinite(edge)) return edge;
   const _edgeMultLive =
     typeof getParam === "function" ? getParam("edgeMult", league) : null;
-  if (Number.isFinite(_edgeMultLive) && _edgeMultLive !== 1) {
-    return edge * _edgeMultLive;
-  }
+  const m = Number.isFinite(_edgeMultLive) && _edgeMultLive > 0
+    ? Math.max(0.5, Math.min(1.5, _edgeMultLive))
+    : 1;
+  if (m !== 1) return edge * m;
   return edge;
 }
 
@@ -23663,6 +23734,7 @@ function getMarginConfidenceGrade(params) {
     league = "",
     marginEdgePts = null,
     volLimitPts = null,
+    injuryFetchFailed = false,
   } = params || {};
 
   if (!pick || pick === "NO PLAY" || !isFinite(marginEdgePct)) {
@@ -23679,6 +23751,7 @@ function getMarginConfidenceGrade(params) {
     !!trap,
     league,
   );
+  if (injuryFetchFailed && Number.isFinite(winProb)) winProb = Math.min(winProb, 0.62);
 
   try {
     const edgePts = isFinite(marginEdgePts)
@@ -24387,9 +24460,13 @@ function applyIntelligenceLayerToPicks(picks, intelligencePack, league) {
           ? "Rest-days flag: one team on a back-to-back"
           : "Travel flag: notable distance since last game";
       applyGuardedConfidenceShift(p, confAdj, "intelligence");
-      if (Number.isFinite(p.winProbability) && typeof resolveConfidenceGradeFromWinProbability === "function") {
-        const g = resolveConfidenceGradeFromWinProbability(p.winProbability, p.league || league, p.marketKey);
-        if (g && g !== "NaN") p.confidence = g;
+      p.intelProbShift = Math.max(-0.06, Math.min(0.06, confAdj * 0.015));
+      if (Number.isFinite(p.winProbability)) {
+        p.winProbability = Math.max(0.01, Math.min(0.99, p.winProbability + p.intelProbShift));
+        if (typeof resolveConfidenceGradeFromWinProbability === "function") {
+          const g = resolveConfidenceGradeFromWinProbability(p.winProbability, p.league || league, p.marketKey);
+          if (g && g !== "NaN") p.confidence = g;
+        }
       }
     }
   });
@@ -29382,10 +29459,10 @@ function getH2HSeasonDecayWeight(dateStr, league) {
   const _decayMinus1 = getParam("h2hDecayMinus1") ?? 0.75;
   const _decayMinus2 = getParam("h2hDecayMinus2") ?? 0.5;
   const _decayOlder = getParam("h2hDecayOlder") ?? 0.3;
-  if (!dateStr) return _decayMinus1;
+  if (!dateStr) return NaN;
   try {
     const d = new Date(dateStr);
-    if (isNaN(d.getTime())) return _decayMinus1;
+    if (isNaN(d.getTime())) return NaN;
 
     const gameSeasonYear = getSeasonYearForDateAndLeague(d, league);
     const referenceDate = (typeof arguments[2] === "string" && arguments[2])
@@ -29506,11 +29583,7 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
     const _okA = isFinite(vA) && (_periodMkt ? vA >= 0 : vA > 0);
     const _okB = isFinite(vB) && (_periodMkt ? vB >= 0 : vB > 0);
     if (_okA && _okB) {
-      rawA.push(vA);
-      rawB.push(vB);
-
-      decayWeights.push(
-        getH2HSeasonDecayWeight(
+      const _dw = getH2HSeasonDecayWeight(
           g.date,
           _h2hRoot.league,
           _h2hRoot.predictionDate ||
@@ -29518,8 +29591,11 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
             _h2hRoot.asOf ||
             (typeof fixtureMeta !== "undefined" && (fixtureMeta.eventDate || fixtureMeta.date)) ||
             undefined,
-        ),
-      );
+        );
+      if (!Number.isFinite(_dw)) return;
+      rawA.push(vA);
+      rawB.push(vB);
+      decayWeights.push(_dw);
     }
   });
 
@@ -30662,7 +30738,7 @@ function recordLiveCalculationSnapshot(metaOrGameId, pick, state) {
       meta.eventId ?? meta.id ?? meta.gameId ??
       (typeof metaOrGameId !== "object" ? metaOrGameId : null);
     if (rawId == null || rawId === "") return null;
-    const key = "snapshot_" + String(rawId).replace(/[^a-z0-9_]/gi, "");
+    const key = "snapshot_" + encodeURIComponent(String(rawId)) + "_" + encodeURIComponent(String((pick && pick.marketKey) || "unk"));
     const payload = Object.assign({}, meta, { capturedAt: new Date().toISOString() });
     localStorage.setItem(key, JSON.stringify(payload));
     return payload;
@@ -33078,6 +33154,14 @@ async function runEngine() {
             });
           }
 
+          if (Number.isFinite(p.intelProbShift) && Number.isFinite(_lockWinProb)) {
+            _lockWinProb = Math.max(0.01, Math.min(0.99, _lockWinProb + p.intelProbShift));
+          }
+          try {
+            const _injFail = !!(typeof AppState !== "undefined" && AppState.context && AppState.context.data &&
+              (AppState.context.data.injuryFetchFailed || (AppState.context.data.A && AppState.context.data.A.injuryMeta && AppState.context.data.A.injuryMeta.fetchFailed) || (AppState.context.data.B && AppState.context.data.B.injuryMeta && AppState.context.data.B.injuryMeta.fetchFailed)));
+            if (_injFail && Number.isFinite(_lockWinProb)) _lockWinProb = Math.min(_lockWinProb, 0.62);
+          } catch (_capE) {}
           p.winProbability = _lockWinProb;
           // F-11: grade must remain f(winProb). Re-resolve after intel/confidence shifts.
           if (Number.isFinite(_lockWinProb) && typeof resolveConfidenceGradeFromWinProbability === "function") {
