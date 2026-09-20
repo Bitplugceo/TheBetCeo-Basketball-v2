@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4637,8 +4636,8 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v25_integrity_harden_20260920_persistence_confidence_venue_v3";
-window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260920_persistence_confidence_venue_v3";
+const APP_BUILD_VERSION = "v25_integrity_harden_20260920_widerange_persistence_ui_v6";
+window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260920_widerange_persistence_ui_v6";
 window.__BB_CLEAR_STALE_REPLAY_SNAPSHOTS__ = function __BB_CLEAR_STALE_REPLAY_SNAPSHOTS__() {
   try {
     const want = String(window.__BB_INTEGRITY_BUILD__ || "");
@@ -31022,6 +31021,18 @@ function buildTrackedPickPayload({
       ? Number(pickRow.decisionLine)
       : Number(pickRow.line),
     rawLine: isFinite(pickRow.line) ? Number(pickRow.line) : null,
+    // Wide-range provenance is retained with the tracked record so the exact
+    // bookmaker input, midpoint and gate decision remain auditable.
+    rangeInput: pickRow.rangeInput ?? null,
+    rangeLow: isFinite(pickRow.rangeLow) ? Number(pickRow.rangeLow) : null,
+    rangeHigh: isFinite(pickRow.rangeHigh) ? Number(pickRow.rangeHigh) : null,
+    rangeMidpoint: isFinite(pickRow.rangeMidpoint) ? Number(pickRow.rangeMidpoint) : null,
+    rangeWidth: isFinite(pickRow.rangeWidth) ? Number(pickRow.rangeWidth) : null,
+    wideRangeThreshold: isFinite(pickRow.wideRangeThreshold) ? Number(pickRow.wideRangeThreshold) : null,
+    wideRangeBlocked: !!pickRow.wideRangeBlocked,
+    wideRangeReason: pickRow.wideRangeReason ?? null,
+    marketInputInvalid: !!pickRow.marketInputInvalid,
+    marketInputInvalidReason: pickRow.marketInputInvalidReason ?? null,
     smartLineApplied: false,
     smartLineMeta: null,
     side,
@@ -31247,7 +31258,10 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       if (payload) payload.trackerSaveRetry = true;
     }
 
-    if (payload) {
+    // Tracker persistence is for actionable predictions only. NO PLAY rows are
+    // intentionally excluded from Tracker (addTrackedPicks() treats them as shadow
+    // records), so they must never enter the persistence coverage denominator.
+    if (payload && !isNoPlay && !payload.isShadow) {
       tracked.push(payload);
     } else if (!isNoPlay) {
       engineDebug("TRACKER SAVE MISS: actionable result row could not be converted to a tracked payload", {
@@ -31489,13 +31503,8 @@ function withErrorBoundary(fn, context) {
         engineDebug("ERROR BOUNDARY [" + context + "]: " + msg, { stack: err?.stack });
       if (typeof triggerGlobalEngineAlert === "function")
         triggerGlobalEngineAlert(context + " crashed: " + msg);
-      const t = document.getElementById("results");
-
-      if (t) {
-        t.style.display = "table";
-        const row = t.insertRow();
-        row.innerHTML = `<td colspan="5" style="color:#ff6b6b;text-align:left;padding:8px;">⚠ <b>${escapeHtml(context)}</b> hit an error: ${escapeHtml(msg)}</td>`;
-      }
+      // Error diagnostics are intentionally debug-only. Never append internal errors
+      // beneath the prediction output table; the debug panel/header alert is the error UI.
       const rb = document.getElementById("runBtn");
       if (rb) rb.disabled = false;
       return null;
@@ -34870,43 +34879,57 @@ async function runEngine() {
         (p.displayLineUsed ?? p.line) > 0,
     );
 
+    // The persistence denominator must contain only records that Tracker is actually
+    // allowed to save. NO PLAY/shadow rows are output rows, not tracker obligations.
+    const persistableTrackedPicks = trackedToSave.filter(
+      (p) => p && p.pick !== "NO PLAY" && !p.isShadow && p.eventId,
+    );
+
     engineDebug("run output prepared", {
       lockIdx,
-      trackedToSave: trackedToSave.length,
+      trackerRowsBuilt: trackedToSave.length,
+      persistableTrackedPicks: persistableTrackedPicks.length,
       actionablePicks: actionablePicks.length,
+      intentionalNoPlayRows: finalPicksForDisplay.filter((p) => p && p.pick === "NO PLAY").length,
       trackerStateBeforeSave: getTrackerStateDebugScore(g_trackerState),
     });
 
-    if (trackedToSave.length) {
+    if (persistableTrackedPicks.length) {
       // Prediction persistence is a correctness requirement, not a best-effort
       // debounce. Await the local write before allowing the run to finish, then
       // flush the same state to the remote tracker when configured.
-      await addTrackedPicks(trackedToSave);
+      await addTrackedPicks(persistableTrackedPicks);
       await forceTrackerSaveNow();
 
       // Hard persistence coverage gate: every actionable prediction selected for tracking
       // must exist in the persisted tracker state before the Run is allowed to complete.
+      // IMPORTANT: intentional NO PLAY/shadow rows are excluded from this denominator.
       const persistedPickKeys = new Set();
       [...(g_trackerState.activePicks || []), ...(g_trackerState.archivedPicks || [])].forEach((p) => {
         const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
         if (k) persistedPickKeys.add(k);
       });
-      const missingTracked = trackedToSave.filter((p) => {
+      const missingTracked = persistableTrackedPicks.filter((p) => {
         const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
         return k && !persistedPickKeys.has(k);
       });
       if (missingTracked.length) {
         const missingSummary = missingTracked.map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`).join(", ");
-        throw new Error(`Tracker persistence coverage failure: ${missingTracked.length}/${trackedToSave.length} predictions missing after verified save. ${missingSummary}`);
+        throw new Error(`Tracker persistence coverage failure: ${missingTracked.length}/${persistableTrackedPicks.length} actionable predictions missing after verified save. ${missingSummary}`);
       }
       engineDebug("tracked picks durably saved", {
-        trackedToSave: trackedToSave.length,
-        persistedCoverage: `${trackedToSave.length}/${trackedToSave.length}`,
+        persistableTrackedPicks: persistableTrackedPicks.length,
+        persistedCoverage: `${persistableTrackedPicks.length}/${persistableTrackedPicks.length}`,
+        intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
         trackerStateAfterSave: getTrackerStateDebugScore(g_trackerState),
       });
     } else if (actionablePicks.length) {
+      // There were actionable output rows but none could be converted into a Tracker
+      // payload. Keep the failure visible in the debug panel only; do not contaminate
+      // the user-facing prediction table with an internal persistence diagnostic.
       engineDebug("actionable picks were not saved to tracker", {
         reason: "tracker payload validation rejected every actionable pick",
+        actionablePicks: actionablePicks.length,
       });
     }
 
@@ -34921,15 +34944,9 @@ async function runEngine() {
       engineDebug("CRITICAL: Engine invariant failed; prediction suppressed.", {
         error: String(err?.message || err),
       });
-      if (table) {
-        table.style.display = "table";
-        table.innerHTML =
-          "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
-        showRunError(
-          table,
-          "NO PLAY — engine safety invariant failed. The prediction was suppressed.",
-        );
-      }
+      // Do not render diagnostic/error text in the prediction table. The debug panel
+      // and global error indicator carry the invariant failure. Existing output is left
+      // untouched so internal diagnostics never masquerade as a market prediction row.
       return;
     }
 
@@ -34938,19 +34955,10 @@ async function runEngine() {
       error: String(err?.message || err),
       stack: err?.stack || "no stack",
     });
-    if (table) {
-      table.style.display = "table";
-      table.innerHTML =
-        "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
-
-      showRunError(
-        table,
-        "⚠ Engine error: " +
-          escapeHtml(String(err?.message || err)) +
-          " — check 🔬 debug panel for stack trace.",
-      );
-    }
-
+    // Internal engine errors belong in the debug/error surfaces, not underneath the
+    // prediction output table. Preserve whatever output rows were already rendered.
+    // The global alert/header and engine debug panel remain responsible for surfacing
+    // the diagnostic to the developer without contaminating normal prediction output.
     throw err;
   } finally {
     window.__engineRunInProgress = false;
