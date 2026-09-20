@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4637,8 +4636,8 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v25_integrity_harden_20260917";
-window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260917";
+const APP_BUILD_VERSION = "v25_integrity_harden_20260920_persistence_confidence_venue_v2";
+window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260920_persistence_confidence_venue_v2";
 window.__BB_CLEAR_STALE_REPLAY_SNAPSHOTS__ = function __BB_CLEAR_STALE_REPLAY_SNAPSHOTS__() {
   try {
     const want = String(window.__BB_INTEGRITY_BUILD__ || "");
@@ -23375,7 +23374,8 @@ function distributionWinProbability(meanEdge, leagueVolLimit, volRatio) {
   const sd = leagueVolLimit * Math.max(0.5, isFinite(volRatio) ? volRatio : 1.0);
   if (!isFinite(sd) || sd <= 0) return null;
   const z = Math.abs(meanEdge) /* intentional: magnitude→CDF; pick-side already aligned at call sites */ / sd;
-  return clampNumber(_normalCdf(z), 0.02, 0.98);
+  const cdf = _normalCdf(z);
+  return clampNumber(cdf, 0.02, 0.98);
 }
 /* SECTION 273 — distribution-win-prob-for-pick */
 function getDistributionWinProbabilityForPick(p, leagueKey) {
@@ -23803,6 +23803,7 @@ function getConfidenceGrade(params) {
       pickSide: _pickSide,
     },
   );
+  const _rawLogisticWinProb = Number.isFinite(winProb) ? Number(winProb) : null;
 
   
   try {
@@ -23829,6 +23830,39 @@ function getConfidenceGrade(params) {
     engineDebug("distributionWinProbability comparison failed", {
       error: _dpe?.message || String(_dpe),
     });
+  }
+
+  // Forensic confidence trace: make the exact probability path reproducible.
+  if (params && typeof params === "object") {
+    const _distVolLimit = Number(getMarketVolLimit(league, params?.marketKey || "ft") || 12);
+    const _distEdge = Number(edge);
+    const _distVolRatio = Number(volRatio);
+    const _distSd = Number.isFinite(_distVolLimit) && _distVolLimit > 0
+      ? _distVolLimit * Math.max(0.5, Number.isFinite(_distVolRatio) ? _distVolRatio : 1)
+      : NaN;
+    const _distZ = Number.isFinite(_distSd) && _distSd > 0 && Number.isFinite(_distEdge)
+      ? Math.abs(_distEdge) / _distSd
+      : NaN;
+    const _distProbExact = Number.isFinite(_distZ)
+      ? clampNumber(_normalCdf(_distZ), 0.02, 0.98)
+      : null;
+    params._confidenceTrace = {
+      modelType: _rawLogisticWinProb != null ? "logistic" : "fallback",
+      fallbackReason: _rawLogisticWinProb != null ? null : "coefficients_unavailable_or_below_required_sample",
+      edgePoints: _distEdge,
+      edgePct: edgePct,
+      volatility: Number(volatility),
+      volLimit: _distVolLimit,
+      volRatio: _distVolRatio,
+      distributionSd: Number.isFinite(_distSd) ? _distSd : null,
+      distributionZ: Number.isFinite(_distZ) ? _distZ : null,
+      distributionWinProbability: _distProbExact,
+      logisticWinProbability: _rawLogisticWinProb,
+      blend: _rawLogisticWinProb != null && _distProbExact != null
+        ? { distributionWeight: 0.3, modelWeight: 0.7 }
+        : { distributionWeight: _distProbExact != null ? 1 : 0, modelWeight: 0 },
+      finalWinProbability: Number.isFinite(winProb) ? Number(winProb) : null,
+    };
   }
 
   // No injury-based probability cap in manual prediction mode.
@@ -23925,6 +23959,40 @@ function getMarginConfidenceGrade(params) {
     engineDebug("getMarginConfidenceGrade distribution fallback failed", {
       error: _dpe?.message || String(_dpe),
     });
+  }
+
+  if (params && typeof params === "object") {
+    const _marginLogisticWinProb = getConfidenceWinProbability(
+      null, marginEdgePct, volRatio, sampleTier, hasH2H, !!trap, league,
+    );
+    const _marginVolLimit = Number(
+      isFinite(volLimitPts) && volLimitPts > 0
+        ? volLimitPts
+        : (typeof getMarketVolLimit === "function" ? getMarketVolLimit(league, params?.marketKey || "winner") || 12 : 12)
+    );
+    const _marginEdgePts = isFinite(marginEdgePts) ? Number(marginEdgePts) : null;
+    const _marginSd = _marginEdgePts != null && _marginVolLimit > 0
+      ? _marginVolLimit * Math.max(0.5, Number.isFinite(volRatio) ? Number(volRatio) : 1)
+      : null;
+    const _marginZ = _marginEdgePts != null && _marginSd > 0 ? Math.abs(_marginEdgePts) / _marginSd : null;
+    const _marginDist = _marginZ != null ? clampNumber(_normalCdf(_marginZ), 0.02, 0.98) : null;
+    params._confidenceTrace = {
+      modelType: Number.isFinite(_marginLogisticWinProb) ? "logistic" : "fallback",
+      fallbackReason: Number.isFinite(_marginLogisticWinProb) ? null : "coefficients_unavailable_or_below_required_sample",
+      edgePoints: _marginEdgePts,
+      edgePct: marginEdgePct,
+      volatility: null,
+      volLimit: _marginVolLimit,
+      volRatio: Number.isFinite(volRatio) ? Number(volRatio) : null,
+      distributionSd: _marginSd,
+      distributionZ: _marginZ,
+      distributionWinProbability: _marginDist,
+      logisticWinProbability: Number.isFinite(_marginLogisticWinProb) ? Number(_marginLogisticWinProb) : null,
+      blend: Number.isFinite(_marginLogisticWinProb) && _marginDist != null
+        ? { distributionWeight: 0.3, modelWeight: 0.7 }
+        : { distributionWeight: _marginDist != null ? 1 : 0, modelWeight: 0 },
+      finalWinProbability: Number.isFinite(winProb) ? Number(winProb) : null,
+    };
   }
 
   if (!Number.isFinite(winProb)) {
@@ -33351,7 +33419,14 @@ async function runEngine() {
           }
           // Manual mode: injury-feed failures never cap winProbability.
           p.winProbability = _lockWinProb;
+          if (!p.confidenceTrace || typeof p.confidenceTrace !== "object") p.confidenceTrace = {};
           const _modelProv = getConfidenceModelProvenance(p.league || league);
+          p.confidenceTrace.modelType = _modelProv.modelType;
+          p.confidenceTrace.fallbackReason = _modelProv.fallbackReason;
+          p.confidenceTrace.settledResults = _modelProv.settledResults;
+          p.confidenceTrace.requiredResults = _modelProv.requiredResults;
+          p.confidenceTrace.resolvedScope = _modelProv.resolvedScope;
+          p.confidenceTrace.finalWinProbability = Number.isFinite(_lockWinProb) ? Number(_lockWinProb) : null;
           p.modelType = _modelProv.modelType;
           p.fallbackReason = _modelProv.fallbackReason;
           p.settledResults = _modelProv.settledResults;
@@ -33471,6 +33546,16 @@ async function runEngine() {
         }
         if (p.modelType === "fallback" && !p.fallbackReason) {
           errors.push(key + ": fallback reason missing");
+        }
+        if (p.confidenceTrace && Number.isFinite(Number(p.winProbability)) && Number.isFinite(Number(p.confidenceTrace.finalWinProbability)) &&
+            Math.abs(Number(p.winProbability) - Number(p.confidenceTrace.finalWinProbability)) > 0.001) {
+          errors.push(key + ": confidence trace final probability mismatch");
+        }
+        if (p.confidenceTrace && p.modelType !== p.confidenceTrace.modelType) {
+          errors.push(key + ": confidence trace modelType mismatch");
+        }
+        if (p.modelType === "fallback" && p.confidenceTrace && Number(p.confidenceTrace.requiredResults || 40) !== 40) {
+          errors.push(key + ": fallback confidence requiredResults is not 40");
         }
         if (key.startsWith("q") && finite(p.proj)) {
           // Quarter/FT reconciliation is diagnostic only; never mutate quarter targets here.
@@ -34392,6 +34477,9 @@ async function runEngine() {
                       ? row.confidence
                       : "NaN")),
                 winProbability: isFinite(row.winProbability) ? row.winProbability : null,
+                confidenceTrace: row.confidenceTrace && typeof row.confidenceTrace === "object"
+                  ? JSON.parse(JSON.stringify(row.confidenceTrace))
+                  : null,
               };
             }
             const extra = {};
@@ -34450,7 +34538,32 @@ async function runEngine() {
         venueDataProvenance: {
           homeTeam: "home_games",
           awayTeam: "away_games",
-          overallVsVenue: "venue uses location-appropriate sample",
+          overallVsVenue: "qualified venue data is blended with overall using sample-size-dependent weights",
+          blendMethod: "overall*(1-venueWeight) + venue*venueWeight",
+          teamA: {
+            scored: {
+              venueWeight: Number(ftCalc?.aVenueAdjustment?.blendWeightVenue ?? 0),
+              overallWeight: Number(ftCalc?.aVenueAdjustment?.blendWeightOverall ?? 1),
+              sampleSize: Number(ftCalc?.aVenueAdjustment?.sampleSizeScored ?? 0),
+            },
+            allowed: {
+              venueWeight: Number(ftCalc?.aVenueAdjustment?.blendWeightVenue ?? 0),
+              overallWeight: Number(ftCalc?.aVenueAdjustment?.blendWeightOverall ?? 1),
+              sampleSize: Number(ftCalc?.aVenueAdjustment?.sampleSizeAllowed ?? 0),
+            },
+          },
+          teamB: {
+            scored: {
+              venueWeight: Number(ftCalc?.bVenueAdjustment?.blendWeightVenue ?? 0),
+              overallWeight: Number(ftCalc?.bVenueAdjustment?.blendWeightOverall ?? 1),
+              sampleSize: Number(ftCalc?.bVenueAdjustment?.sampleSizeScored ?? 0),
+            },
+            allowed: {
+              venueWeight: Number(ftCalc?.bVenueAdjustment?.blendWeightVenue ?? 0),
+              overallWeight: Number(ftCalc?.bVenueAdjustment?.blendWeightOverall ?? 1),
+              sampleSize: Number(ftCalc?.bVenueAdjustment?.sampleSizeAllowed ?? 0),
+            },
+          },
           dateAlignment: {
             ft: !!(AppState.context.data?.A?.venue?.dateAlignment && AppState.context.data?.B?.venue?.dateAlignment),
             note: "venue score/allowed arrays carry their own venue-specific event dates",
@@ -35608,7 +35721,7 @@ document.addEventListener("DOMContentLoaded", () => {
             teamWeight:
               window.__LAST_AUDIT_STATE?.projectionBuild?.FT_TOTAL?.STEP7_h2hBlend?.teamWeight ??
               null,
-            overallVsVenue: "Venue replaces overall when enabled",
+            overallVsVenue: "qualified venue data is blended with overall using sample-size-dependent weights",
           },
         };
       }
