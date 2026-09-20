@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2986,7 +2985,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
       id="headerErrorBtn"
       title="Show fetch/input issues"
       aria-label="Show fetch and input issues"
-      onclick="if(typeof acknowledgeGlobalEngineAlert==='function')acknowledgeGlobalEngineAlert();"
+      onclick="if(typeof openEngineErrorPage==='function')openEngineErrorPage();"
     >
       ⚠️
     </button>
@@ -4312,6 +4311,23 @@ const BB_LOCK_REGISTRY = Object.freeze([
       <button type="button" id="manualSettleCancelBtn">Cancel</button>
       <button type="button" id="manualSettleOkBtn">OK</button>
     </div>
+  </div>
+</div>
+
+<!-- Dedicated engine-error page. Opening it NEVER acknowledges/clears the alert. -->
+<div
+  id="engineErrorOverlay"
+  style="display:none;position:fixed;inset:0;z-index:100000;background:#050505;color:#fff;flex-direction:column;font-family:ui-monospace,Consolas,monospace;padding-top:env(safe-area-inset-top);padding-bottom:env(safe-area-inset-bottom);"
+  role="dialog" aria-modal="true" aria-labelledby="engineErrorTitle"
+>
+  <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 14px 12px;background:#0b0b0b;border-bottom:1px solid #3a1012;flex-shrink:0;">
+    <div id="engineErrorTitle" style="color:#ff5c61;font-size:14px;font-weight:900;letter-spacing:.7px;">⚠️ ENGINE ERROR</div>
+    <button type="button" onclick="closeEngineErrorPage()" style="margin:0;background:#111;border:1px solid #555;color:#ccc;padding:7px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">✕ BACK</button>
+  </div>
+  <div id="engineErrorBody" style="flex:1;overflow-y:auto;padding:14px;background:#070707;"></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;padding:10px 12px;background:#0b0b0b;border-top:1px solid #222;flex-shrink:0;">
+    <button type="button" onclick="openEngineErrorDebug()" style="margin:0;background:#111;border:1px solid #333;color:#4ea9ff;padding:7px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">📡 OPEN DEBUG</button>
+    <button type="button" onclick="closeEngineErrorPage()" style="margin:0;background:#111;border:1px solid #555;color:#ccc;padding:7px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">CLOSE</button>
   </div>
 </div>
 
@@ -15423,6 +15439,94 @@ window.getRollingMeanError =
     return sample.reduce((s, e) => s + e.error, 0) / sample.length;
   };
 
+function _escapeEngineErrorHtml(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function renderEngineErrorPage() {
+  const body = document.getElementById("engineErrorBody");
+  if (!body) return;
+
+  const lastLine =
+    typeof AppState !== "undefined" && AppState.ui
+      ? String(AppState.ui.alertLastLine || "Engine error — no additional message recorded.")
+      : "Engine error — no additional message recorded.";
+  const inputErrors =
+    typeof AppState !== "undefined" && AppState.ui && Array.isArray(AppState.ui.inputErrors)
+      ? AppState.ui.inputErrors.filter(Boolean)
+      : [];
+  const auditIssues =
+    typeof AppState !== "undefined" && AppState.ui && Array.isArray(AppState.ui.auditIssues)
+      ? AppState.ui.auditIssues.filter(Boolean)
+      : [];
+  const debugLines =
+    typeof g_engineDebugLog !== "undefined" && Array.isArray(g_engineDebugLog)
+      ? g_engineDebugLog.filter((line) => /error|fatal|exception|failed|cannot access|referenceerror/i.test(String(line))).slice(0, 20)
+      : [];
+
+  const list = (items, emptyText) =>
+    items.length
+      ? '<ul style="margin:0;padding-left:18px;display:grid;gap:7px;">' +
+        items.map((x) => '<li style="font-size:11px;line-height:1.45;color:#ddd;white-space:pre-wrap;word-break:break-word;">' + _escapeEngineErrorHtml(x) + "</li>").join("") +
+        "</ul>"
+      : '<div style="font-size:11px;color:#666;">' + _escapeEngineErrorHtml(emptyText) + "</div>";
+
+  body.innerHTML =
+    '<div style="border:1px solid #6b171b;background:#120708;padding:12px;margin-bottom:12px;">' +
+      '<div style="color:#ff5c61;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:7px;">CURRENT ERROR</div>' +
+      '<pre style="margin:0;color:#ff767b;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;">' +
+        _escapeEngineErrorHtml(lastLine) +
+      '</pre>' +
+    '</div>' +
+    '<div style="border:1px solid #222;background:#0c0c0c;padding:12px;margin-bottom:12px;">' +
+      '<div style="color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">INPUT / FETCH ISSUES</div>' +
+      list(inputErrors, "None recorded.") +
+    '</div>' +
+    '<div style="border:1px solid #222;background:#0c0c0c;padding:12px;margin-bottom:12px;">' +
+      '<div style="color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">AUDIT ISSUES</div>' +
+      list(auditIssues, "None recorded.") +
+    '</div>' +
+    '<div style="border:1px solid #222;background:#0c0c0c;padding:12px;">' +
+      '<div style="color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">RECENT ERROR LOG</div>' +
+      list(debugLines, "No matching error log lines recorded.") +
+    '</div>';
+}
+
+function openEngineErrorPage() {
+  // IMPORTANT: opening/reviewing the error is not an acknowledgement.
+  // Keep alertNeedsReview=true so the ⚠️ icon remains visible after returning.
+  const ov = document.getElementById("engineErrorOverlay");
+  if (!ov) return;
+  renderEngineErrorPage();
+  ov.style.display = "flex";
+  document.body.classList.add("engine-error-page-open");
+}
+
+function closeEngineErrorPage() {
+  const ov = document.getElementById("engineErrorOverlay");
+  if (ov) ov.style.display = "none";
+  document.body.classList.remove("engine-error-page-open");
+  // Deliberately do NOT call acknowledgeGlobalEngineAlert().
+  renderHeaderErrorState();
+}
+
+function openEngineErrorDebug() {
+  closeEngineErrorPage();
+  if (typeof AFDB !== "undefined" && typeof AFDB.open === "function") {
+    AFDB.open();
+    return;
+  }
+  if (typeof openTrackerModal === "function") {
+    openTrackerModal();
+    if (typeof setTrackerModalView === "function") setTrackerModalView("debug");
+  }
+}
+
 function applyGlobalEngineAlertState() {
 
   const on = !!(AppState.ui && AppState.ui.alertNeedsReview);
@@ -15831,7 +15935,7 @@ function setTrackerModalView(view) {
     ? String(view)
     : "picks";
   AppState.ui.modalView = next;
-  if (isTrackerDebugView()) acknowledgeGlobalEngineAlert();
+  // Viewing Debug is not an acknowledgement; the header ⚠️ remains until the underlying issue is cleared.
   updateTrackerInsightsButton();
   syncTrackerModalView();
   renderTrackerAnalytics();
@@ -20275,6 +20379,13 @@ function renderConfigsPanel() {
   const panel = document.getElementById("trackerAnalyticsPanel");
   if (!panel) return;
 
+  // Resolve the selected league before any configuration-state rendering.
+  // This must be initialized before the state-machine block below; otherwise
+  // JavaScript's const temporal-dead-zone causes the Config page to fail.
+  const selectedLeagueKey = normalizeLeagueKey(
+    document.getElementById("leagueSelect")?.value || "unknown",
+  );
+
   syncTrackerModalView();
   panel.classList.remove("tracker-hidden");
   panel.style.display = "block";
@@ -20533,10 +20644,6 @@ function renderConfigsPanel() {
 
     html += `</div>`;
   }
-
-  const selectedLeagueKey = normalizeLeagueKey(
-    document.getElementById("leagueSelect")?.value || "unknown",
-  );
 
   const _pendingGlobalProposal = getStoredTunerProposal(null);
   const _pendingLeagueProposal =
