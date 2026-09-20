@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -13165,6 +13164,7 @@ function defaultMassacreFetchContext() {
 let g_massacreFetchContext = defaultMassacreFetchContext();
 const TRACKED_PICKS_LIMIT = BB_CONFIG.limits.activePicks;
 const TRACKER_ARCHIVED_LIMIT = 400;
+const TRACKER_SETTLED_VISIBLE_MS = 10 * 60 * 60 * 1000;
 const TRACKER_API_URL = WORKER_BASE_URL + "/cloud-sync";
 
 const BB_DB_NAME = "BBEngineData";
@@ -18050,7 +18050,7 @@ function reconcileTrackerBucketConflicts(activePicks = [], archivedPicks = []) {
           const _archiveTs = safeParseDate(
             archivedPick.settledAt || archivedPick.eventDate || archivedPick.createdAt,
           );
-          const _cutoffMs = 10 * 60 * 60 * 1000;
+          const _cutoffMs = TRACKER_SETTLED_VISIBLE_MS;
           if (_archiveTs === 0 || Date.now() - _archiveTs >= _cutoffMs) return;
           const preferred = choosePreferredBucketPick(pick, archivedPick);
           if (preferred === archivedPick) return;
@@ -18096,7 +18096,7 @@ function archiveExpiredTrackedPicks() {
     ? AppState.tracker.state.archivedPicks
     : [];
   const now = Date.now();
-  const cutoffMs = 10 * 60 * 60 * 1000;
+  const cutoffMs = TRACKER_SETTLED_VISIBLE_MS;
 
   const stripHeavyData = (pick) => {
     const lean = { ...pick };
@@ -18229,7 +18229,7 @@ function isTrackedPickVisibleOnPage(pick) {
     safeParseDate(pick.settledAt) ||
     safeParseDate(pick.manualSettledAt) ||
     gameTs;
-  return (now - settledTs) / (1000 * 60 * 60) < 10;
+  return now - settledTs < TRACKER_SETTLED_VISIBLE_MS;
 }
 
 function getCurrentFixtureMeta() {
@@ -18522,7 +18522,11 @@ function renderTrackedPicks() {
 
         let statusHtml = "";
         if (status === "pending") {
-          const pId = ((p.eventId || "") + p.signature).replace(/[^a-z0-9]/gi, "");
+          const settleSig = p.signature || makeTrackedSignature(p) || "";
+          const pId = "settle-" + Array.from(settleSig).reduce(
+            (h, ch) => ((h << 5) - h + ch.charCodeAt(0)) | 0,
+            0,
+          ).toString(36).replace("-", "n");
           const gameTs = safeParseDate(p.eventDate || p.createdAt);
           const isZombie = gameTs > 0 && Date.now() - gameTs > 36 * 60 * 60 * 1000;
           const _liveClockLabel = _liveInfo
@@ -18571,8 +18575,9 @@ function renderTrackedPicks() {
                 return `<div style="color:var(--muted);font-size:8px;font-weight:900;line-height:1.0;letter-spacing:0.3px;margin-bottom:1px;">LIVE</div><div style="font-size:12px;font-weight:900;line-height:1.2;margin-bottom:2px;color:var(--tracker-strong);">${_hasLiveScore ? homeTotal + " : " + awayTotal : ""}</div><div style="font-size:6px;font-weight:800;line-height:1.1;margin-bottom:1px;color:var(--muted);white-space:nowrap;"><span style="font-size:5px;">⏰</span><span data-live-clk="${escapeHtml(p.eventId)}"> ${safeClock}</span></div>${_qRowsHtml}`;
               })()
             : "";
+          const _settleSigAttr = encodeURIComponent(settleSig);
           statusHtml = `
-        <div class="tracker-disp-toggle" data-pid="${pId}" style="font-weight:900; font-size:10px; cursor:pointer; text-decoration:underline dotted #ccc; ${isZombie ? "color:#ff9800;" : ""}" title="${isZombie ? "Game stale - manual check needed" : _liveClockLabel ? "Live game — click to settle" : "Click to settle"}">${_liveBlock}${_pendingLabel}</div>
+        <div class="tracker-disp-toggle" data-pid="${pId}" data-settle-sig="${_settleSigAttr}" style="font-weight:900; font-size:10px; cursor:pointer; text-decoration:underline dotted #ccc; ${isZombie ? "color:#ff9800;" : ""}" title="${isZombie ? "Game stale - manual check needed" : _liveClockLabel ? "Live game — click to settle" : "Click to settle"}">${_liveBlock}${_pendingLabel}</div>
         <div id="act-${pId}" style="display:none; flex-direction:column; align-items:center; gap:2px; margin-top:-2px;">
           <div style="font-size:8px; font-weight:900; opacity:0.6; margin-bottom:1px; color:var(--text);">SETTLE</div>
           <button class="tracker-manual-btn tracker-settle-btn" data-manual-settle="win" data-sig="${encSig}" style="padding:0 !important; width:28px !important; min-width:28px !important; height:16px !important; min-height:16px !important; font-size:9px !important; line-height:16px !important;">W</button>
@@ -18612,15 +18617,14 @@ function renderTrackedPicks() {
 
     try {
       const _open = window.__bbTrackerOpenSettle || {};
-      Object.keys(_open).forEach(function (pid) {
-        if (!_open[pid]) return;
-        const tog = bodyEl.querySelector('.tracker-disp-toggle[data-pid="' + pid + '"]');
-        const act = document.getElementById("act-" + pid);
+      const _rows = bodyEl.querySelectorAll(".tracker-disp-toggle[data-settle-sig]");
+      _rows.forEach(function (tog) {
+        const _sig = tog.getAttribute("data-settle-sig") || "";
+        if (!_sig || !_open[_sig]) return;
+        const act = document.getElementById("act-" + (tog.getAttribute("data-pid") || ""));
         if (act) {
           act.style.display = "flex";
-          if (tog) tog.style.display = "none";
-        } else {
-          delete _open[pid];
+          tog.style.display = "none";
         }
       });
     } catch (_openE) {}
@@ -20990,16 +20994,17 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus) {
     engineResultStatus: normalizedStatus,
     settledAt: normalizedStatus === "pending" ? null : nowIso,
     updatedAt: nowIso,
-    settlementSource: "manual",
-    manualSettlement: true,
-    manualSettledAt: nowIso,
+    settlementSource: normalizedStatus === "pending" ? null : "manual",
+    manualSettlement: normalizedStatus !== "pending",
+    manualSettledAt: normalizedStatus === "pending" ? null : nowIso,
+    settledVersion:
+      normalizedStatus === "pending" ? null : ENGINE_MODEL_VERSION,
   });
 
-  if (normalizedStatus === "pending") {
-    active.unshift(updatedPick);
-  } else {
-    archived.unshift(updatedPick);
-  }
+  // Match auto-settlement exactly: a newly settled pick remains in activePicks.
+  // archiveExpiredTrackedPicks() is the only mechanism that moves it to the
+  // archive, and it does so only after TRACKER_SETTLED_VISIBLE_MS (10 hours).
+  active.unshift(updatedPick);
 
   AppState.tracker.state.activePicks = active.slice(0, TRACKED_PICKS_LIMIT);
   AppState.tracker.state.archivedPicks = archived.slice(0, TRACKER_ARCHIVED_LIMIT);
@@ -21029,6 +21034,8 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus) {
     market: touchedPick?.marketKey || "",
     result: normalizedStatus,
     line: touchedPick?.line,
+    retentionHours: TRACKER_SETTLED_VISIBLE_MS / (60 * 60 * 1000),
+    bucket: "active_until_10h_after_settlement",
   });
 
   if (["win", "loss", "push"].includes(normalizedStatus) && updatedPick.snapshot) {
@@ -21076,22 +21083,20 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus) {
   }
 
   renderTrackedPicks();
-  scheduleTrackerSave();
 
-  Promise.resolve().then(async () => {
-    try {
-      scheduleTrackerSave();
-    } catch (err) {
-      console.error("[BB Engine] manual settle hard sync failed", err);
-      trackerDebug("manual settle sync failed", {
-        result: normalizedStatus,
-        error: String(err?.message || err),
-      });
-    } finally {
-      renderTrackedPicks();
-    }
-  });
+  try {
+    await forceTrackerSaveNow();
+  } catch (err) {
+    console.error("[BB Engine] manual settle durable sync failed", err);
+    trackerDebug("manual settle durable sync failed", {
+      result: normalizedStatus,
+      error: String(err?.message || err),
+    });
+    // Keep the local state even if the remote write is unavailable; the local
+    // persistence already occurred inside forceTrackerSaveNow/saveTrackerStateToLocal.
+  }
 
+  renderTrackedPicks();
   return true;
 }
 
@@ -21264,10 +21269,17 @@ function handleTrackedPicksActionClick(event) {
 
   const dispToggle = target.closest?.(".tracker-disp-toggle");
   if (dispToggle) {
-    const pid = dispToggle.dataset.pid;
+    const pid = dispToggle.dataset.pid || "";
+    const encodedSettleSig = dispToggle.getAttribute("data-settle-sig") || "";
+    let settleSig = "";
+    try {
+      settleSig = encodedSettleSig ? decodeURIComponent(encodedSettleSig) : "";
+    } catch (_decodeOpenSig) {
+      settleSig = encodedSettleSig;
+    }
     if (pid) {
       window.__bbTrackerOpenSettle = window.__bbTrackerOpenSettle || {};
-      window.__bbTrackerOpenSettle[pid] = true;
+      if (settleSig) window.__bbTrackerOpenSettle[settleSig] = true;
       dispToggle.style.display = "none";
       const actEl = document.getElementById("act-" + pid);
       if (actEl) actEl.style.display = "flex";
@@ -23279,6 +23291,9 @@ function _normalCdf(z) {
    is a separate, evidence-gated item (item 10's VERIFY FIRST status) and is not done here. */
 const CONFIDENCE_BLEND_DIST_WEIGHT = 0.3;
 const CONFIDENCE_BLEND_MODEL_WEIGHT = 0.7;
+
+/* PERMANENT MANUAL-MODE POLICY */
+const MANUAL_PREDICTION_NO_INJURY = true;
 /* SECTION 271 — blend-confidence-distribution */
 function blendConfidenceAndDistribution(distProb, modelProb) {
   return clampNumber(
@@ -23623,10 +23638,8 @@ function getConfidenceGrade(params) {
     quarterFormAgreement,
     league = "",
   } = params || {};
-  const injuryFetchFailed = !!(params && params.injuryFetchFailed) ||
-    (typeof AppState !== "undefined" &&
-      ((AppState.injuries && AppState.injuries.A && AppState.injuries.A.fetchFailed) ||
-        (AppState.injuries && AppState.injuries.B && AppState.injuries.B.fetchFailed)));
+  // Injury availability is excluded from manual confidence.
+  const injuryFetchFailed = false;
 
   if (
     !pick ||
@@ -23693,9 +23706,7 @@ function getConfidenceGrade(params) {
     });
   }
 
-  if (injuryFetchFailed) {
-    winProb = Math.min(Number.isFinite(winProb) ? winProb : 0.5, 0.62);
-  }
+  // No injury-based probability cap in manual prediction mode.
 
   if (!Number.isFinite(winProb)) {
     engineDebug("getConfidenceGrade: non-finite winProb, forcing NaN sentinel", {
@@ -23751,7 +23762,7 @@ function getMarginConfidenceGrade(params) {
     !!trap,
     league,
   );
-  if (injuryFetchFailed && Number.isFinite(winProb)) winProb = Math.min(winProb, 0.62);
+  // No injury-based probability cap in manual prediction mode.
 
   try {
     const edgePts = isFinite(marginEdgePts)
@@ -24172,17 +24183,14 @@ function getCrossSignalAgreement(side, marketKey, parsed) {
 
 /* SECTION 289 — v24-minutes-gate */
 function getV24MinutesGate() {
-  
-  const injA = (typeof AppState !== "undefined" && AppState.injuries && AppState.injuries.A) || {};
-  const injB = (typeof AppState !== "undefined" && AppState.injuries && AppState.injuries.B) || {};
-  const uncoveredA = Boolean(injA.minutesUnknownDTD) || Boolean(injA.fetchFailed);
-  const uncoveredB = Boolean(injB.minutesUnknownDTD) || Boolean(injB.fetchFailed);
+  // Manual predictions permanently ignore injury/availability status.
   return {
-    blockSides: uncoveredA || uncoveredB,
-    uncoveredA,
-    uncoveredB,
-    namesA: Array.isArray(injA.unknownMinutesNames) ? injA.unknownMinutesNames : [],
-    namesB: Array.isArray(injB.unknownMinutesNames) ? injB.unknownMinutesNames : [],
+    blockSides: false,
+    uncoveredA: false,
+    uncoveredB: false,
+    namesA: [],
+    namesB: [],
+    reason: "injury_disabled_permanently_manual_mode",
   };
 }
 function getV24ContextFlag() {
@@ -27025,9 +27033,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
               tsPercent: tsa > 0 ? parseFloat((pts / (2 * tsa)).toFixed(3)) : null,
               minPG: _fs("avgMinutes") || _fs("minutes") || null,
               plusMinus: _fs("plusMinus") || null,
-              statusType: String(
-                a.status?.type || a.status?.name || a.injuryStatus || a.status || "",
-              ),
             };
           })
           .sort((a, b) => b.ppg - a.ppg)
@@ -27037,27 +27042,13 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       }
     }
 
-    const [injA, injB, rostA, rostB] = await Promise.all([
-      fetchInjuryMeta(espnBase, teamAId, aAvg, league),
-      fetchInjuryMeta(espnBase, teamBId, bAvg, league),
+    // Manual predictions do not fetch or parse injury/availability data.
+    const [rostA, rostB] = await Promise.all([
       fetchRoster(teamAId),
       fetchRoster(teamBId),
     ]);
-
-    function absorbRosterStatus(inj, roster) {
-      const names = [];
-      (roster || []).forEach(function (p) {
-        const st = String(p.statusType || "").toLowerCase();
-        if (
-          /not.with|fiba|world cup|national|suspend|out for season|pregnancy/.test(st)
-        ) {
-          if (p.name) names.push(p.name);
-        }
-      });
-      return applyExtraOutsToInjury(inj, names);
-    }
-    AppState.injuries.A = absorbRosterStatus(injA, rostA);
-    AppState.injuries.B = absorbRosterStatus(injB, rostB);
+    AppState.injuries.A = defaultInjuryMeta();
+    AppState.injuries.B = defaultInjuryMeta();
 
     AppState.context.data = {
       league,
@@ -30352,8 +30343,8 @@ function buildTrackedPickPayload({
         parsed: parsedSnapshot,
         lines: linesSnapshot,
         fixtureMeta: fixtureMetaSnapshot,
-        injMultA: AppState.injuries.A.scoringMult,
-        injMultB: AppState.injuries.B.scoringMult,
+        injMultA: 1,
+        injMultB: 1,
         injFetchFailedA: !!AppState.injuries.A.fetchFailed,
         injFetchFailedB: !!AppState.injuries.B.fetchFailed,
         paramRegistryValues: paramRegistryValues,
@@ -31607,8 +31598,8 @@ async function runEngine() {
       league,
       parsed,
       lines: baseLines,
-      injMultA: AppState.injuries.A.scoringMult,
-      injMultB: AppState.injuries.B.scoringMult,
+      injMultA: 1,
+      injMultB: 1,
       config: { recencyWeights: _runFTWeights },
       contextData: AppState.context?.data || null,
     });
@@ -31620,8 +31611,8 @@ async function runEngine() {
       league,
       parsed,
       lines: baseLines,
-      injMultA: AppState.injuries.A.scoringMult,
-      injMultB: AppState.injuries.B.scoringMult,
+      injMultA: 1,
+      injMultB: 1,
       config: { recencyWeights: _runH1Weights },
     });
     MODEL_TUNING.recencyWeights = _runFTWeights;
@@ -31630,8 +31621,8 @@ async function runEngine() {
       league,
       parsed,
       lines: baseLines,
-      injMultA: AppState.injuries.A.scoringMult,
-      injMultB: AppState.injuries.B.scoringMult,
+      injMultA: 1,
+      injMultB: 1,
     });
 
     engineDebug("projection pass 1", {
@@ -31706,8 +31697,8 @@ async function runEngine() {
       league,
       parsed,
       lines: finalLines,
-      injMultA: AppState.injuries.A.scoringMult,
-      injMultB: AppState.injuries.B.scoringMult,
+      injMultA: 1,
+      injMultB: 1,
       config: {
         ...ftConfigOverride,
         teamWeight: _dynWeights.teamWeight,
@@ -31748,8 +31739,8 @@ async function runEngine() {
       league,
       parsed,
       lines: finalLines,
-      injMultA: AppState.injuries.A.scoringMult,
-      injMultB: AppState.injuries.B.scoringMult,
+      injMultA: 1,
+      injMultB: 1,
       config: {
         ...h1ConfigOverride,
         teamWeight: _dynWeightsH1.teamWeight,
@@ -31788,8 +31779,8 @@ async function runEngine() {
       league,
       parsed,
       lines: finalLines,
-      injMultA: AppState.injuries.A.scoringMult,
-      injMultB: AppState.injuries.B.scoringMult,
+      injMultA: 1,
+      injMultB: 1,
       config: { teamWeight: _dynWeightsH2.teamWeight, oppWeight: _dynWeightsH2.oppWeight, recencyWeights: _runH2Weights },
       contextData: AppState.context?.data || null, 
     });
@@ -33157,11 +33148,7 @@ async function runEngine() {
           if (Number.isFinite(p.intelProbShift) && Number.isFinite(_lockWinProb)) {
             _lockWinProb = Math.max(0.01, Math.min(0.99, _lockWinProb + p.intelProbShift));
           }
-          try {
-            const _injFail = !!(typeof AppState !== "undefined" && AppState.context && AppState.context.data &&
-              (AppState.context.data.injuryFetchFailed || (AppState.context.data.A && AppState.context.data.A.injuryMeta && AppState.context.data.A.injuryMeta.fetchFailed) || (AppState.context.data.B && AppState.context.data.B.injuryMeta && AppState.context.data.B.injuryMeta.fetchFailed)));
-            if (_injFail && Number.isFinite(_lockWinProb)) _lockWinProb = Math.min(_lockWinProb, 0.62);
-          } catch (_capE) {}
+          // Manual mode: injury-feed failures never cap winProbability.
           p.winProbability = _lockWinProb;
           // F-11: grade must remain f(winProb). Re-resolve after intel/confidence shifts.
           if (Number.isFinite(_lockWinProb) && typeof resolveConfidenceGradeFromWinProbability === "function") {
@@ -33331,8 +33318,8 @@ async function runEngine() {
         bVol1: h1Calc.bVol1,
         netA: typeof netA !== "undefined" ? Number(netA) : null,
         netB: typeof netB !== "undefined" ? Number(netB) : null,
-        injMultA: g_injA.scoringMult,
-        injMultB: g_injB.scoringMult,
+        injuryAdjustment: "DISABLED_PERMANENTLY",
+        restDaysAdjustment: "ENABLED",
 
         ftFullModel: ftCalc.ftFullModel,
         h1FullModel: h1Calc.h1FullModel,
@@ -33512,25 +33499,12 @@ async function runEngine() {
           useQ3H2H: document.getElementById("useQ3H2H")?.checked || false,
           useQ4H2H: document.getElementById("useQ4H2H")?.checked || false,
         },
-        injuryMultipliers: {
-          teamA: {
-            scoringMult: g_injA.scoringMult,
-            outCount: g_injA.outCount,
-            dtdCount: g_injA.dtdCount,
-            unknownImpactCount: g_injA.unknownImpactCount,
-            highUncertainty: g_injA.highUncertainty,
-            hasUnknownImpact: g_injA.hasUnknownImpact,
-            notes: g_injA.notes,
-          },
-          teamB: {
-            scoringMult: g_injB.scoringMult,
-            outCount: g_injB.outCount,
-            dtdCount: g_injB.dtdCount,
-            unknownImpactCount: g_injB.unknownImpactCount,
-            highUncertainty: g_injB.highUncertainty,
-            hasUnknownImpact: g_injB.hasUnknownImpact,
-            notes: g_injB.notes,
-          },
+        manualModelPolicy: {
+          injuryAdjustment: "DISABLED_PERMANENTLY",
+          restDaysAdjustment: "ENABLED",
+          injuryDataFetched: false,
+          injuryDataParsed: false,
+          injuryDataUsed: false,
         },
       },
 
@@ -34166,10 +34140,24 @@ async function runEngine() {
             note: "venue score/allowed arrays carry their own venue-specific event dates",
           },
         },
-        h2hProvenance:
-          (typeof document !== "undefined" && document.getElementById("useFTH2H") && document.getElementById("useFTH2H").checked)
-            ? "manual_input_boxes"
-            : "none",
+        h2hProvenance: (function () {
+          const useFT = !!(typeof document !== "undefined" && document.getElementById("useFTH2H")?.checked);
+          const ftA = safeArr(parsed?.aFTH2H);
+          const ftB = safeArr(parsed?.bFTH2H);
+          const manualFTCount = Math.min(ftA.length, ftB.length);
+          const fetchedCount = Array.isArray(AppState.context.data?.h2hGames)
+            ? AppState.context.data.h2hGames.length
+            : 0;
+          return {
+            source: useFT && manualFTCount >= 2 ? "manual_input_boxes" : "none",
+            manualFTSeriesCount: manualFTCount,
+            fetchedH2HGamesCount: fetchedCount,
+            explanation:
+              useFT && manualFTCount >= 2
+                ? "H2H supplied by user input boxes; fetchedH2HGames is a separate auto-fetch field and may be empty without meaning manual H2H is missing."
+                : "No active manual H2H series.",
+          };
+        })(),
         quarterReconciliation: {
           mode: "independent_no_rescale",
           blendWeight: 0, // unused — no blend (FIX #39 / F-01)
@@ -34185,6 +34173,11 @@ async function runEngine() {
           h1Target: (Number.isFinite(h1Target) ? h1Target : null),
           h2Target: (Number.isFinite(h2Target) ? h2Target : null),
         },
+      },
+      eventDateIntegrity: {
+        present: !!(fixtureMeta && fixtureMeta.eventDate),
+        value: fixtureMeta?.eventDate || null,
+        requiredForManualAudit: true,
       },
       reproducibility: {
         modelGradeA_Threshold: _aud_gradeThresholds.aThresh,
