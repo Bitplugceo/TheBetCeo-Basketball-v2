@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30405,7 +30404,6 @@ function buildTrackedPickPayload({
   const isActualPlay = !(
     !pickRow ||
     pickRow.pick === "NO PLAY" ||
-    (pickRow.note && !isExoticNoLine && !isSavablePick) ||
     (!isFinite(pickRow.line) && !isExoticNoLine)
   );
 
@@ -30841,14 +30839,51 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       });
     }
     const pickWithCorrectKey = { ...p, marketKey: marketKeyFromLogic };
-    const payload = buildTrackedPickPayload({
+    let payload = buildTrackedPickPayload({
       pickRow: pickWithCorrectKey,
       isLock: isLock && !isNoPlay,
       fixtureMeta,
       league,
       diagnostics,
     });
-    if (payload) tracked.push(payload);
+
+    // TRACKER SAVE FIX: every actionable result row must get a tracker record.
+    // The old payload validator could silently return null for a live prediction
+    // because of a non-empty explanatory note or a side/line parsing mismatch.
+    // That made the results table show several predictions while only one appeared
+    // in Tracked Picks. Retry once with a normalized row using the already-resolved
+    // market key and display line. This does not revive NO PLAY rows.
+    if (!payload && !isNoPlay && fixtureMeta?.eventId) {
+      const retryRow = {
+        ...pickWithCorrectKey,
+        marketKey: marketKeyFromLogic,
+        line: Number.isFinite(Number(pickWithCorrectKey.line))
+          ? Number(pickWithCorrectKey.line)
+          : Number(pickWithCorrectKey.displayLineUsed),
+        pick: String(pickWithCorrectKey.pick || pickWithCorrectKey.displayPick || "").trim(),
+        note: "",
+      };
+      payload = buildTrackedPickPayload({
+        pickRow: retryRow,
+        isLock: isLock && !isNoPlay,
+        fixtureMeta,
+        league,
+        diagnostics,
+      });
+      if (payload) payload.trackerSaveRetry = true;
+    }
+
+    if (payload) {
+      tracked.push(payload);
+    } else if (!isNoPlay) {
+      engineDebug("TRACKER SAVE MISS: actionable result row could not be converted to a tracked payload", {
+        marketKey: marketKeyFromLogic,
+        name: p.name,
+        pick: p.pick,
+        line: p.line,
+        eventId: fixtureMeta?.eventId || "",
+      });
+    }
 
     if (!isNoPlay && !isLean && isFinite(p.line) && p.line > 0 && fixtureMeta?.eventId) {
       const _snapSide = getPickSideFromText(p.pick);
