@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15634,7 +15635,7 @@ function applySmartLineToPick(pickRow, rawInput, league) {
     bufferedPickText: pickRow.pick,
     smartLineMeta: meta,
   };
-  next = applyWideRangeLineGate(next, rawInput);
+  next = applyWideRangeLineGate(next, rawInput, league);
   return next;
 }
 
@@ -15676,15 +15677,22 @@ function parseMarketRangeMeta(val) {
 }
 
 
-/* SECTION 199 — wide-range-market-threshold */
-function getWideRangeMarketThreshold(marketKey) {
-  const k = String(marketKey || "").toLowerCase();
-  if (k === "ft" || k === "winner") return 8;
-  if (k === "h1" || k === "h2") return 6;
-  if (k.indexOf("team_") === 0 || k === "h1_team_a" || k === "h1_team_b") return 6;
-  if (k.indexOf("q") === 0) return 4;
-  if (k.indexOf("handicap") === 0) return 3;
-  return 8;
+/* SECTION 199 — league-aware-market-range-policy */
+// A bookmaker range is a valid market input, not an automatic NO PLAY condition.
+// The selected league remains part of the market context and continues to drive
+// league-specific scoring, volatility, edge and confidence logic elsewhere in the
+// engine. We deliberately do NOT invent universal width cutoffs (8/6/4/3 pts),
+// because legitimate bookmaker ranges differ by league, market and period.
+function getLeagueMarketRangePolicy(league, marketKey) {
+  const lk = normalizeLeagueKey(league || "default");
+  const mk = String(marketKey || "ft").toLowerCase();
+  return {
+    league: lk || "default",
+    marketKey: mk,
+    mode: "ACCEPT_RANGE",
+    lineMethod: "MIDPOINT",
+    hardWidthNoPlay: false,
+  };
 }
 
 /* SECTION 200 — force-pick-no-play */
@@ -15708,26 +15716,41 @@ function forcePickNoPlayWithNote(pickRow, noteText) {
   return pickRow;
 }
 
-/* SECTION 201 — wide-range-line-gate */
-function applyWideRangeLineGate(pickRow, rawInput) {
+/* SECTION 201 — league-aware-range-input */
+function applyWideRangeLineGate(pickRow, rawInput, league) {
   if (!pickRow) return pickRow;
   const meta =
     typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(rawInput) : null;
   if (!meta || !meta.isRange) return pickRow;
+
   const low = Number(meta.low);
   const high = Number(meta.high);
-  if (!Number.isFinite(low) || !Number.isFinite(high)) return pickRow;
-  const rangeWidth = high - low;
-  const threshold = getWideRangeMarketThreshold(pickRow.marketKey);
-  if (!(rangeWidth > threshold)) return pickRow;
-  pickRow.wideRangeBlocked = true;
+  if (!Number.isFinite(low) || !Number.isFinite(high) || high < low) return pickRow;
+
+  const policy = getLeagueMarketRangePolicy(league || pickRow.league, pickRow.marketKey);
+  const rangeWidth = Number((high - low).toFixed(2));
+
+  // Preserve the complete bookmaker range for diagnostics, but NEVER convert a
+  // syntactically valid range into NO PLAY merely because its width exceeds a
+  // universal threshold. The selected league is already known to the engine and
+  // the normal edge/NO PLAY logic remains responsible for deciding the pick.
+  pickRow.wideRangeBlocked = false;
   pickRow.wideRangeWidth = rangeWidth;
-  pickRow.wideRangeThreshold = threshold;
+  pickRow.wideRangeThreshold = null;
+  pickRow.smartLineRangeAccepted = true;
+  pickRow.smartLineRangePolicy = policy;
   pickRow.smartLineMeta = meta;
-  return forcePickNoPlayWithNote(
-    pickRow,
-    "Wide range line — enter a single book price",
-  );
+
+  // The existing market-line parser uses the midpoint for a range. Keep that
+  // behavior consistent for decision/tracker lines rather than silently changing
+  // the model's edge after the prediction has already been calculated.
+  if (Number.isFinite(meta.mid)) {
+    pickRow.displayLineUsed = Number.isFinite(pickRow.displayLineUsed)
+      ? pickRow.displayLineUsed
+      : meta.mid;
+  }
+
+  return pickRow;
 }
 
 /* SECTION 202 — sibling-market-contradiction-gate */
@@ -33005,9 +33028,9 @@ async function runEngine() {
       .map((p) => applySmartLineToPick(p, rawMarketInputs[p.marketKey], league))
       .filter(Boolean);
 
-    // H1/H2: wide-range + sibling market-line contradiction gates (market inputs, not proj rewrite).
+    // H1/H2: range-input metadata + sibling market-line contradiction gates (market inputs, not proj rewrite).
     finalPicksForDisplay.forEach((p) =>
-      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey]),
+      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey], p.league || league),
     );
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
 
@@ -33159,9 +33182,9 @@ async function runEngine() {
       });
     }
 
-    // Re-assert H1/H2 after winProb/grade re-sync so soft/wide lines cannot remint Grade A.
+    // Re-assert range-input metadata and H1/H2 contradiction logic after winProb/grade re-sync.
     finalPicksForDisplay.forEach((p) =>
-      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey]),
+      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey], p.league || league),
     );
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
 
@@ -33402,7 +33425,7 @@ async function runEngine() {
     // BUGFIX (audit item #1 — H1 stale-grade desync, and the same class of bug for
     // FT / TEAM_A / TEAM_B / Q1-Q4): confidenceBuild used to read pre-gate snapshot
     // variables (ftPick, h1Pick, h1ConfidenceFinal, aPick, aConfidence, bPick, bConfidence,
-    // q1..q4) that are frozen BEFORE the wide-range gate, sibling-market-contradiction gate,
+    // q1..q4) that are frozen BEFORE the range-input metadata and sibling-market-contradiction checks,
     // tracker-soft-effects, invariant-safety gate, and correlated-half-play suppression run.
     // Those later gates only mutate the row objects inside finalPicksForDisplay, so the
     // audit could report e.g. H1 finalGrade "C" while the tracked/displayed pick had already
@@ -33932,7 +33955,7 @@ async function runEngine() {
       confidenceBuild: {
         gradeThresholds: _aud_gradeThresholds,
         scoringFormula:
-          "DOC FIX (item 32 / H3 harden, " + new Date().toISOString().slice(0,10) + "): Unfitted-model Grade A cap IS NOW IMPLEMENTED in resolveConfidenceGradeFromWinProbability (also enforced via getConfidenceGrade / getMarginConfidenceGrade): Unfitted-model Grade A cap REMOVED: grade follows winProb thresholds only (A>=aThresh, B>=bThresh, C>=cThresh) even when the logistic is unfitted. ECE-based D13 cap on B/C is still not implemented. Actual live grading: winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope]). Separately, if injury data failed to fetch OR ESPN injury feed returned empty (emptyFeed), winProb is capped at 0.62 (min(winProb, 0.62)) via injuryFetchFailed. Wide-range market inputs and Q1+Q2 vs H1 / Q3+Q4 vs H2 line contradictions force NO PLAY (confidence NaN) and never publish Grade A/B/C on a wide midpoint. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D. Unfitted A-cap disabled.",
+          "DOC FIX (item 32 / H3 harden, " + new Date().toISOString().slice(0,10) + "): Unfitted-model Grade A cap IS NOW IMPLEMENTED in resolveConfidenceGradeFromWinProbability (also enforced via getConfidenceGrade / getMarginConfidenceGrade): Unfitted-model Grade A cap REMOVED: grade follows winProb thresholds only (A>=aThresh, B>=bThresh, C>=cThresh) even when the logistic is unfitted. ECE-based D13 cap on B/C is still not implemented. Actual live grading: winProb = 0.3*distributionWinProbability(edge, marketVolLimit, volRatio) + 0.7*getConfidenceWinProbability(logistic) when both are finite (confidence model primary); if only one is finite use that; else NaN sentinel (NO PLAY). p.winProbability is never silently replaced by pure distribution. getConfidenceWinProbability returns null until BB_CONFIDENCE_MODEL_COEFF is fitted for the resolved scope AND that scope's OWN sample count is >=40 (BB_CONFIDENCE_MODEL_COEFF_N[scope]). Separately, if injury data failed to fetch OR ESPN injury feed returned empty (emptyFeed), winProb is capped at 0.62 (min(winProb, 0.62)) via injuryFetchFailed. Wide-range market inputs are accepted as valid market inputs and do NOT force NO PLAY solely because of range width. Q1+Q2 vs H1 / Q3+Q4 vs H2 line contradictions may still force NO PLAY when the existing contradiction gate determines the markets are inconsistent. Thresholds: winProb>=aThresh->A, >=bThresh->B, >=cThresh->C, else D. Unfitted A-cap disabled.",
         markets: {
           FT: {
             pick: _auditFinalPick("ft", ftPick),
