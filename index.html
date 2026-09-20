@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4045,7 +4046,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
     <h3>
       H2H TEST
       <span class="autofill-indicator" id="h2hAutoTag"
-        >✅ Auto-filled (2022+, decay-weighted; FT H2H includes OT; period H2H regulation-only)</span
+        >✅ Auto-filled</span
       >
     </h3>
 
@@ -8283,7 +8284,7 @@ function setTunableParam(key, newValue, scopeLeague, verifiedAt) {
     entry.lastVerifiedAt = stamp;
     saveTunableParamRegistryOverrides();
   }
-  engineDebug("setTunableParam promoted", {
+  engineDebug("setTunableParam persisted", {
     key,
     newValue: clampedValue,
     scopeLeague: scopeLeague || "global",
@@ -8296,90 +8297,628 @@ loadTunableParamRegistryOverrides();
 loadTunableParamLeagueOverrides();
 
 /* SECTION 116 — stored-tuner-proposal */
-function getStoredTunerProposal(league) {
+const TUNER_REQUIRED_SAMPLE = 25;
+const TUNER_PROPOSAL_VERSION = 2;
+const TUNER_PROPOSAL_META_KEY = "BB_TUNER_PROPOSAL_META_V2";
+const TUNER_LAST_APPLIED_KEY = "BB_TUNER_LAST_APPLIED_V2";
+const TUNER_APPLY_HISTORY_KEY = "BB_TUNER_APPLY_HISTORY_V2";
+const CONFIG_EVALUATION_STATE_KEY = "BB_CONFIG_EVALUATION_STATE_V2";
+
+function getTunerScopeKey(league) {
+  return String(league || "global").toLowerCase();
+}
+
+function getTunerConfigSnapshot(league, marketKey) {
+  const keys = [
+    "teamWeightBase",
+    "h2hFactor",
+    "h2hMaxWeight",
+    "h2hLookbackSeasons",
+    "venueMinGames",
+    "venueStrongGames",
+    "venueModerateWeight",
+    "venueStrongWeight",
+    "underEdgeFactor",
+    "injuryOppBoostFactor",
+    "edgeFTPointThreshold",
+    "edgeH1PointThreshold",
+    "edgeH2PointThreshold",
+    "edgeTeamPointThreshold",
+    "edgeQPointThreshold",
+    "confidenceAThresh",
+    "confidenceBThresh",
+    "confidenceCThresh",
+    "teamVolScale",
+    "quarterVolScale",
+    "recencyWeights",
+    "paceDampening",
+    "edgeMult",
+    "injuryMult",
+    "h2hTierInsufficientPenalty",
+    "h2hTierThinPenalty",
+    "h2hDivergenceThreshold",
+    "h2hDivergenceSlope",
+    "h2hInjuryRiskSlope",
+    "h2hVolRiskSlope",
+    "h2hBlowoutGapThreshold",
+    "h2hBlowoutRisk",
+    "h2hPaceRisk",
+  ];
+  const out = {};
+  keys.forEach((key) => {
+    const value = typeof getTunableParam === "function" ? getTunableParam(key, league, marketKey) : null;
+    out[key] = Array.isArray(value) ? value.slice() : value;
+  });
+  return out;
+}
+
+function getConfigFingerprintSafe(league) {
   try {
-    const key = "BB_TUNER_PROPOSAL_" + (league || "global");
+    return typeof getLiveConfigFingerprint === "function"
+      ? getLiveConfigFingerprint(league)
+      : djb2Hash(JSON.stringify(getTunerConfigSnapshot(league)));
+  } catch (_e) {
+    return "unknown";
+  }
+}
+
+function getStoredTunerProposalRaw(league) {
+  try {
+    const key = "BB_TUNER_PROPOSAL_" + getTunerScopeKey(league);
     const raw = localStorage.getItem(key);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (!parsed || parsed.applied || !Array.isArray(parsed.promotions) || !parsed.promotions.length)
-      return null;
-    return parsed;
+    return parsed && typeof parsed === "object" ? parsed : null;
   } catch (e) {
-    engineDebug("getStoredTunerProposal failed", { league, error: e?.message || String(e) });
+    engineDebug("getStoredTunerProposalRaw failed", { league, error: e?.message || String(e) });
     return null;
   }
 }
 
-/* SECTION 117 — apply-tuner-proposal */
-function applyTunerProposal(league) {
-  const scopeKey = league || "global";
-  const proposal = getStoredTunerProposal(league);
-  if (!proposal) return false;
-  proposal.promotions.forEach((p) => {
-    setTunableParam(p.key, p.val, proposal.league || null, new Date().toISOString());
-  });
-  try {
-    proposal.applied = true;
-    proposal.appliedAt = new Date().toISOString();
-    localStorage.setItem("BB_TUNER_PROPOSAL_" + scopeKey, JSON.stringify(proposal));
-  } catch (e) {
-    engineDebug(
-      "applyTunerProposal failed to mark proposal applied: " + (e?.message || String(e)),
-      { error: e },
-    );
+function markTunerProposalFreshness(proposal, storageKeyOverride = null) {
+  if (!proposal || typeof proposal !== "object") return null;
+  if (proposal.applied) {
+    proposal.proposalStatus = "APPLIED";
+    return proposal;
   }
 
-  try {
-    const health = _getCanaryHealth(league || null);
-    let canaries = {};
+  const league = proposal.league || null;
+  const currentSample =
+    proposal.marketKey && proposal.marketKey !== "multi"
+      ? getTotalSettledCountForLeagueMarket(league, proposal.marketKey)
+      : getTotalSettledCountForLeague(league);
+  const currentFingerprint = getConfigFingerprintSafe(league);
+
+  const staleBySample =
+    Number.isFinite(Number(proposal.sampleCount)) &&
+    currentSample > Number(proposal.sampleCount);
+  const staleByConfig =
+    proposal.baseConfigVersion &&
+    currentFingerprint &&
+    String(proposal.baseConfigVersion) !== String(currentFingerprint);
+
+  if (staleBySample || staleByConfig) {
+    proposal.proposalStatus = "STALE";
+    proposal.staleReason = staleBySample
+      ? "New settled samples arrived after this proposal was created."
+      : "The active base configuration changed after this proposal was created.";
     try {
-      canaries = JSON.parse(localStorage.getItem("BB_TUNER_CANARIES") || "{}");
+      localStorage.setItem(
+        storageKeyOverride || ("BB_TUNER_PROPOSAL_" + getTunerScopeKey(league)),
+        JSON.stringify(proposal),
+      );
     } catch (e) {
-      engineDebug("Tuner canary load failed", { error: e?.message || String(e), league });
-    }
-    const existingCanary = canaries[scopeKey];
-    if (existingCanary && !existingCanary.resolved) {
-      const merged = Array.isArray(existingCanary.promotions)
-        ? existingCanary.promotions.map((p) => ({ ...p }))
-        : [];
-      (proposal.promotions || []).forEach((next) => {
-        const idx = merged.findIndex((prev) => prev.key === next.key);
-        if (idx >= 0) {
-          merged[idx] = { ...merged[idx], ...next, old: merged[idx].old };
-        } else {
-          merged.push({ ...next });
-        }
+      engineDebug("markTunerProposalFreshness failed to persist STALE state", {
+        league,
+        error: e?.message || String(e),
       });
-      canaries[scopeKey] = {
-        ...existingCanary,
-        league: proposal.league || existingCanary.league || null,
-        promotions: merged,
-        lastAppliedAt: new Date().toISOString(),
-        resolved: false,
+    }
+    return proposal;
+  }
+
+  proposal.proposalStatus = "PROPOSAL_READY";
+  return proposal;
+}
+
+function getStoredTunerProposal(league) {
+  const parsed = markTunerProposalFreshness(getStoredTunerProposalRaw(league));
+  if (!parsed || parsed.applied || !Array.isArray(parsed.promotions) || !parsed.promotions.length) {
+    return null;
+  }
+  return parsed;
+}
+
+function getTunerProposalStatus(league) {
+  const parsed = markTunerProposalFreshness(getStoredTunerProposalRaw(league));
+  if (!parsed) return null;
+  return parsed.proposalStatus || (parsed.applied ? "APPLIED" : "PROPOSAL_READY");
+}
+
+function getGridProposalStorageKey(league, marketKey) {
+  return (
+    "BB_TUNER_GRID_PROPOSAL_" +
+    getTunerScopeKey(league) +
+    "_" +
+    String(marketKey || "ft").toLowerCase()
+  );
+}
+
+function getStoredGridProposalRaw(league, marketKey) {
+  try {
+    const raw = localStorage.getItem(getGridProposalStorageKey(league, marketKey));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch (e) {
+    engineDebug("getStoredGridProposalRaw failed", {
+      league,
+      marketKey,
+      error: e?.message || String(e),
+    });
+    return null;
+  }
+}
+
+function getStoredGridProposal(league, marketKey) {
+  const key = getGridProposalStorageKey(league, marketKey);
+  const parsed = markTunerProposalFreshness(getStoredGridProposalRaw(league, marketKey), key);
+  if (!parsed || parsed.applied || !Array.isArray(parsed.promotions) || !parsed.promotions.length) {
+    return null;
+  }
+  return parsed;
+}
+
+function persistGridProposalRecord(proposal) {
+  if (!proposal || !proposal.proposalId) return false;
+  try {
+    localStorage.setItem(
+      getGridProposalStorageKey(proposal.league, proposal.marketKey),
+      JSON.stringify(proposal),
+    );
+    return true;
+  } catch (e) {
+    engineDebug("persistGridProposalRecord failed", {
+      league: proposal.league,
+      marketKey: proposal.marketKey,
+      proposalId: proposal.proposalId,
+      error: e?.message || String(e),
+    });
+    return false;
+  }
+}
+
+function recordTunerAppliedHistory(record) {
+  try {
+    const key = TUNER_APPLY_HISTORY_KEY;
+    const raw = localStorage.getItem(key);
+    let history = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(history)) history = [];
+    history.push(record);
+    if (history.length > 200) history = history.slice(-200);
+    localStorage.setItem(key, JSON.stringify(history));
+    return true;
+  } catch (e) {
+    engineDebug("recordTunerAppliedHistory failed", { error: e?.message || String(e) });
+    return false;
+  }
+}
+
+function getTunerLastApplied(league, paramKey) {
+  try {
+    const map = JSON.parse(localStorage.getItem(TUNER_LAST_APPLIED_KEY) || "{}");
+    const scope = getTunerScopeKey(league);
+    const row = map[scope] || {};
+    return paramKey ? row[paramKey] || null : row;
+  } catch (e) {
+    engineDebug("getTunerLastApplied failed", { league, paramKey, error: e?.message || String(e) });
+    return null;
+  }
+}
+
+function persistTunerLastApplied(league, appliedRecord) {
+  const key = TUNER_LAST_APPLIED_KEY;
+  try {
+    const map = JSON.parse(localStorage.getItem(key) || "{}");
+    const scope = getTunerScopeKey(league);
+    if (!map[scope]) map[scope] = {};
+    (appliedRecord.parameters || []).forEach((p) => {
+      map[scope][p.key] = {
+        appliedAt: appliedRecord.appliedAt,
+        proposalId: appliedRecord.proposalId,
+        previousValue: p.previousValue,
+        newValue: p.newValue,
+        sampleCount: appliedRecord.sampleCount,
+        marketKey: appliedRecord.marketKey || null,
+        scope: appliedRecord.scope,
       };
-    } else {
-      canaries[scopeKey] = {
-        league: proposal.league || null,
-        promotions: proposal.promotions,
-        nAtApply: health ? health.n : 0,
-        canaryWindow: 20,
-        appliedAt: new Date().toISOString(),
-        resolved: false,
+    });
+    localStorage.setItem(key, JSON.stringify(map));
+    return true;
+  } catch (e) {
+    engineDebug("persistTunerLastApplied failed", { league, error: e?.message || String(e) });
+    return false;
+  }
+}
+
+function createTunerProposalRecord({
+  league = null,
+  marketKey = "multi",
+  promotions = [],
+  sampleCount = 0,
+  requiredSample = TUNER_REQUIRED_SAMPLE,
+  reason = "",
+  provenance = "config-evaluation",
+  currentConfig = null,
+  proposedConfig = null,
+}) {
+  const scope = getTunerScopeKey(league);
+  const createdAt = new Date().toISOString();
+  const candidateConfigHash = djb2Hash(JSON.stringify(proposedConfig || promotions || {}));
+  const proposalId =
+    "TUNER-" +
+    scope +
+    "-" +
+    String(marketKey || "multi").toLowerCase() +
+    "-" +
+    candidateConfigHash +
+    "-" +
+    Date.now().toString(36);
+
+  return {
+    proposalVersion: TUNER_PROPOSAL_VERSION,
+    proposalId,
+    scope,
+    league: league || null,
+    marketKey: marketKey || "multi",
+    sampleCount: Number(sampleCount) || 0,
+    requiredSample: Number(requiredSample) || TUNER_REQUIRED_SAMPLE,
+    currentConfig: currentConfig || getTunerConfigSnapshot(league, marketKey),
+    proposedConfig: proposedConfig || {},
+    candidateConfigHash,
+    baseConfigVersion: getConfigFingerprintSafe(league),
+    promotions: Array.isArray(promotions) ? promotions : [],
+    reason: reason || "Configuration evaluation produced a candidate.",
+    provenance,
+    createdAt,
+    ts: createdAt,
+    applied: false,
+    proposalStatus: "PROPOSAL_READY",
+  };
+}
+
+function persistTunerProposalRecord(proposal) {
+  if (!proposal || !proposal.proposalId) return false;
+  try {
+    localStorage.setItem(
+      "BB_TUNER_PROPOSAL_" + getTunerScopeKey(proposal.league),
+      JSON.stringify(proposal),
+    );
+    const meta = {
+      proposalId: proposal.proposalId,
+      proposalVersion: proposal.proposalVersion,
+      scope: proposal.scope,
+      league: proposal.league || null,
+      marketKey: proposal.marketKey || "multi",
+      sampleCount: proposal.sampleCount,
+      requiredSample: proposal.requiredSample,
+      baseConfigVersion: proposal.baseConfigVersion,
+      candidateConfigHash: proposal.candidateConfigHash,
+      currentConfig: proposal.currentConfig || null,
+      proposedConfig: proposal.proposedConfig || null,
+      reason: proposal.reason || "",
+      provenance: proposal.provenance || "",
+      createdAt: proposal.createdAt,
+      proposalStatus: proposal.proposalStatus || "PROPOSAL_READY",
+    };
+    const metaMap = JSON.parse(localStorage.getItem(TUNER_PROPOSAL_META_KEY) || "{}");
+    metaMap[getTunerScopeKey(proposal.league)] = meta;
+    localStorage.setItem(TUNER_PROPOSAL_META_KEY, JSON.stringify(metaMap));
+    return true;
+  } catch (e) {
+    engineDebug("persistTunerProposalRecord failed", {
+      league: proposal.league,
+      marketKey: proposal.marketKey,
+      proposalId: proposal.proposalId,
+      error: e?.message || String(e),
+    });
+    return false;
+  }
+}
+
+/* SECTION 117 — apply-tuner-proposal */
+function validateTunableParamValue(key, value) {
+  const entry = TUNABLE_PARAM_REGISTRY[key];
+  if (!entry) return { ok: false, reason: "Unknown tunable parameter: " + key };
+
+  if (entry.type === "scalar") {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return { ok: false, reason: key + " must be numeric" };
+    if (Number.isFinite(entry.min) && n < entry.min) {
+      return { ok: false, reason: key + " below minimum " + entry.min };
+    }
+    if (Number.isFinite(entry.max) && n > entry.max) {
+      return { ok: false, reason: key + " above maximum " + entry.max };
+    }
+    return { ok: true, value: n };
+  }
+
+  if (entry.type === "weight_vector") {
+    if (!Array.isArray(value) || !value.length) {
+      return { ok: false, reason: key + " must be a non-empty numeric vector" };
+    }
+    const expectedLength = Array.isArray(entry.value) ? entry.value.length : value.length;
+    if (expectedLength && value.length !== expectedLength) {
+      return { ok: false, reason: key + " length " + value.length + " != expected " + expectedLength };
+    }
+    if (!value.every((v) => Number.isFinite(Number(v)) && Number(v) > 0)) {
+      return { ok: false, reason: key + " contains a non-positive/non-numeric weight" };
+    }
+    return { ok: true, value: value.map(Number) };
+  }
+
+  return { ok: true, value };
+}
+
+function applyTunerProposal(league, proposalOverride = null, proposalStorageKey = null) {
+  const scopeKey = getTunerScopeKey(league);
+  const rawProposal = proposalOverride || getStoredTunerProposalRaw(league);
+  if (!rawProposal) return { ok: false, reason: "No proposal stored" };
+
+  if (rawProposal.applied) {
+    return { ok: true, alreadyApplied: true, proposalId: rawProposal.proposalId || null };
+  }
+
+  const proposal = markTunerProposalFreshness(rawProposal, proposalStorageKey);
+  if (!proposal) return { ok: false, reason: "Invalid proposal" };
+  if (proposal.proposalStatus === "STALE") {
+    engineDebug("Tuner proposal apply blocked: proposal is STALE", {
+      league: scopeKey,
+      marketKey: proposal.marketKey,
+      proposalId: proposal.proposalId,
+      sampleCount: proposal.sampleCount,
+      requiredSample: proposal.requiredSample,
+      reason: proposal.staleReason,
+    });
+    return { ok: false, reason: proposal.staleReason || "Proposal is stale" };
+  }
+  if (!Array.isArray(proposal.promotions) || !proposal.promotions.length) {
+    return { ok: false, reason: "Proposal contains no promotions" };
+  }
+
+  const scopeLeague = proposal.league || null;
+  const validated = [];
+  for (const p of proposal.promotions) {
+    const key = String(p?.key || "");
+    const validation = validateTunableParamValue(key, p?.val);
+    if (!validation.ok) {
+      engineDebug("Tuner proposal validation failed", {
+        league: scopeKey,
+        proposalId: proposal.proposalId,
+        key,
+        value: p?.val,
+        reason: validation.reason,
+      });
+      return { ok: false, reason: validation.reason };
+    }
+    const entry = TUNABLE_PARAM_REGISTRY[key];
+    if (scopeLeague && entry.scope !== "global") {
+      return {
+        ok: false,
+        reason: key + " cannot be applied as a league override",
       };
     }
-    localStorage.setItem("BB_TUNER_CANARIES", JSON.stringify(canaries));
-  } catch (e) {
-    engineDebug("applyTunerProposal failed to register canary: " + (e?.message || String(e)), {
-      error: e,
-    });
+    validated.push({ key, value: validation.value, oldValue: getTunableParam(key, scopeLeague) });
   }
-  engineDebug("Tuner proposal manually applied via Configs panel (canary monitoring active)", {
-    league: scopeKey,
-    promotions: proposal.promotions,
+
+  const registrySnapshot = {};
+  Object.keys(TUNABLE_PARAM_REGISTRY).forEach((key) => {
+    const e = TUNABLE_PARAM_REGISTRY[key];
+    registrySnapshot[key] = {
+      value: Array.isArray(e.value) ? e.value.slice() : e.value,
+      lastVerifiedAt: e.lastVerifiedAt || null,
+    };
   });
-  return true;
+  const leagueSnapshot = JSON.parse(JSON.stringify(g_tunableParamLeagueOverrides || {}));
+
+  const appliedAt = new Date().toISOString();
+  const appliedRecord = {
+    proposalId: proposal.proposalId || null,
+    proposalVersion: proposal.proposalVersion || TUNER_PROPOSAL_VERSION,
+    scope: scopeLeague ? "league" : "global",
+    league: scopeLeague,
+    marketKey: proposal.marketKey || "multi",
+    sampleCount: Number(proposal.sampleCount) || 0,
+    requiredSample: Number(proposal.requiredSample) || TUNER_REQUIRED_SAMPLE,
+    appliedAt,
+    parameters: validated.map((p) => ({
+      key: p.key,
+      previousValue: Array.isArray(p.oldValue) ? p.oldValue.slice() : p.oldValue,
+      newValue: Array.isArray(p.value) ? p.value.slice() : p.value,
+    })),
+    reason: proposal.reason || "",
+    provenance: proposal.provenance || "",
+    candidateConfigHash: proposal.candidateConfigHash || null,
+    baseConfigVersion: proposal.baseConfigVersion || null,
+  };
+
+  const rollback = () => {
+    Object.keys(TUNABLE_PARAM_REGISTRY).forEach((key) => {
+      const snap = registrySnapshot[key];
+      TUNABLE_PARAM_REGISTRY[key].value = Array.isArray(snap.value) ? snap.value.slice() : snap.value;
+      TUNABLE_PARAM_REGISTRY[key].lastVerifiedAt = snap.lastVerifiedAt;
+    });
+    g_tunableParamLeagueOverrides = JSON.parse(JSON.stringify(leagueSnapshot));
+    try {
+      saveTunableParamRegistryOverrides();
+      saveTunableParamLeagueOverrides();
+    } catch (_e) {}
+  };
+
+  try {
+    // Stage all values in memory first. No individual setTunableParam() writes are allowed
+    // during this transaction because a partial localStorage write would create a mixed config.
+    validated.forEach((p) => {
+      if (scopeLeague) {
+        if (!g_tunableParamLeagueOverrides[scopeLeague]) {
+          g_tunableParamLeagueOverrides[scopeLeague] = {};
+        }
+        g_tunableParamLeagueOverrides[scopeLeague][p.key] = {
+          value: Array.isArray(p.value) ? p.value.slice() : p.value,
+          lastVerifiedAt: appliedAt,
+        };
+      } else {
+        TUNABLE_PARAM_REGISTRY[p.key].value = Array.isArray(p.value) ? p.value.slice() : p.value;
+        TUNABLE_PARAM_REGISTRY[p.key].lastVerifiedAt = appliedAt;
+      }
+    });
+
+    if (!saveTunableParamRegistryOverrides() || !saveTunableParamLeagueOverrides()) {
+      throw new Error("Failed to persist tunable parameter state");
+    }
+
+    // Read-after-write verification through the same authoritative effective-value path.
+    for (const p of validated) {
+      const readback = getTunableParam(p.key, scopeLeague, proposal.marketKey || null);
+      const a = Array.isArray(p.value) ? JSON.stringify(p.value) : Number(p.value);
+      const b = Array.isArray(readback) ? JSON.stringify(readback) : Number(readback);
+      if (String(a) !== String(b)) {
+        throw new Error("Tunable parameter readback mismatch for " + p.key);
+      }
+    }
+
+    // History is part of the transaction. If it cannot be recorded, roll the config back.
+    if (!recordTunerAppliedHistory(appliedRecord)) {
+      throw new Error("Failed to persist tuner application history");
+    }
+    if (!persistTunerLastApplied(scopeLeague, appliedRecord)) {
+      throw new Error("Failed to persist tuner last-applied metadata");
+    }
+
+    proposal.applied = true;
+    proposal.appliedAt = appliedAt;
+    proposal.appliedRecord = appliedRecord;
+    proposal.proposalStatus = "APPLIED";
+    proposal.versionApplied = proposal.proposalVersion || TUNER_PROPOSAL_VERSION;
+    localStorage.setItem(
+      proposalStorageKey || ("BB_TUNER_PROPOSAL_" + scopeKey),
+      JSON.stringify(proposal),
+    );
+
+    try {
+      const canaries = JSON.parse(localStorage.getItem("BB_TUNER_CANARIES") || "{}");
+      canaries[scopeKey] = {
+        league: scopeLeague,
+        promotions: proposal.promotions.map((p) => ({ ...p })),
+        nAtApply: appliedRecord.sampleCount,
+        canaryWindow: 20,
+        appliedAt,
+        resolved: false,
+        proposalId: proposal.proposalId || null,
+      };
+      localStorage.setItem("BB_TUNER_CANARIES", JSON.stringify(canaries));
+    } catch (e) {
+      engineDebug("Tuner canary registration failed after atomic apply", {
+        error: e?.message || String(e),
+        proposalId: proposal.proposalId,
+      });
+    }
+
+    engineDebug("Tuner proposal manually applied atomically", appliedRecord);
+
+    try {
+      setConfigEvaluationState(
+        proposal.league,
+        proposal.marketKey || "multi",
+        {
+          status: "APPLIED",
+          sampleCount: appliedRecord.sampleCount,
+          requiredSample: appliedRecord.requiredSample,
+          proposalId: proposal.proposalId || null,
+          reason: "Proposal applied explicitly by the user.",
+          appliedAt,
+        },
+      );
+    } catch (_stateErr) {}
+
+    return { ok: true, appliedRecord };
+  } catch (e) {
+    rollback();
+    engineDebug("applyTunerProposal rolled back", {
+      league: scopeKey,
+      proposalId: proposal.proposalId,
+      error: e?.message || String(e),
+      stack: e?.stack || "no stack",
+    });
+    return { ok: false, reason: e?.message || String(e) };
+  }
 }
+
+window.applyTunerProposalFromUI = function (league) {
+  const scopeKey = league || "global";
+  const proposal = getStoredTunerProposalRaw(league);
+  if (!proposal) {
+    if (typeof renderConfigsPanel === "function") renderConfigsPanel();
+    return;
+  }
+  if (
+    !confirm(
+      "Apply the pending tuning proposal for " +
+        scopeKey +
+        "? This will overwrite the current tunable parameter values for the proposal scope.",
+    )
+  )
+    return;
+
+  const result = applyTunerProposal(league);
+  if (!result.ok) {
+    engineDebug("Tuner proposal Apply failed", {
+      league: scopeKey,
+      proposalId: proposal.proposalId || null,
+      error: result.reason,
+    });
+    alert("Apply failed: " + result.reason);
+    return;
+  }
+  if (typeof renderConfigsPanel === "function") renderConfigsPanel();
+};
+
+window.applyGridProposalFromUI = function (league, marketKey) {
+  const proposal = getStoredGridProposalRaw(league, marketKey);
+  if (!proposal) return;
+  const status = markTunerProposalFreshness(proposal, getGridProposalStorageKey(league, marketKey));
+  if (status?.proposalStatus === "STALE") {
+    alert("This configuration proposal is stale. Re-run the grid evaluation before Apply.");
+    if (typeof renderConfigsPanel === "function") renderConfigsPanel();
+    return;
+  }
+  if (
+    !confirm(
+      "Apply the configuration-grid proposal for " +
+        String(league || "global").toUpperCase() +
+        " / " +
+        String(marketKey || "").toUpperCase() +
+        "? Apply remains explicit and will persist the new tunable values.",
+    )
+  ) {
+    return;
+  }
+  const result = applyTunerProposal(
+    league,
+    proposal,
+    getGridProposalStorageKey(league, marketKey),
+  );
+  if (!result.ok) {
+    engineDebug("Grid proposal Apply failed", {
+      league,
+      marketKey,
+      proposalId: proposal.proposalId || null,
+      error: result.reason,
+    });
+    alert("Apply failed: " + result.reason);
+    return;
+  }
+  if (typeof renderConfigsPanel === "function") renderConfigsPanel();
+};
 
 function getStoredConstantProposal(constantName) {
   try {
@@ -8534,18 +9073,39 @@ window.applyConstantProposalFromUI = function (constantName) {
 };
 
 /* SECTION 119 — stored-confidence-model-proposal */
+const CONFIDENCE_REQUIRED_SAMPLE = 40;
+const CONFIDENCE_CALIBRATION_VERSION = "confidence-cal-v2";
+const CONFIDENCE_PROPOSAL_META_KEY = "BB_CONFIDENCE_MODEL_PROPOSAL_META_V2";
+const CONFIDENCE_APPLY_HISTORY_KEY = "BB_CONFIDENCE_MODEL_APPLY_HISTORY_V2";
+
+function getConfidenceLiveFingerprint() {
+  try {
+    return djb2Hash(
+      JSON.stringify({
+        coeff: JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF") || "null"),
+        platt: JSON.parse(localStorage.getItem("BB_PLATT_CALIB") || "null"),
+        thresholds: JSON.parse(localStorage.getItem("BB_CONFIDENCE_THRESHOLDS") || "null"),
+      }),
+    );
+  } catch (_e) {
+    return "unknown";
+  }
+}
+
 function getStoredConfidenceModelProposal() {
   try {
     const coeffRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_PROPOSED");
     if (!coeffRaw) return null;
     const coeff = JSON.parse(coeffRaw);
     if (!coeff || !Object.keys(coeff).length) return null;
+
     let platt = {};
     try {
       platt = JSON.parse(localStorage.getItem("BB_PLATT_CALIB_PROPOSED") || "{}");
     } catch (e) {
       engineDebug("Platt calibration proposal load failed", { error: e?.message || String(e) });
     }
+
     let sampleSizes = {};
     try {
       sampleSizes = JSON.parse(
@@ -8558,6 +9118,7 @@ function getStoredConfidenceModelProposal() {
         error: e?.message || String(e),
       });
     }
+
     let thresholds = null;
     try {
       const tRaw = localStorage.getItem("BB_CONFIDENCE_THRESHOLDS_PROPOSED");
@@ -8565,6 +9126,7 @@ function getStoredConfidenceModelProposal() {
     } catch (e) {
       engineDebug("Confidence thresholds proposal load failed", { error: e?.message || String(e) });
     }
+
     let gradeWinRates = null;
     try {
       const gRaw = localStorage.getItem("BB_CONFIDENCE_GRADE_WIN_RATES_PROPOSED");
@@ -8572,7 +9134,60 @@ function getStoredConfidenceModelProposal() {
     } catch (e) {
       engineDebug("Grade win-rates proposal load failed", { error: e?.message || String(e) });
     }
-    return { coeff, platt, sampleSizes, thresholds, gradeWinRates, scopes: Object.keys(coeff) };
+
+    let meta = {};
+    try {
+      meta = JSON.parse(localStorage.getItem(CONFIDENCE_PROPOSAL_META_KEY) || "{}") || {};
+    } catch (e) {
+      engineDebug("Confidence proposal metadata load failed", { error: e?.message || String(e) });
+    }
+
+    const totalSettled = getAllSettledTrackedPicks().length;
+    const currentLiveHash = getConfidenceLiveFingerprint();
+    let proposalStatus = meta.status || "PROPOSAL_READY";
+    let staleReason = null;
+
+    if (meta.applied) {
+      proposalStatus = "APPLIED";
+    } else if (
+      (Number.isFinite(Number(meta.sampleCount)) && totalSettled > Number(meta.sampleCount)) ||
+      (meta.baseLiveHash && currentLiveHash !== "unknown" && String(meta.baseLiveHash) !== String(currentLiveHash))
+    ) {
+      proposalStatus = "STALE";
+      staleReason =
+        totalSettled > Number(meta.sampleCount)
+          ? "New settled results arrived after the calibration proposal was created."
+          : "The live confidence/calibration model changed after the proposal was created.";
+      try {
+        localStorage.setItem(
+          CONFIDENCE_PROPOSAL_META_KEY,
+          JSON.stringify({ ...meta, status: "STALE", staleReason }),
+        );
+      } catch (_e) {}
+    }
+
+    return {
+      coeff,
+      platt,
+      sampleSizes,
+      thresholds,
+      gradeWinRates,
+      scopes: Object.keys(coeff).filter((s) => s !== "modelVersion" && s !== "_modelVersion"),
+      proposalId: meta.proposalId || null,
+      proposalVersion: meta.proposalVersion || 2,
+      sampleCount: Number(meta.sampleCount || totalSettled),
+      requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
+      fitSampleCount: Number(meta.fitSampleCount || 0),
+      holdoutSampleCount: Number(meta.holdoutSampleCount || 0),
+      currentModelVersion: meta.currentModelVersion || "unknown",
+      proposedModelVersion: meta.proposedModelVersion || CONFIDENCE_CALIBRATION_VERSION,
+      baseLiveHash: meta.baseLiveHash || null,
+      createdAt: meta.createdAt || null,
+      appliedAt: meta.appliedAt || null,
+      status: proposalStatus,
+      staleReason,
+      provenance: meta.provenance || "calibrateConfidenceModel",
+    };
   } catch (e) {
     engineDebug("getStoredConfidenceModelProposal failed", { error: e?.message || String(e) });
     return null;
@@ -8582,84 +9197,166 @@ function getStoredConfidenceModelProposal() {
 /* SECTION 120 — apply-confidence-model-proposal */
 function applyConfidenceModelProposal() {
   const proposal = getStoredConfidenceModelProposal();
-  if (!proposal) return false;
-  try {
-    const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
-    const nVals = Object.values(nMap || {}).map(Number).filter((x) => isFinite(x));
-    const maxN = nVals.length ? Math.max.apply(null, nVals) : 0;
-    if (maxN < 40) {
-      engineDebug("Confidence promote blocked: sample N < 40", { maxN });
-      return false;
-    }
-  } catch (_nErr) {
-    engineDebug("Confidence promote blocked: cannot read sample sizes");
-    return false;
+  if (!proposal) return { ok: false, reason: "No confidence model proposal stored" };
+  if (proposal.status === "APPLIED") return { ok: true, alreadyApplied: true, proposalId: proposal.proposalId };
+  if (proposal.status === "STALE") {
+    engineDebug("Confidence model Apply blocked: proposal is STALE", {
+      proposalId: proposal.proposalId,
+      sampleCount: proposal.sampleCount,
+      currentSampleCount: getAllSettledTrackedPicks().length,
+      reason: proposal.staleReason,
+    });
+    return { ok: false, reason: proposal.staleReason || "Confidence model proposal is stale" };
   }
-  try {
-    const liveBundle = {
-      coeff: proposal.coeff,
-      platt: proposal.platt,
-      sampleSizes:
-        proposal.sampleSizes && typeof proposal.sampleSizes === "object"
-          ? proposal.sampleSizes
-          : null,
-      thresholds:
-        proposal.thresholds && typeof proposal.thresholds === "object" ? proposal.thresholds : null,
-      gradeWinRates:
-        proposal.gradeWinRates && typeof proposal.gradeWinRates === "object"
-          ? proposal.gradeWinRates
-          : null,
-      appliedAt: Date.now(),
-      scopes: proposal.scopes || null,
-    };
-    localStorage.setItem("BB_CONFIDENCE_MODEL_LIVE", JSON.stringify(liveBundle));
-    try {
-      localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF", JSON.stringify(proposal.coeff));
-      localStorage.setItem("BB_PLATT_CALIB", JSON.stringify(proposal.platt));
-      if (liveBundle.sampleSizes)
-        localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF_N", JSON.stringify(liveBundle.sampleSizes));
-      if (liveBundle.thresholds)
-        localStorage.setItem("BB_CONFIDENCE_THRESHOLDS", JSON.stringify(liveBundle.thresholds));
-      if (liveBundle.gradeWinRates)
-        localStorage.setItem(
-          "BB_CONFIDENCE_GRADE_WIN_RATES",
-          JSON.stringify(liveBundle.gradeWinRates),
-        );
-    } catch (_mirrorErr) {
-      engineDebug("applyConfidenceModelProposal legacy mirror partial fail (live blob OK)", {
-        error: _mirrorErr?.message || String(_mirrorErr),
-      });
-    }
-    localStorage.removeItem("BB_CONFIDENCE_MODEL_COEFF_PROPOSED");
-    localStorage.removeItem("BB_PLATT_CALIB_PROPOSED");
-    localStorage.removeItem("BB_CONFIDENCE_MODEL_COEFF_N_PROPOSED");
-    localStorage.removeItem("BB_CONFIDENCE_THRESHOLDS_PROPOSED");
-    localStorage.removeItem("BB_CONFIDENCE_GRADE_WIN_RATES_PROPOSED");
-  } catch (e) {
-    engineDebug(
-      "applyConfidenceModelProposal failed to write live keys: " + (e?.message || String(e)),
-      { error: e },
-    );
-    return false;
-  }
-  engineDebug(
-    "Confidence model + Platt + thresholds applied atomically via BB_CONFIDENCE_MODEL_LIVE",
-    { scopes: proposal.scopes, hasThresholds: !!proposal.thresholds },
+
+  const proposedSampleSizes = proposal.sampleSizes || {};
+  const insufficientScopes = proposal.scopes.filter(
+    (scope) => Number(proposedSampleSizes[scope] || 0) < CONFIDENCE_REQUIRED_SAMPLE,
   );
-  return true;
+  if (insufficientScopes.length) {
+    const reason =
+      "Confidence Apply blocked: scoped sample below " +
+      CONFIDENCE_REQUIRED_SAMPLE +
+      " for " +
+      insufficientScopes.join(", ");
+    engineDebug(reason, { proposalId: proposal.proposalId, sampleSizes: proposedSampleSizes });
+    return { ok: false, reason };
+  }
+
+  const oldKeys = [
+    "BB_CONFIDENCE_MODEL_LIVE",
+    "BB_CONFIDENCE_MODEL_COEFF",
+    "BB_PLATT_CALIB",
+    "BB_CONFIDENCE_MODEL_COEFF_N",
+    "BB_CONFIDENCE_THRESHOLDS",
+    "BB_CONFIDENCE_GRADE_WIN_RATES",
+  ];
+  const snapshot = {};
+  oldKeys.forEach((key) => {
+    snapshot[key] = localStorage.getItem(key);
+  });
+
+  const appliedAt = new Date().toISOString();
+  const liveBundle = {
+    coeff: proposal.coeff,
+    platt: proposal.platt,
+    sampleSizes: proposedSampleSizes,
+    thresholds: proposal.thresholds && typeof proposal.thresholds === "object" ? proposal.thresholds : null,
+    gradeWinRates: proposal.gradeWinRates && typeof proposal.gradeWinRates === "object" ? proposal.gradeWinRates : null,
+    appliedAt,
+    scopes: proposal.scopes || null,
+    modelVersion: proposal.proposedModelVersion || CONFIDENCE_CALIBRATION_VERSION,
+    calibrationVersion: CONFIDENCE_CALIBRATION_VERSION,
+    proposalId: proposal.proposalId || null,
+  };
+
+  try {
+    localStorage.setItem("BB_CONFIDENCE_MODEL_LIVE", JSON.stringify(liveBundle));
+    localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF", JSON.stringify(proposal.coeff));
+    localStorage.setItem("BB_PLATT_CALIB", JSON.stringify(proposal.platt));
+    localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF_N", JSON.stringify(proposedSampleSizes));
+    if (liveBundle.thresholds) {
+      localStorage.setItem("BB_CONFIDENCE_THRESHOLDS", JSON.stringify(liveBundle.thresholds));
+    }
+    if (liveBundle.gradeWinRates) {
+      localStorage.setItem("BB_CONFIDENCE_GRADE_WIN_RATES", JSON.stringify(liveBundle.gradeWinRates));
+    }
+
+    const readback = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
+    if (!readback || JSON.stringify(JSON.parse(readback)) !== JSON.stringify(liveBundle)) {
+      throw new Error("Confidence live bundle readback verification failed");
+    }
+
+    const history = (() => {
+      try {
+        const parsed = JSON.parse(localStorage.getItem(CONFIDENCE_APPLY_HISTORY_KEY) || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+      } catch (_e) {
+        return [];
+      }
+    })();
+    history.push({
+      proposalId: proposal.proposalId || null,
+      appliedAt,
+      sampleCount: proposal.sampleCount,
+      requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
+      scopes: proposal.scopes,
+      sampleSizes: proposedSampleSizes,
+      previousLiveHash: proposal.baseLiveHash || null,
+      newLiveHash: djb2Hash(JSON.stringify(liveBundle)),
+      currentModelVersion: proposal.currentModelVersion,
+      proposedModelVersion: proposal.proposedModelVersion,
+      platt: proposal.platt || {},
+      provenance: proposal.provenance,
+    });
+    localStorage.setItem(CONFIDENCE_APPLY_HISTORY_KEY, JSON.stringify(history.slice(-100)));
+
+    const metaRaw = localStorage.getItem(CONFIDENCE_PROPOSAL_META_KEY);
+    const meta = metaRaw ? JSON.parse(metaRaw) : {};
+    localStorage.setItem(
+      CONFIDENCE_PROPOSAL_META_KEY,
+      JSON.stringify({
+        ...meta,
+        proposalId: proposal.proposalId,
+        status: "APPLIED",
+        applied: true,
+        appliedAt,
+        appliedSampleCount: proposal.sampleCount,
+      }),
+    );
+
+    // Keep the proposed bundle as an auditable copy. The metadata status is APPLIED, so
+    // the UI never treats this historical proposal as pending.
+    engineDebug(
+      "Confidence model + Platt + thresholds applied atomically",
+      {
+        proposalId: proposal.proposalId,
+        scopes: proposal.scopes,
+        sampleSizes: proposedSampleSizes,
+        requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
+        currentModelVersion: proposal.currentModelVersion,
+        proposedModelVersion: proposal.proposedModelVersion,
+      },
+    );
+    return { ok: true, appliedAt, proposalId: proposal.proposalId };
+  } catch (e) {
+    oldKeys.forEach((key) => {
+      try {
+        const value = snapshot[key];
+        if (value === null || value === undefined) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      } catch (_restoreErr) {}
+    });
+    engineDebug("applyConfidenceModelProposal rolled back", {
+      proposalId: proposal.proposalId,
+      error: e?.message || String(e),
+      stack: e?.stack || "no stack",
+    });
+    return { ok: false, reason: e?.message || String(e) };
+  }
 }
 
 window.applyConfidenceModelProposalFromUI = function () {
+  const proposal = getStoredConfidenceModelProposal();
+  if (!proposal) return;
+  if (proposal.status === "STALE") {
+    alert("The confidence model proposal is stale. Re-run calibration before Apply.");
+    return;
+  }
   if (
     !confirm(
       "Apply pending confidence model atomically (coeffs + N + Platt + grade thresholds)? This overwrites live grading for every new pick.",
     )
   )
     return;
-  if (applyConfidenceModelProposal()) {
-    if (typeof renderConfigsPanel === "function") renderConfigsPanel();
+  const result = applyConfidenceModelProposal();
+  if (!result.ok) {
+    alert("Apply failed: " + result.reason);
+    return;
   }
+  if (typeof renderConfigsPanel === "function") renderConfigsPanel();
 };
+
 
 let _forensicReplayParamOverrides = null;
 
@@ -9545,9 +10242,19 @@ function updateCandidateScore(league, marketKey, config, delta, winProbability, 
     );
   }
   if (!key) return;
-  if (!scores[key]) scores[key] = { netDelta: 0, count: 0, brierSum: 0, brierCount: 0, deltas: [] };
-  scores[key].netDelta += delta;
-  scores[key].count++;
+  if (!scores[key]) {
+    scores[key] = {
+      netDelta: 0,
+      count: 0,
+      observations: 0,
+      brierSum: 0,
+      brierCount: 0,
+      deltas: [],
+    };
+  }
+  scores[key].observations = Number(scores[key].observations || 0) + 1;
+  scores[key].netDelta += Number(delta) || 0;
+  if (Number(delta) !== 0) scores[key].count++;
   if (!Array.isArray(scores[key].deltas)) scores[key].deltas = [];
   if (scores[key].deltas.length < 2000) scores[key].deltas.push(delta);
 
@@ -9570,13 +10277,371 @@ function updateCandidateScore(league, marketKey, config, delta, winProbability, 
 /* SECTION 143 — settled-count-league-market */
 function getTotalSettledCountForLeagueMarket(league, marketKey) {
   const all = getLearningTrackedPicks();
+  const lk = String(league || "").toLowerCase();
+  const mk = String(marketKey || "").toLowerCase();
   return all.filter(
     (p) =>
-      p.league === league &&
-      p.marketKey === marketKey &&
+      String(p.league || "").toLowerCase() === lk &&
+      String(p.marketKey || "").toLowerCase() === mk &&
       (p.resultStatus === "win" || p.resultStatus === "loss"),
   ).length;
 }
+
+function decodeTuningGridConfigKey(configKey) {
+  if (!configKey) return {};
+  const result = {};
+  String(configKey).split("_").forEach((part) => {
+    if (part.startsWith("h2h")) result.h2hFactor = parseFloat(part.slice(3));
+    else if (part.startsWith("rec")) {
+      const recType = part.slice(3);
+      if (recType === "std") result.recencyProfile = TUNING_GRID.recencyProfiles[0];
+      else if (recType === "agg") result.recencyProfile = TUNING_GRID.recencyProfiles[1];
+      else if (recType === "flat") result.recencyProfile = TUNING_GRID.recencyProfiles[2];
+      else if (/^p\d+$/.test(recType)) {
+        const idx = Number(recType.slice(1));
+        if (Array.isArray(TUNING_GRID.recencyProfiles[idx])) {
+          result.recencyProfile = TUNING_GRID.recencyProfiles[idx];
+        }
+      }
+    } else if (part.startsWith("pace")) result.paceDampening = parseFloat(part.slice(4));
+    else if (part.startsWith("edge")) result.edgeMult = parseFloat(part.slice(4));
+    else if (part.startsWith("inj")) result.injuryMult = parseFloat(part.slice(3));
+  });
+  return result;
+}
+
+function getConfigEvaluationState(league, marketKey) {
+  const lk = getTunerScopeKey(league);
+  const mk = String(marketKey || "ft").toLowerCase();
+  const sampleCount = getTotalSettledCountForLeagueMarket(league, marketKey);
+  const requiredSample = TUNER_REQUIRED_SAMPLE;
+
+  let persisted = null;
+  try {
+    const all = JSON.parse(localStorage.getItem(CONFIG_EVALUATION_STATE_KEY) || "{}");
+    persisted = all[lk + "|" + mk] || null;
+  } catch (e) {
+    engineDebug("getConfigEvaluationState failed", { league, marketKey, error: e?.message || String(e) });
+  }
+
+  const pending = getStoredGridProposal(league, mk);
+  const proposalMatchesMarket = !!pending;
+
+  if (sampleCount < requiredSample) {
+    return {
+      status: "INSUFFICIENT_SAMPLE",
+      league: league || null,
+      marketKey: mk,
+      sampleCount,
+      requiredSample,
+      proposalId: null,
+      reason: "Configuration evaluation requires at least 25 settled eligible picks.",
+      createdAt: persisted?.createdAt || null,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (proposalMatchesMarket) {
+    const status = pending.proposalStatus === "STALE" ? "STALE" : "PROPOSAL_READY";
+    return {
+      status,
+      league: league || null,
+      marketKey: mk,
+      sampleCount,
+      requiredSample,
+      proposalId: pending.proposalId || null,
+      reason:
+        status === "STALE"
+          ? pending.staleReason || "Proposal must be re-evaluated after new samples or a config change."
+          : pending.reason || "A configuration candidate is ready for explicit review.",
+      createdAt: pending.createdAt || persisted?.createdAt || null,
+      updatedAt: new Date().toISOString(),
+      proposal: pending,
+    };
+  }
+
+  if (persisted?.status === "EVALUATING") {
+    return {
+      ...persisted,
+      sampleCount,
+      requiredSample,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (persisted?.status === "FAILED") {
+    return {
+      ...persisted,
+      sampleCount,
+      requiredSample,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (persisted?.status === "APPLIED" && persisted.appliedAt) {
+    return {
+      ...persisted,
+      sampleCount,
+      requiredSample,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  if (persisted?.status === "NO_CHANGE" && Number(persisted.evaluatedSampleCount) === sampleCount) {
+    return {
+      ...persisted,
+      sampleCount,
+      requiredSample,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  return {
+    status: "ELIGIBLE",
+    league: league || null,
+    marketKey: mk,
+    sampleCount,
+    requiredSample,
+    proposalId: null,
+    reason: "Sample threshold reached; configuration evaluation is eligible and requires explicit review.",
+    createdAt: persisted?.createdAt || null,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function setConfigEvaluationState(league, marketKey, patch = {}) {
+  const lk = getTunerScopeKey(league);
+  const mk = String(marketKey || "ft").toLowerCase();
+  const sampleCount =
+    patch.sampleCount != null
+      ? Number(patch.sampleCount)
+      : getTotalSettledCountForLeagueMarket(league, marketKey);
+  const record = {
+    status: patch.status || "ELIGIBLE",
+    league: league || null,
+    marketKey: mk,
+    sampleCount: Number.isFinite(sampleCount) ? sampleCount : 0,
+    requiredSample: Number(patch.requiredSample || TUNER_REQUIRED_SAMPLE),
+    proposalId: patch.proposalId || null,
+    reason: patch.reason || "",
+    createdAt: patch.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    evaluatedSampleCount:
+      patch.evaluatedSampleCount != null ? Number(patch.evaluatedSampleCount) : sampleCount,
+    currentConfig: patch.currentConfig || null,
+    candidateConfig: patch.candidateConfig || null,
+    candidateConfigHash: patch.candidateConfigHash || null,
+    evaluationStatus: patch.evaluationStatus || patch.status || "ELIGIBLE",
+    proposalStatus: patch.proposalStatus || null,
+    appliedAt: patch.appliedAt || null,
+  };
+  try {
+    const all = JSON.parse(localStorage.getItem(CONFIG_EVALUATION_STATE_KEY) || "{}");
+    all[lk + "|" + mk] = record;
+    localStorage.setItem(CONFIG_EVALUATION_STATE_KEY, JSON.stringify(all));
+  } catch (e) {
+    engineDebug("setConfigEvaluationState failed", {
+      league,
+      marketKey,
+      status: record.status,
+      error: e?.message || String(e),
+    });
+  }
+  return record;
+}
+
+function refreshConfigGridEvaluationState(league, marketKey, opts = {}) {
+  const sampleCount = getTotalSettledCountForLeagueMarket(league, marketKey);
+  const requiredSample = TUNER_REQUIRED_SAMPLE;
+
+  if (sampleCount < requiredSample) {
+    return setConfigEvaluationState(league, marketKey, {
+      status: "INSUFFICIENT_SAMPLE",
+      sampleCount,
+      requiredSample,
+      reason: "Waiting for " + requiredSample + " settled eligible picks.",
+      evaluationStatus: "INSUFFICIENT_SAMPLE",
+      proposalStatus: null,
+    });
+  }
+
+  if (opts.evaluating) {
+    return setConfigEvaluationState(league, marketKey, {
+      status: "EVALUATING",
+      sampleCount,
+      requiredSample,
+      reason: "Configuration grid evaluation is running.",
+      evaluationStatus: "EVALUATING",
+    });
+  }
+
+  let best = null;
+  try {
+    best = selectBestConfig(league, marketKey);
+  } catch (e) {
+    return setConfigEvaluationState(league, marketKey, {
+      status: "FAILED",
+      sampleCount,
+      requiredSample,
+      reason: e?.message || String(e),
+      evaluationStatus: "FAILED",
+    });
+  }
+
+  const currentConfig = getTunerConfigSnapshot(league, marketKey);
+  if (!best) {
+    return setConfigEvaluationState(league, marketKey, {
+      status: "NO_CHANGE",
+      sampleCount,
+      requiredSample,
+      reason: "No candidate currently improves the existing configuration under the current grid-selection methodology.",
+      currentConfig,
+      evaluatedSampleCount: sampleCount,
+      evaluationStatus: "NO_CHANGE",
+      proposalStatus: null,
+    });
+  }
+
+  const proposalConfig = decodeTuningGridConfigKey(best.configKey);
+  const promotions = [];
+  const promotionKeys = {
+    h2hFactor: proposalConfig.h2hFactor,
+    recencyWeights: proposalConfig.recencyProfile,
+    paceDampening: proposalConfig.paceDampening,
+    edgeMult: proposalConfig.edgeMult,
+    injuryMult: proposalConfig.injuryMult,
+  };
+  Object.entries(promotionKeys).forEach(([key, val]) => {
+    if (val === undefined || val === null) return;
+    const current = getTunableParam(key, league, marketKey);
+    const same = Array.isArray(val) && Array.isArray(current)
+      ? JSON.stringify(val) === JSON.stringify(current)
+      : Number.isFinite(Number(val)) && Number.isFinite(Number(current))
+        ? Number(val) === Number(current)
+        : String(val) === String(current);
+    if (!same) {
+      promotions.push({
+        key,
+        old: Array.isArray(current) ? current.slice() : current,
+        val: Array.isArray(val) ? val.slice() : val,
+        sampleCount,
+        candidateConfigHash: djb2Hash(best.configKey),
+      });
+    }
+  });
+
+  if (!promotions.length || !(Number(best.netDelta) > 0)) {
+    return setConfigEvaluationState(league, marketKey, {
+      status: "NO_CHANGE",
+      sampleCount,
+      requiredSample,
+      reason: "Grid candidate exists, but it does not produce a positive change from the active configuration.",
+      currentConfig,
+      candidateConfig: proposalConfig,
+      candidateConfigHash: djb2Hash(best.configKey),
+      evaluatedSampleCount: sampleCount,
+      evaluationStatus: "NO_CHANGE",
+      proposalStatus: null,
+    });
+  }
+
+  if (opts.createProposal !== false) {
+    const existing = getStoredGridProposalRaw(league, marketKey);
+    const existingSame =
+      existing &&
+      !existing.applied &&
+      existing.proposalStatus !== "STALE" &&
+      Number(existing.sampleCount) === Number(sampleCount) &&
+      String(existing.marketKey || "").toLowerCase() === String(marketKey || "").toLowerCase() &&
+      String(existing.candidateConfigHash || "") === String(djb2Hash(best.configKey));
+
+    if (!existingSame) {
+      const proposal = createTunerProposalRecord({
+        league,
+        marketKey,
+        promotions,
+        sampleCount,
+        requiredSample,
+        currentConfig,
+        proposedConfig: proposalConfig,
+        reason:
+          "The existing configuration-grid selection produced a positive net delta over the authoritative settled sample; Apply remains manual.",
+        provenance: "retrospective_config_grid",
+      });
+      if (!persistGridProposalRecord(proposal)) {
+        return setConfigEvaluationState(league, marketKey, {
+          status: "FAILED",
+          sampleCount,
+          requiredSample,
+          reason: "Candidate was found but proposal persistence failed.",
+          currentConfig,
+          candidateConfig: proposalConfig,
+          candidateConfigHash: proposal.candidateConfigHash,
+          evaluatedSampleCount: sampleCount,
+          evaluationStatus: "FAILED",
+        });
+      }
+    }
+  }
+
+  const proposal = getStoredGridProposal(league, marketKey);
+  return setConfigEvaluationState(league, marketKey, {
+    status: proposal?.proposalStatus === "STALE" ? "STALE" : "PROPOSAL_READY",
+    sampleCount,
+    requiredSample,
+    proposalId: proposal?.proposalId || null,
+    reason: proposal?.reason || "Candidate configuration is ready for explicit review.",
+    currentConfig,
+    candidateConfig: proposalConfig,
+    candidateConfigHash: djb2Hash(best.configKey),
+    evaluatedSampleCount: sampleCount,
+    evaluationStatus: "PROPOSAL_READY",
+    proposalStatus: proposal?.proposalStatus || "PROPOSAL_READY",
+    createdAt: proposal?.createdAt || new Date().toISOString(),
+  });
+}
+
+function getTunerEligibilityStateForCount(settledCount, requiredSample = TUNER_REQUIRED_SAMPLE) {
+  const n = Number(settledCount) || 0;
+  const r = Number(requiredSample) || TUNER_REQUIRED_SAMPLE;
+  return n < r ? "INSUFFICIENT_SAMPLE" : "ELIGIBLE";
+}
+
+window.__BB_RUN_TUNER_STATE_TESTS__ = function __BB_RUN_TUNER_STATE_TESTS__() {
+  const fails = [];
+  [
+    [0, "INSUFFICIENT_SAMPLE"],
+    [1, "INSUFFICIENT_SAMPLE"],
+    [24, "INSUFFICIENT_SAMPLE"],
+    [25, "ELIGIBLE"],
+    [26, "ELIGIBLE"],
+    [50, "ELIGIBLE"],
+    [100, "ELIGIBLE"],
+  ].forEach(([n, expected]) => {
+    const got = getTunerEligibilityStateForCount(n, 25);
+    if (got !== expected) fails.push(`threshold ${n}: expected ${expected}, got ${got}`);
+  });
+
+  [
+    ["h2hFactor", 0.5, true],
+    ["h2hFactor", 1.0, true],
+    ["h2hFactor", 0.49, false],
+    ["h2hMaxWeight", 0.05, true],
+    ["h2hMaxWeight", 0.5, true],
+    ["h2hMaxWeight", 0.04, false],
+    ["h2hTierInsufficientPenalty", 0.3, true],
+    ["h2hTierInsufficientPenalty", 0.9, true],
+    ["h2hTierInsufficientPenalty", 0.29, false],
+  ].forEach(([key, value, expected]) => {
+    const got = !!validateTunableParamValue(key, value).ok;
+    if (got !== expected) fails.push(`range ${key}=${value}: expected ${expected}, got ${got}`);
+  });
+
+  return { ok: fails.length === 0, fails };
+};
+
+window.getTunerEligibilityStateForCount = getTunerEligibilityStateForCount;
+window.getTunerProposalStatus = getTunerProposalStatus;
 
 /* SECTION 144 — select-best-config */
 function selectBestConfig(league, marketKey) {
@@ -9595,6 +10660,9 @@ function selectBestConfig(league, marketKey) {
     return null;
   }
 
+  const authoritativeSample = getTotalSettledCountForLeagueMarket(league, marketKey);
+  if (authoritativeSample < TUNER_REQUIRED_SAMPLE) return null;
+
   const baselineKey = getCandidateScoreKey({
     h2hFactor: getParam("h2hFactor", league) ?? 1.0,
     recencyProfile: TUNING_GRID.recencyProfiles[0],
@@ -9609,11 +10677,12 @@ function selectBestConfig(league, marketKey) {
       : null;
 
   const qualified = Object.entries(scores)
-    .filter(([, d]) => (d.count || 0) >= 25 && (d.netDelta || 0) > 0)
+    .filter(([, d]) => (d.observations || d.count || 0) >= TUNER_REQUIRED_SAMPLE && (d.netDelta || 0) > 0)
     .map(([key, d]) => ({
       key,
       netDelta: d.netDelta || 0,
       count: d.count || 0,
+      observations: d.observations || d.count || 0,
       efficiency: (d.netDelta || 0) / Math.max(1, d.count || 1),
       brier: (d.brierCount || 0) > 0 ? d.brierSum / d.brierCount : null,
       deltas: Array.isArray(d.deltas) ? d.deltas : [],
@@ -9625,7 +10694,8 @@ function selectBestConfig(league, marketKey) {
   return {
     configKey: best.key,
     netDelta: best.netDelta,
-    sampleCount: best.count,
+    sampleCount: authoritativeSample,
+    candidateObservationCount: best.observations,
     deltas: best.deltas,
   };
 }
@@ -10729,10 +11799,10 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
         p &&
         p.snapshot &&
         p.actualScore != null &&
+        !p.isShadow &&
         (!targetLeague || String(p.league).toLowerCase() === String(targetLeague).toLowerCase()) &&
         (p.resultStatus === "win" ||
-          p.resultStatus === "loss" ||
-          p.resultStatus === "no_play_settled"),
+          p.resultStatus === "loss"),
     )
     .sort((a, b) => getTrackedPickTimeMs(a) - getTrackedPickTimeMs(b));
 
@@ -11013,19 +12083,38 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
 
   if (finalPromotions.length > 0) {
     try {
-      const proposalKey = "BB_TUNER_PROPOSAL_" + (targetLeague || "global");
-      localStorage.setItem(
-        proposalKey,
-        JSON.stringify({
-          league: targetLeague || null,
-          promotions: finalPromotions,
-          seed: _tunerSeed,
-          foldCount: walkForwardFolds.length,
-          totalHypothesesTested: allTestedCandidates.length,
-          ts: new Date().toISOString(),
-          applied: false,
-        }),
-      );
+      const _scopeLeague = targetLeague || null;
+      // Proposal freshness is anchored to the authoritative settled denominator, not the
+      // training fold size used by walk-forward fitting.
+      const _sampleCount = getTotalSettledCountForLeague(_scopeLeague);
+      const _currentConfig = getTunerConfigSnapshot(_scopeLeague, "multi");
+      const _proposedConfig = { ..._currentConfig };
+      finalPromotions.forEach((p) => {
+        _proposedConfig[p.key] = Array.isArray(p.val) ? p.val.slice() : p.val;
+      });
+      const proposal = createTunerProposalRecord({
+        league: _scopeLeague,
+        marketKey: "multi",
+        promotions: finalPromotions.map((p) => ({
+          ...p,
+          key: p.key,
+          old: p.old,
+          val: p.val,
+        })),
+        sampleCount: _sampleCount,
+        requiredSample: TUNER_REQUIRED_SAMPLE,
+        currentConfig: _currentConfig,
+        proposedConfig: _proposedConfig,
+        reason: "Coordinate-ascent walk-forward evaluation produced statistically supported parameter changes.",
+        provenance: "coordinate_ascent_walk_forward",
+      });
+      proposal.seed = _tunerSeed;
+      proposal.foldCount = walkForwardFolds.length;
+      proposal.trainingSampleCount = settled.length;
+      proposal.totalHypothesesTested = allTestedCandidates.length;
+      if (!persistTunerProposalRecord(proposal)) {
+        throw new Error("Failed to persist coordinate-ascent proposal");
+      }
     } catch (e) {
       engineDebug(
         "runCoordinateAscentTuner failed to persist proposal: " + (e?.message || String(e)),
@@ -11051,31 +12140,31 @@ async function runRetrospectiveAnalysis(pick) {
   const isWin = resultStatus === "win";
   if (!isWin && resultStatus !== "loss") return;
 
-  const _isBig5ForRetro = typeof isUsEspnLeague === "function"
-    ? isUsEspnLeague(league)
-    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
-        String(league || "").toLowerCase(),
-      );
-  const _retroMinSettled = _isBig5ForRetro ? 30 : 10;
   const _mktSettled = getTotalSettledCountForLeagueMarket(league, marketKey);
-  if (_mktSettled < _retroMinSettled) {
-    engineDebug("Retrospective skipped: need " + _retroMinSettled + "+ settled picks", {
+  if (_mktSettled < TUNER_REQUIRED_SAMPLE) {
+    setConfigEvaluationState(league, marketKey, {
+      status: "INSUFFICIENT_SAMPLE",
+      sampleCount: _mktSettled,
+      requiredSample: TUNER_REQUIRED_SAMPLE,
+      reason: "Configuration grid requires at least 25 settled eligible picks.",
+      evaluationStatus: "INSUFFICIENT_SAMPLE",
+    });
+    engineDebug("Retrospective skipped: insufficient configuration sample", {
       league,
       marketKey,
       have: _mktSettled,
-      threshold: _retroMinSettled,
+      threshold: TUNER_REQUIRED_SAMPLE,
     });
     return;
   }
 
-  const _lgSettledForGridSkip = getTotalSettledCountForLeague(league);
-  if (_lgSettledForGridSkip >= 100) {
-    engineDebug(
-      "Retrospective TUNING_GRID sweep skipped: league qualifies for gated coordinate-ascent tuner",
-      { league, marketKey, settled: _lgSettledForGridSkip },
-    );
-    return;
-  }
+  setConfigEvaluationState(league, marketKey, {
+    status: "EVALUATING",
+    sampleCount: _mktSettled,
+    requiredSample: TUNER_REQUIRED_SAMPLE,
+    reason: "Configuration grid evaluation is running.",
+    evaluationStatus: "EVALUATING",
+  });
 
   const { parsed, lines, fixtureMeta, injMultA, injMultB, configSnapshot } = snapshot;
   const numericActual = typeof actualForMarket === "function" ? actualForMarket({ marketKey: marketKey, actualScore: actualScore }) : (typeof parseFinalScore === "function" ? parseFinalScore(actualScore).total : parseFloat(actualScore));
@@ -11179,32 +12268,32 @@ async function runRetrospectiveAnalysis(pick) {
             else if (side === "under") wouldWin = numericActual < line;
 
             const delta = wouldWin ? (isWin ? 0 : 1) : isWin ? -1 : 0;
-            if (delta !== 0) {
-              const _edgePct = isFinite(edge) && isFinite(line) && line ? Math.abs(edge / line) : 0;
-              const _volRatio =
-                isFinite(pick.volatility) && isFinite(pick.volLimit) && pick.volLimit > 0
-                  ? Number(pick.volatility) / Number(pick.volLimit)
-                  : NaN;
-              const _sampleTier = pick.sampleTier || "unknown";
-              const _hasH2H = pick.hasH2H || false;
-              const _winProbability = getConfidenceWinProbability(
-                null,
-                _edgePct,
-                _volRatio,
-                _sampleTier,
-                _hasH2H,
-                false,
-                league,
-              );
-              updateCandidateScore(
-                league,
-                marketKey,
-                config,
-                delta,
-                _winProbability,
-                wouldWin ? 1 : 0,
-              );
-            }
+            const _edgePct = isFinite(edge) && isFinite(line) && line ? Math.abs(edge / line) : 0;
+            const _volRatio =
+              isFinite(pick.volatility) && isFinite(pick.volLimit) && pick.volLimit > 0
+                ? Number(pick.volatility) / Number(pick.volLimit)
+                : NaN;
+            const _sampleTier = pick.sampleTier || "unknown";
+            const _hasH2H = pick.hasH2H || false;
+            const _winProbability = getConfidenceWinProbability(
+              null,
+              _edgePct,
+              _volRatio,
+              _sampleTier,
+              _hasH2H,
+              false,
+              league,
+            );
+            // Every eligible settled observation advances the candidate's authoritative
+            // observation count. Delta remains the existing candidate-comparison metric.
+            updateCandidateScore(
+              league,
+              marketKey,
+              config,
+              delta,
+              _winProbability,
+              wouldWin ? 1 : 0,
+            );
           } finally {
             MODEL_TUNING.recencyWeights = _savedRecencyWeightsForSweep;
           }
@@ -11213,86 +12302,35 @@ async function runRetrospectiveAnalysis(pick) {
     }
   }
 
-  const _mktPicks = getTotalSettledCountForLeagueMarket(league, marketKey);
-  const _lgPicks = getTotalSettledCountForLeague(league);
-  const _lockReady = _mktPicks >= 250 || (_lgPicks >= 125 && _mktPicks >= 60);
-  if (_lockReady) {
-    const best = selectBestConfig(league, marketKey);
-    const _bestPassesHeuristic =
-      best &&
-      isFinite(best.netDelta) &&
-      isFinite(best.sampleCount) &&
-      best.sampleCount > 0 &&
-      Math.abs(best.netDelta) > 2 * Math.sqrt(best.sampleCount);
-    const _bestDeltas = best && Array.isArray(best.deltas) ? best.deltas : [];
-    const _bestBootstrap =
-      _bestDeltas.length >= 8
-        ? pairedBootstrapTest(new Array(_bestDeltas.length).fill(0), _bestDeltas, 2000, 11)
-        : { significant: false, p: 1 };
-    const _bestIsSignificant = _bestPassesHeuristic && _bestBootstrap.significant;
-    if (best && _bestIsSignificant) {
-      try {
-        const learnedConfig = buildConfigFromVerifiedKey(best.configKey);
-        if (Array.isArray(learnedConfig?.recencyProfile) && learnedConfig.recencyProfile.length) {
-          try {
-            const propKey =
-              "BB_TUNER_PROPOSAL_RECENCY_" +
-              String(league || "unknown") +
-              "_" +
-              String(marketKey === "h1" ? "h1" : "ft");
-            localStorage.setItem(
-              propKey,
-              JSON.stringify({
-                applied: false,
-                weights: learnedConfig.recencyProfile,
-                configKey: best.configKey,
-                sampleCount: best.sampleCount,
-                netDelta: best.netDelta,
-                source: "retrospective_tuner",
-                updatedAt: new Date().toISOString(),
-              }),
-            );
-
-            
-            if (typeof saveLearnedRecencyWeights === "function") {
-              saveLearnedRecencyWeights(
-                league,
-                marketKey === "h1" ? "h1" : "ft",
-                learnedConfig.recencyProfile,
-                {
-                  applied: false,
-                  configKey: best.configKey,
-                  sampleCount: best.sampleCount,
-                  netDelta: best.netDelta,
-                  source: "retrospective_tuner",
-                },
-              );
-            }
-          } catch (_eProp) {}
-          engineDebug("Learned recency profile proposed + persisted", {
-            league,
-            marketKey,
-            weights: learnedConfig.recencyProfile,
-            configKey: best.configKey,
-          });
-        }
-      } catch (e) {
-        engineDebug("Failed to persist learned recency profile", {
-          league,
-          marketKey,
-          error: e?.message || String(e),
-        });
-      }
-      engineDebug("Retrospective config proposed (not auto-applied — review in Configs panel)", {
-        league,
-        marketKey,
-        configKey: best.configKey,
-        netDelta: best.netDelta,
-        sampleCount: best.sampleCount,
-        bootstrapP: _bestBootstrap.p,
-      });
-    }
+  try {
+    const evaluation = refreshConfigGridEvaluationState(league, marketKey, {
+      createProposal: true,
+    });
+    engineDebug("Configuration grid evaluation state refreshed", {
+      league,
+      marketKey,
+      status: evaluation?.status,
+      sampleCount: evaluation?.sampleCount,
+      requiredSample: evaluation?.requiredSample,
+      proposalId: evaluation?.proposalId || null,
+      candidateConfigHash: evaluation?.candidateConfigHash || null,
+    });
+  } catch (e) {
+    setConfigEvaluationState(league, marketKey, {
+      status: "FAILED",
+      sampleCount: _mktSettled,
+      requiredSample: TUNER_REQUIRED_SAMPLE,
+      reason: e?.message || String(e),
+      evaluationStatus: "FAILED",
+    });
+    engineDebug("Configuration grid evaluation failed", {
+      league,
+      marketKey,
+      error: e?.message || String(e),
+      stack: e?.stack || "no stack",
+    });
   }
+
 }
 
 /* SECTION 166 — save-learned-recency-weights */
@@ -13711,9 +14749,27 @@ function getLearningTrackedPicks() {
     ? AppState.tracker.state.archivedPicks
     : [];
 
-  return [...active, ...archived]
+  // The learning denominator is authoritative tracker state, not visible cards.
+  // De-duplicate the same event/market/side/line slot so an active+archived copy
+  // (or a remote/local merge duplicate) can never train the tuner twice.
+  const unique = new Map();
+  [...active, ...archived]
     .map((p) => ensureTrackedPickKeys(p))
-    .filter((p) => isPickEligibleForLearning(p));
+    .filter((p) => isPickEligibleForLearning(p))
+    .forEach((p) => {
+      const key =
+        (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) ||
+        makeTrackedSignature(p);
+      if (!key) return;
+      const existing = unique.get(key);
+      if (!existing) {
+        unique.set(key, p);
+        return;
+      }
+      unique.set(key, resolveTrackedPick(existing, p));
+    });
+
+  return [...unique.values()];
 }
 
 function getTotalSettledCountForLeague(league) {
@@ -17383,7 +18439,99 @@ function scheduleTrackerSave(delayMs = TRACKER_SAVE_DEBOUNCE_MS) {
   }, delayMs);
 }
 
-async function forceTrackerSaveNow() {
+function getPersistedTrackerCoverageKeys(state = g_trackerState) {
+  const keys = new Set();
+  [...(state?.activePicks || []), ...(state?.archivedPicks || [])].forEach((p) => {
+    const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+    if (k) keys.add(k);
+  });
+  return keys;
+}
+
+function repairMissingTrackerCoverage(expectedPicks = []) {
+  const expected = Array.isArray(expectedPicks)
+    ? expectedPicks.filter((p) => p && p.eventId)
+    : [];
+  if (!expected.length) return { repaired: 0, missing: [], blocked: [] };
+
+  let keys = getPersistedTrackerCoverageKeys(g_trackerState);
+  const missing = expected.filter((p) => {
+    const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+    return k && !keys.has(k);
+  });
+  if (!missing.length) return { repaired: 0, missing: [], blocked: [] };
+
+  const deleted = Array.isArray(g_trackerState?.deletedSignatures)
+    ? g_trackerState.deletedSignatures
+    : [];
+  const blocked = [];
+  const repairable = [];
+  missing.forEach((raw) => {
+    const p = ensureTrackedPickKeys(raw);
+    if (isPickDeleted(p, deleted)) {
+      blocked.push(p);
+      return;
+    }
+    repairable.push(p);
+  });
+
+  if (repairable.length) {
+    const active = Array.isArray(g_trackerState.activePicks) ? g_trackerState.activePicks.slice() : [];
+    const archived = Array.isArray(g_trackerState.archivedPicks) ? g_trackerState.archivedPicks.slice() : [];
+    const activeByKey = new Map(
+      active.map((p) => [makeTrackerActiveMergeKey(p) || makeTrackedSignature(p), p]),
+    );
+    const archivedByKey = new Map(
+      archived.map((p) => [makeTrackerActiveMergeKey(p) || makeTrackedSignature(p), p]),
+    );
+
+    repairable.forEach((p) => {
+      const key = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+      if (!key || activeByKey.has(key) || archivedByKey.has(key)) return;
+      active.unshift(p);
+      activeByKey.set(key, p);
+    });
+
+    // Preserve every newly-required run key before applying the active limit.
+    const protectedKeys = new Set(
+      repairable
+        .map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p))
+        .filter(Boolean),
+    );
+    active.sort((a, b) => {
+      const ak = makeTrackerActiveMergeKey(a) || makeTrackedSignature(a);
+      const bk = makeTrackerActiveMergeKey(b) || makeTrackedSignature(b);
+      const ap = protectedKeys.has(ak) ? 1 : 0;
+      const bp = protectedKeys.has(bk) ? 1 : 0;
+      if (ap !== bp) return bp - ap;
+      return getTrackerPickStamp(b) - getTrackerPickStamp(a);
+    });
+    g_trackerState.activePicks = active.slice(0, TRACKED_PICKS_LIMIT);
+    g_trackerState.archivedPicks = archived.slice(0, TRACKER_ARCHIVED_LIMIT);
+    g_trackerState.updatedAt = new Date().toISOString();
+    rebuildTrackerStats();
+    keys = getPersistedTrackerCoverageKeys(g_trackerState);
+  }
+
+  const stillMissing = expected.filter((p) => {
+    const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+    return k && !keys.has(k);
+  });
+  engineDebug("tracker persistence coverage repair", {
+    expected: expected.length,
+    repaired: expected.length - stillMissing.length - blocked.length,
+    persisted: expected.length - stillMissing.length,
+    missing: stillMissing.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
+    blockedByDeletion: blocked.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
+  });
+  return {
+    repaired: expected.length - stillMissing.length - blocked.length,
+    missing: stillMissing,
+    blocked,
+  };
+}
+
+async function forceTrackerSaveNow(coveragePicks = []) {
   clearTrackerFollowupRefresh();
 
   if (g_trackerSaveTimer) {
@@ -17399,6 +18547,21 @@ async function forceTrackerSaveNow() {
     await flushTrackerSave();
   } catch (err) {
     console.error("[BB Engine] forceTrackerSaveNow failed", err);
+  }
+
+  if (Array.isArray(coveragePicks) && coveragePicks.length) {
+    const coverage = repairMissingTrackerCoverage(coveragePicks);
+    if (coverage.repaired > 0) {
+      try {
+        await saveTrackerStateToLocal();
+        await flushTrackerSave();
+      } catch (err) {
+        engineDebug("tracker coverage repair save failed", {
+          error: err?.message || String(err),
+          repaired: coverage.repaired,
+        });
+      }
+    }
   }
 }
 
@@ -19174,7 +20337,7 @@ function renderConfigsPanel() {
     return parts.join(" · ") || ck;
   }
 
-  const settledPicks = getAllTrackedPicksForReport()
+  const settledPicks = getLearningTrackedPicks()
     .filter((p) => p.resultStatus === "win" || p.resultStatus === "loss")
     .sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a));
 
@@ -19195,9 +20358,10 @@ function renderConfigsPanel() {
           <div class="tracker-analytics-kicker">Configuration Lab</div>
           <div class="tracker-analytics-title">Pick-by-Pick Config Replay</div>
           <div class="tracker-analytics-subtitle">
-            The engine silently tests ${totalCombos} parameter combos on every settled pick in
-            the background. The best config locks in after 25+ settled picks per market and
-            immediately improves future predictions.
+            The engine evaluates ${totalCombos} existing parameter combinations against settled
+            observations. At 25+ eligible settled picks per league/market the grid becomes
+            eligible; evaluation, proposal creation, and Apply are separate states. Nothing is
+            activated automatically.
           </div>
         </div>
       </div>
@@ -19234,6 +20398,48 @@ function renderConfigsPanel() {
     html += `</div></div></div>`;
   }
 
+  const _configMarketsForState = ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b", "winner", "handicap", "handicap_h1", "handicap_h2"];
+  const _configStates = _configMarketsForState
+    .map((mk) => getConfigEvaluationState(selectedLeagueKey !== "unknown" ? selectedLeagueKey : "", mk))
+    .filter((s) => s && (s.sampleCount > 0 || s.status === "PROPOSAL_READY" || s.status === "APPLIED" || s.status === "STALE"));
+
+  if (_configStates.length) {
+    html += `
+      <div class="tracker-analytics-card">
+        <div class="tracker-analytics-card-head">
+          <div class="tracker-analytics-card-title">🧭 Configuration State Machine</div>
+          <div class="tracker-analytics-card-meta">Threshold ${TUNER_REQUIRED_SAMPLE} · explicit Apply</div>
+        </div>
+        <div class="tracker-analytics-card-body">
+          <div class="tracker-insight-list">
+    `;
+    _configStates.forEach((s) => {
+      const stateLabel = String(s.status || "").replace(/_/g, " ");
+      const statusColor =
+        s.status === "PROPOSAL_READY" || s.status === "APPLIED"
+          ? "#49d45f"
+          : s.status === "STALE" || s.status === "FAILED"
+            ? "#d98a00"
+            : "var(--text)";
+      html += `
+        <div class="tracker-insight-item">
+          <div class="tracker-insight-dot ${s.status === "PROPOSAL_READY" || s.status === "APPLIED" ? "" : "warn"}"></div>
+          <div>
+            <div class="tracker-insight-title">${safeText(String(s.marketKey || "").toUpperCase())} · <span style="color:${statusColor};">${safeText(stateLabel)}</span></div>
+            <div class="tracker-insight-text">${safeText(String(s.sampleCount))}/${safeText(String(s.requiredSample))} settled · ${safeText(s.reason || "")}</div>
+            ${s.proposalId ? `<div class="tracker-insight-text" style="color:var(--muted);">Proposal ${safeText(s.proposalId)}</div>` : ""}
+            ${
+              s.status === "PROPOSAL_READY" && selectedLeagueKey !== "unknown"
+                ? `<div style="margin-top:4px;"><button onclick="applyGridProposalFromUI('${safeText(selectedLeagueKey)}','${safeText(s.marketKey)}')" style="background:#3a9c35;color:#fff;border:none;padding:4px 10px;font-weight:800;font-size:10px;cursor:pointer;">✅ Apply</button></div>`
+                : ""
+            }
+          </div>
+        </div>
+      `;
+    });
+    html += `</div></div></div>`;
+  }
+
   html += `
     <div class="tracker-analytics-card">
       <div class="tracker-analytics-card-head">
@@ -19251,15 +20457,7 @@ function renderConfigsPanel() {
   } else {
     html += `<div class="tracker-review-list">`;
 
-    const SETTLED_LOCK_N = 25;
-    const settledCountByMarket = {};
-    settledPicks.forEach((p) => {
-      const k =
-        String(p.league || "").toLowerCase() +
-        "|" +
-        String(p.marketKey || p.marketName || "").toLowerCase().split("<")[0].trim();
-      settledCountByMarket[k] = (settledCountByMarket[k] || 0) + 1;
-    });
+    const SETTLED_LOCK_N = TUNER_REQUIRED_SAMPLE;
 
     settledPicks.slice(0, 40).forEach((pick) => {
       const isWin = pick.resultStatus === "win";
@@ -19270,52 +20468,36 @@ function renderConfigsPanel() {
       const pickTxt = pick.predictionText || "—";
       const line = isFinite(Number(pick.line)) ? pick.line : "—";
       const actual = pick.actualScore != null ? String(pick.actualScore) : "—";
-      const metaKey = (pick.league || "") + "_" + (pick.marketKey || "");
-      const marketCountKey =
-        String(pick.league || "").toLowerCase() +
-        "|" +
-        String(pick.marketKey || pick.marketName || "").toLowerCase().split("<")[0].trim();
-      const settledN = settledCountByMarket[marketCountKey] || 0;
+      const state = getConfigEvaluationState(pick.league, pick.marketKey);
+      const settledN = Number(state.sampleCount || 0);
 
-      const verified = verifiedMap[metaKey];
-      const candidate = candidateMap[metaKey];
+      let configNote = `${String(state.status || "ELIGIBLE").replace(/_/g, " ")} · ${settledN}/${state.requiredSample} settled`;
+      let dotClass = state.status === "PROPOSAL_READY" || state.status === "APPLIED" ? "" : "warn";
 
-      let configNote, dotClass;
-      const _bestAlt = verified || (candidate && candidate.netDelta > 0 ? candidate : null);
-      if (!isWin && _bestAlt) {
-        const _altDelta = isFinite(Number(_bestAlt.netDelta))
-          ? (Number(_bestAlt.netDelta) > 0 ? "+" : "") + Number(_bestAlt.netDelta)
-          : "?";
-        const _altSample = _bestAlt.sampleCount || _bestAlt.count || "?";
-        const _altType = verified ? "🔒 Locked config" : "📈 Best candidate";
-        configNote = `${_altType}: ${describeConfig(_bestAlt.configKey)} — net Δ${_altDelta} over ${_altSample} picks for ALL ${(pick.league || "?").toUpperCase()} ${(pick.marketKey || "?").toUpperCase()} bets (applies league-wide, not just this game)`;
-        dotClass = "warn";
-      } else if (verified) {
-        configNote = `Using locked config: ${describeConfig(verified.configKey)}`;
-        dotClass = "";
-      } else if (candidate && candidate.netDelta > 0) {
-        const deltaStr = (candidate.netDelta > 0 ? "+" : "") + candidate.netDelta;
-        configNote =
-          `Best candidate so far: ${describeConfig(candidate.configKey)} ` +
-          `(Δ${deltaStr} across ${candidate.count} pick${candidate.count !== 1 ? "s" : ""})`;
-        dotClass = "";
-      } else if (!isWin && candidate && candidate.netDelta <= 0) {
-        configNote = `⚠ LOSS — No alt-config found yet that improves on the default for ${pick.league || "?"} ${pick.marketKey || "?"}. Grid needs 25+ settled picks.`;
-        dotClass = "warn";
-      } else if (candidate && candidate.netDelta <= 0) {
-        configNote = `No winning alt-config found yet for ${pick.league || "?"} ${pick.marketKey || "?"}`;
-        dotClass = "warn";
-      } else if (!isWin && pick.snapshot) {
-        configNote = `⚠ LOSS — Config grid still running for ${pick.league || "?"} ${pick.marketKey || "?"}. Best config will surface after 25 settled picks.`;
-        dotClass = "warn";
-      } else if (pick.snapshot) {
-        configNote =
-          `Config grid queued — will surface after 25 settled picks for ` +
-          `${pick.league || "?"} ${pick.marketKey || "?"}`;
+      if (state.status === "INSUFFICIENT_SAMPLE") {
+        configNote = `Configuration evaluation: INSUFFICIENT_SAMPLE — ${settledN}/${state.requiredSample} settled eligible picks`;
         dotClass = "neutral";
-      } else {
-        configNote = `No snapshot captured (pick saved before snapshot tracking was active)`;
+      } else if (state.status === "ELIGIBLE") {
+        configNote = `Configuration evaluation: ELIGIBLE — ${settledN}+ settled picks; evaluation/proposal is separate from Apply`;
         dotClass = "neutral";
+      } else if (state.status === "EVALUATING") {
+        configNote = `Configuration evaluation: EVALUATING — ${settledN} settled picks`;
+        dotClass = "neutral";
+      } else if (state.status === "PROPOSAL_READY") {
+        configNote = `Configuration evaluation: PROPOSAL_READY — candidate configuration ready; Apply remains manual`;
+        dotClass = "";
+      } else if (state.status === "STALE") {
+        configNote = `Configuration evaluation: STALE — ${state.reason || "new samples/config changes require a new evaluation"}`;
+        dotClass = "warn";
+      } else if (state.status === "APPLIED") {
+        configNote = `Configuration evaluation: APPLIED — proposal ${state.proposalId || "recorded"} was explicitly applied`;
+        dotClass = "";
+      } else if (state.status === "NO_CHANGE") {
+        configNote = `Configuration evaluation: NO_CHANGE — ${state.reason || "no candidate currently improves the active configuration"}`;
+        dotClass = "warn";
+      } else if (state.status === "FAILED") {
+        configNote = `Configuration evaluation: FAILED — see Debug`;
+        dotClass = "warn";
       }
 
       html += `
@@ -19389,17 +20571,28 @@ function renderConfigsPanel() {
       },
     ].forEach((row) => {
       if (!row.proposal) return;
+      const _pStatus = row.proposal.proposalStatus || "PROPOSAL_READY";
+      const _isStale = _pStatus === "STALE";
+      const _sampleText = `${Number(row.proposal.sampleCount || 0)}/${Number(row.proposal.requiredSample || TUNER_REQUIRED_SAMPLE)} settled`;
+      const _paramText = row.proposal.promotions
+        .map((p) => `${p.key}: ${p.old}->${p.val}${p.p != null ? ` (bootstrap p=${Number(p.p).toFixed(3)})` : ""}`)
+        .join(", ");
       html += `
         <div class="tracker-review-row">
           <div class="tracker-review-top">
             <div class="tracker-review-area">${row.label}</div>
-            <div class="tracker-review-status candidate">${row.proposal.promotions.length} PARAM(S) PROPOSED</div>
+            <div class="tracker-review-status ${_isStale ? "candidate" : "candidate"}">${safeText(_pStatus.replace(/_/g, " "))}</div>
           </div>
-          <div class="tracker-review-text">${safeText(row.proposal.promotions.map((p) => `${p.key}: ${p.old}->${p.val} (bootstrap p=${(p.p ?? 1).toFixed(3)})`).join(", "))}</div>
+          <div class="tracker-review-text">${safeText(_paramText)}</div>
           <div class="tracker-review-action" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-            <span>Proposed ${safeText(new Date(row.proposal.ts).toLocaleString())}</span>
-            <button onclick="${row.onclick}" style="background:#3a9c35; color:#fff; border:none; padding:4px 10px; font-weight:800; font-size:10px; cursor:pointer;">✅ Apply</button>
+            <span>Proposal ${safeText(String(row.proposal.proposalId || "—"))} · ${safeText(_sampleText)} · Created ${safeText(new Date(row.proposal.ts || row.proposal.createdAt).toLocaleString())}</span>
+            ${
+              _isStale
+                ? `<span style="color:#d98a00;font-weight:900;">STALE — re-evaluate before Apply</span>`
+                : `<button onclick="${row.onclick}" style="background:#3a9c35; color:#fff; border:none; padding:4px 10px; font-weight:800; font-size:10px; cursor:pointer;">✅ Apply</button>`
+            }
           </div>
+          <div style="font-size:9px;color:var(--muted);margin-top:4px;">Scope: ${safeText(row.proposal.scope || row.label)} · Reason: ${safeText(row.proposal.reason || "—")}</div>
         </div>
       `;
     });
@@ -19455,23 +20648,38 @@ function renderConfigsPanel() {
     const _scopeList = _pendingConfidenceProposal.scopes
       .map((s) => `${safeText(s)} (n=${Number(_pendingConfidenceProposal.sampleSizes?.[s] || 0)})`)
       .join(", ");
+    const _confidenceStatus = _pendingConfidenceProposal.status || "PROPOSAL_READY";
+    const _confidenceApplyDisabled = _confidenceStatus === "STALE" || _confidenceStatus === "APPLIED";
     html += `
       <div class="tracker-analytics-card" style="margin-top:12px; border-color:#4ea9ff;">
         <div class="tracker-analytics-card-head" style="background: linear-gradient(90deg, #1a2f4a 0%, #111 100%);">
-          <div class="tracker-analytics-card-title" style="color:#4ea9ff;">🧠 Pending Confidence Model + Calibration</div>
-          <div class="tracker-analytics-card-meta">${_pendingConfidenceProposal.scopes.length} scope(s) proposed</div>
+          <div class="tracker-analytics-card-title" style="color:#4ea9ff;">🧠 Confidence Model + Calibration</div>
+          <div class="tracker-analytics-card-meta">${safeText(_confidenceStatus.replace(/_/g, " "))}</div>
         </div>
         <div class="tracker-analytics-card-body">
           <div class="tracker-review-list">
             <div class="tracker-review-row">
               <div class="tracker-review-top">
-                <div class="tracker-review-area">Win-probability model + Platt calibration</div>
-                <div class="tracker-review-status candidate">REFIT PROPOSED</div>
+                <div class="tracker-review-area">Model: logistic win-probability + Platt calibration</div>
+                <div class="tracker-review-status candidate">${safeText(_confidenceStatus.replace(/_/g, " "))}</div>
               </div>
-              <div class="tracker-review-text">Scopes: ${safeText(_scopeList)}</div>
+              <div class="tracker-review-text">
+                Scope: ${safeText(_scopeList)}<br>
+                Sample: ${safeText(String(_pendingConfidenceProposal.sampleCount))} · Required scoped sample: ${safeText(String(_pendingConfidenceProposal.requiredSample))}<br>
+                Current model version: ${safeText(String(_pendingConfidenceProposal.currentModelVersion || "—"))}<br>
+                Proposed model version: ${safeText(String(_pendingConfidenceProposal.proposedModelVersion || "—"))}<br>
+                Fit sample: ${safeText(String(_pendingConfidenceProposal.fitSampleCount || "—"))} · Holdout sample: ${safeText(String(_pendingConfidenceProposal.holdoutSampleCount || "—"))}<br>
+                Platt provenance: ${safeText(JSON.stringify(_pendingConfidenceProposal.platt || {}))}
+              </div>
               <div class="tracker-review-action" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
-                <span>Applies both the shrunk coefficients and their calibration correction together</span>
-                <button onclick="applyConfidenceModelProposalFromUI()" style="background:#3a9c35; color:#fff; border:none; padding:4px 10px; font-weight:800; font-size:10px; cursor:pointer;">✅ Apply</button>
+                <span>${_pendingConfidenceProposal.proposalId ? "Proposal " + safeText(_pendingConfidenceProposal.proposalId) : "Proposal pending"}</span>
+                ${
+                  _confidenceStatus === "STALE"
+                    ? `<span style="color:#d98a00;font-weight:900;">STALE — re-run calibration</span>`
+                    : _confidenceStatus === "APPLIED"
+                      ? `<span style="color:#49d45f;font-weight:900;">Applied ${safeText(_pendingConfidenceProposal.appliedAt || "—")}</span>`
+                      : `<button onclick="applyConfidenceModelProposalFromUI()" ${_confidenceApplyDisabled ? "disabled" : ""} style="background:#3a9c35; color:#fff; border:none; padding:4px 10px; font-weight:800; font-size:10px; cursor:pointer;">✅ Apply</button>`
+                }
               </div>
             </div>
           </div>
@@ -19496,22 +20704,28 @@ function renderConfigsPanel() {
       selectedLeagueKey !== "unknown"
         ? (g_tunableParamLeagueOverrides?.[selectedLeagueKey]?.[key]?.value ?? "—")
         : "—";
+    const effectiveVal =
+      selectedLeagueKey !== "unknown"
+        ? getTunableParam(key, selectedLeagueKey)
+        : globalVal;
     const range = param.min !== null ? `${param.min} to ${param.max}` : "Vector";
 
-    const leagueVerifiedAt =
+    const lastApplied =
       selectedLeagueKey !== "unknown"
-        ? g_tunableParamLeagueOverrides?.[selectedLeagueKey]?.[key]?.lastVerifiedAt
-        : null;
-    const lastChallenged =
-      leagueVerifiedAt || param.lastVerifiedAt
-        ? new Date(leagueVerifiedAt || param.lastVerifiedAt).toLocaleDateString()
-        : "Never";
+        ? getTunerLastApplied(selectedLeagueKey, key)
+        : getTunerLastApplied(null, key);
+    const lastAppliedText = lastApplied?.appliedAt
+      ? `${new Date(lastApplied.appliedAt).toLocaleDateString()} · ${lastApplied.proposalId || "manual"}`
+      : "Never";
     const globalDisplay = Array.isArray(globalVal)
       ? "[" + globalVal.slice(0, 3).join(",") + ",...]"
       : String(globalVal);
     const leagueDisplay = Array.isArray(leagueOverride)
       ? "[" + leagueOverride.slice(0, 3).join(",") + ",...]"
       : String(leagueOverride);
+    const effectiveDisplay = Array.isArray(effectiveVal)
+      ? "[" + effectiveVal.slice(0, 3).join(",") + ",...]"
+      : String(effectiveVal);
     const hasLeagueOverride = leagueOverride !== "—";
     html += `
       <div class="param-registry-card">
@@ -19526,12 +20740,16 @@ function renderConfigsPanel() {
             <span style="${hasLeagueOverride ? "color:#49d45f;font-weight:900;" : ""}">${safeText(leagueDisplay)}</span>
           </div>
           <div class="param-registry-stat">
+            <strong>Effective</strong>
+            <span style="font-weight:900;">${safeText(effectiveDisplay)}</span>
+          </div>
+          <div class="param-registry-stat">
             <strong>Range</strong>
             <span>${safeText(range)}</span>
           </div>
           <div class="param-registry-stat">
-            <strong>Last</strong>
-            <span>${safeText(lastChallenged)}</span>
+            <strong>Last Applied</strong>
+            <span>${safeText(lastAppliedText)}</span>
           </div>
         </div>
         <div class="param-registry-desc">${safeText(param.description)}</div>
@@ -19557,8 +20775,8 @@ function renderConfigsPanel() {
     html += `
       <div class="tracker-analytics-card" style="margin-top:12px;">
         <div class="tracker-analytics-card-head">
-          <div class="tracker-analytics-card-title">📜 Auto-Tuner Promotion Log</div>
-          <div class="tracker-analytics-card-meta">Last 10 parameter adaptations</div>
+          <div class="tracker-analytics-card-title">📜 Tuner Evaluation / Proposal Log</div>
+          <div class="tracker-analytics-card-meta">Proposals are not active until an explicit Apply succeeds</div>
         </div>
         <div class="tracker-analytics-card-body">
           <div class="tracker-review-list">
@@ -19576,10 +20794,10 @@ function renderConfigsPanel() {
         <div class="tracker-review-row" style="font-size:10px;">
           <div class="tracker-review-top">
             <strong style="color:var(--text);">${safeText(evt.paramKey)}</strong>
-            <span class="tracker-review-status confirmed" style="font-size:8px; padding:2px 4px;">PROMOTED</span>
+            <span class="tracker-review-status candidate" style="font-size:8px; padding:2px 4px;">PROPOSED</span>
           </div>
           <div class="tracker-review-text" style="color:var(--text); margin-top:2px;">
-            Value updated from <strong>${safeText(evt.oldValue)}</strong> to <strong>${safeText(evt.newValue)}</strong> for <strong>${safeText(String(evt.league || "").toUpperCase())}</strong>.
+            Candidate change from <strong>${safeText(evt.oldValue)}</strong> to <strong>${safeText(evt.newValue)}</strong> for <strong>${safeText(String(evt.league || "").toUpperCase())}</strong>. Not active until explicit Apply.
           </div>
           <div style="font-size:8px; color:var(--muted); margin-top:2px;">
             Evidence: ${safeText(_evidenceText)} (OOS) | Brier improvement | ${new Date(evt.ts).toLocaleString()}
@@ -19587,6 +20805,47 @@ function renderConfigsPanel() {
         </div>
       `;
       });
+    html += `
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  let _appliedHistory = [];
+  try {
+    _appliedHistory = JSON.parse(localStorage.getItem(TUNER_APPLY_HISTORY_KEY) || "[]");
+    if (!Array.isArray(_appliedHistory)) _appliedHistory = [];
+  } catch (e) {
+    engineDebug("Tuner apply history load failed", { error: e?.message || String(e) });
+  }
+  if (_appliedHistory.length) {
+    html += `
+      <div class="tracker-analytics-card" style="margin-top:12px;">
+        <div class="tracker-analytics-card-head">
+          <div class="tracker-analytics-card-title">✅ Applied Configuration History</div>
+          <div class="tracker-analytics-card-meta">Verified explicit applications</div>
+        </div>
+        <div class="tracker-analytics-card-body">
+          <div class="tracker-review-list">
+    `;
+    _appliedHistory.slice(-10).reverse().forEach((evt) => {
+      html += `
+        <div class="tracker-review-row" style="font-size:10px;">
+          <div class="tracker-review-top">
+            <strong style="color:var(--text);">${safeText(String(evt.proposalId || "Applied proposal"))}</strong>
+            <span class="tracker-review-status confirmed" style="font-size:8px;padding:2px 4px;">APPLIED</span>
+          </div>
+          <div class="tracker-review-text">
+            ${safeText(String(evt.scope || "global").toUpperCase())} · ${safeText(String(evt.league || "global").toUpperCase())} ·
+            ${safeText(String(evt.marketKey || "multi").toUpperCase())} · sample ${safeText(String(evt.sampleCount || 0))}
+          </div>
+          <div style="font-size:8px;color:var(--muted);margin-top:2px;">
+            ${safeText((evt.parameters || []).map((p) => `${p.key}: ${p.previousValue} → ${p.newValue}`).join(", "))} · ${safeText(new Date(evt.appliedAt).toLocaleString())}
+          </div>
+        </div>
+      `;
+    });
     html += `
           </div>
         </div>
@@ -21279,7 +22538,7 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus) {
   }
 
   rebuildTrackerStats();
-  saveTrackerStateToLocal();
+  await forceTrackerSaveNow([updatedPick]);
   trackerDebug("manual settle applied", {
     league: touchedPick?.league || "",
     eventId: touchedPick?.eventId || "",
@@ -21295,18 +22554,19 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus) {
       const _rKey = "BB_RETRO_SETTLE_COUNT";
       const _rCount = (parseInt(localStorage.getItem(_rKey) || "0", 10) || 0) + 1;
       localStorage.setItem(_rKey, String(_rCount));
-      if (_rCount % 5 === 0) {
-        setTimeout(async () => {
-          try {
-            await runRetrospectiveAnalysis(updatedPick);
-            const _oosResult2 = runOutOfSampleValidation(updatedPick.league);
-            if (_oosResult2) engineDebug("Out-of-sample validation result", _oosResult2);
-            if (typeof renderConfigsPanel === "function") renderConfigsPanel();
-          } catch (err) {
-            engineDebug("Retrospective analysis error", err.message);
-          }
-        }, 100);
-      }
+      // The configuration grid uses the authoritative settled sample directly. Do not
+      // process only every fifth settlement, otherwise a nominal 25-pick threshold
+      // would actually require 125 settlements before the grid has 25 observations.
+      setTimeout(async () => {
+        try {
+          await runRetrospectiveAnalysis(updatedPick);
+          const _oosResult2 = runOutOfSampleValidation(updatedPick.league);
+          if (_oosResult2) engineDebug("Out-of-sample validation result", _oosResult2);
+          if (typeof renderConfigsPanel === "function") renderConfigsPanel();
+        } catch (err) {
+          engineDebug("Retrospective analysis error", err.message);
+        }
+      }, 100);
     } catch (_retroErr) {
       engineDebug("Retrospective analysis outer error", {
         error: _retroErr?.message || String(_retroErr),
@@ -21969,15 +23229,13 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
       const _arKey = "BB_RETRO_SETTLE_COUNT";
       const _arCount = (parseInt(localStorage.getItem(_arKey) || "0", 10) || 0) + 1;
       localStorage.setItem(_arKey, String(_arCount));
-      if (_arCount % 5 === 0) {
-        (async () => {
-          try {
-            await runRetrospectiveAnalysis(pick);
-          } catch (err) {
-            engineDebug("Retrospective analysis error (auto-settle)", err.message);
-          }
-        })();
-      }
+      (async () => {
+        try {
+          await runRetrospectiveAnalysis(pick);
+        } catch (err) {
+          engineDebug("Retrospective analysis error (auto-settle)", err.message);
+        }
+      })();
     } catch (_e) {
       engineDebug("auto-settle retrospective dispatch failed", {
         error: _e?.message || String(_e),
@@ -22002,6 +23260,7 @@ async function refreshTrackedPickResults() {
     }
 
     let changed = false;
+    const changedPicks = [];
     const pendingPicks = allBuckets.filter(
       (p) =>
         p &&
@@ -22141,6 +23400,7 @@ async function refreshTrackedPickResults() {
             pick.settlementSource = "api";
             pick.settledVersion = ENGINE_MODEL_VERSION;
             changed = true;
+            changedPicks.push(pick);
             g_liveGameStatus.delete(pick.eventId);
             trackerDebug("auto-settled pick", {
               eventId: pick.eventId,
@@ -22229,6 +23489,7 @@ async function refreshTrackedPickResults() {
                 pick.settlementSource = "api_period";
                 pick.settledVersion = ENGINE_MODEL_VERSION;
                 changed = true;
+                changedPicks.push(pick);
                 g_liveGameStatus.delete(pick.eventId);
                 g_settlementDebugLog.set(_dbgKey, {
                   pick: `${pick.homeTeam} vs ${pick.awayTeam} · ${pick.marketKey}`,
@@ -22268,7 +23529,7 @@ async function refreshTrackedPickResults() {
     if (changed || archivedChanged) {
       g_trackerState.updatedAt = new Date().toISOString();
       rebuildTrackerStats();
-      await saveTrackerStateToLocal();
+      await forceTrackerSaveNow(changedPicks);
 
       try {
         const _ACCLOG = "bb_engine_accuracy_log";
@@ -30035,14 +31296,19 @@ function meanFromList(values) {
 /* SECTION 326 — calibrate-confidence-model */
 function calibrateConfidenceModel() {
   const currentVersion = getCurrentModelVersion();
-  const allPicks = getAllTrackedPicksForReport().filter(
+  const allPicks = getAllSettledTrackedPicks().filter(
     (p) =>
       p.modelVersion === currentVersion &&
       !p.isShadow &&
-      isFinite(Number(p.edgePct)) &&
-      (p.resultStatus === "win" || p.resultStatus === "loss"),
+      isFinite(Number(p.edgePct)),
   );
-  if (allPicks.length < 150) return;
+  if (allPicks.length < 150) {
+    engineDebug("Confidence calibration skipped: insufficient authoritative settled sample", {
+      settledResults: allPicks.length,
+      requiredResults: 150,
+    });
+    return;
+  }
 
   const _chronoSorted = allPicks
     .slice()
@@ -30358,18 +31624,73 @@ function calibrateConfidenceModel() {
 
   if (Object.keys(models).length) {
     try {
+      const proposalCreatedAt = new Date().toISOString();
+      const totalSettled = allPicks.length;
+      const fitSampleCount = fitPicks.length;
+      const holdoutSampleCount = calPicks.length;
+      const proposedBundleFingerprint = djb2Hash(
+        JSON.stringify({
+          coeff: models,
+          platt: plattCalib,
+          sampleSizes: modelSampleSizes,
+          thresholds,
+          gradeWinRates,
+        }),
+      );
+      const proposalId =
+        "CONF-" +
+        getCurrentModelVersion() +
+        "-" +
+        proposedBundleFingerprint +
+        "-" +
+        Date.now().toString(36);
+      const meta = {
+        proposalVersion: 2,
+        proposalId,
+        status: "PROPOSAL_READY",
+        applied: false,
+        sampleCount: totalSettled,
+        requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
+        fitSampleCount,
+        holdoutSampleCount,
+        currentModelVersion: (() => {
+          try {
+            const live = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE") || "null");
+            return live?.modelVersion || live?.calibrationVersion || "legacy-confidence";
+          } catch (_e) {
+            return "legacy-confidence";
+          }
+        })(),
+        proposedModelVersion: CONFIDENCE_CALIBRATION_VERSION,
+        baseLiveHash: getConfidenceLiveFingerprint(),
+        candidateConfigHash: proposedBundleFingerprint,
+        createdAt: proposalCreatedAt,
+        provenance: "chronological 80/20 fit/holdout confidence calibration with scoped logistic + Platt calibration",
+        scopes: Object.keys(models),
+      };
       localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF_PROPOSED", JSON.stringify(models));
       localStorage.setItem(
         "BB_CONFIDENCE_MODEL_COEFF_N_PROPOSED",
         JSON.stringify(modelSampleSizes),
       );
       localStorage.setItem("BB_PLATT_CALIB_PROPOSED", JSON.stringify(plattCalib));
+      localStorage.setItem(CONFIDENCE_PROPOSAL_META_KEY, JSON.stringify(meta));
     } catch (e) {
       console.error("[BB Engine] Confidence model coefficient proposal save failed", e);
+      engineDebug("Confidence model proposal metadata save failed", {
+        error: e?.message || String(e),
+        stack: e?.stack || "no stack",
+      });
     }
     engineDebug(
       "Confidence model coefficients proposed (not auto-applied — review in Configs panel)",
-      Object.keys(models),
+      {
+        scopes: Object.keys(models),
+        totalSettled: allPicks.length,
+        fitSampleCount: fitPicks.length,
+        holdoutSampleCount: calPicks.length,
+        requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
+      },
     );
   }
 }
@@ -34899,27 +36220,34 @@ async function runEngine() {
       // debounce. Await the local write before allowing the run to finish, then
       // flush the same state to the remote tracker when configured.
       await addTrackedPicks(persistableTrackedPicks);
-      await forceTrackerSaveNow();
+      await forceTrackerSaveNow(persistableTrackedPicks);
 
       // Hard persistence coverage gate: every actionable prediction selected for tracking
-      // must exist in the persisted tracker state before the Run is allowed to complete.
-      // IMPORTANT: intentional NO PLAY/shadow rows are excluded from this denominator.
-      const persistedPickKeys = new Set();
-      [...(g_trackerState.activePicks || []), ...(g_trackerState.archivedPicks || [])].forEach((p) => {
-        const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
-        if (k) persistedPickKeys.add(k);
-      });
+      // must exist in the authoritative persisted tracker state before the Run is allowed
+      // to complete. Intentional NO PLAY/shadow rows are never part of this denominator.
+      const persistedPickKeys = getPersistedTrackerCoverageKeys(g_trackerState);
       const missingTracked = persistableTrackedPicks.filter((p) => {
         const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
         return k && !persistedPickKeys.has(k);
       });
+      const persistedCount = persistableTrackedPicks.length - missingTracked.length;
+      engineDebug("tracker persistence coverage verification", {
+        expectedActionable: persistableTrackedPicks.length,
+        persistedActionable: persistedCount,
+        missingActionableIds: missingTracked.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
+        intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
+      });
       if (missingTracked.length) {
-        const missingSummary = missingTracked.map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`).join(", ");
-        throw new Error(`Tracker persistence coverage failure: ${missingTracked.length}/${persistableTrackedPicks.length} actionable predictions missing after verified save. ${missingSummary}`);
+        const missingSummary = missingTracked
+          .map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`)
+          .join(", ");
+        throw new Error(
+          `Tracker persistence coverage failure: ${missingTracked.length}/${persistableTrackedPicks.length} actionable predictions missing after verified save. ${missingSummary}`,
+        );
       }
       engineDebug("tracked picks durably saved", {
         persistableTrackedPicks: persistableTrackedPicks.length,
-        persistedCoverage: `${persistableTrackedPicks.length}/${persistableTrackedPicks.length}`,
+        persistedCoverage: `${persistedCount}/${persistableTrackedPicks.length}`,
         intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
         trackerStateAfterSave: getTrackerStateDebugScore(g_trackerState),
       });
@@ -34951,14 +36279,42 @@ async function runEngine() {
     }
 
     console.error("[BB Engine] runEngine failed", err);
+    const _runFailureLeague = currentLeagueForRun || "";
+    const _runFailureMarket = g_currentLiveComputeMarket || "";
+    let _runFailureSample = null;
+    try {
+      _runFailureSample =
+        _runFailureLeague && _runFailureMarket
+          ? getTotalSettledCountForLeagueMarket(_runFailureLeague, _runFailureMarket)
+          : null;
+    } catch (_eSample) {}
+    const _runFailureProposal =
+      _runFailureLeague ? getTunerProposalStatus(_runFailureLeague) : null;
     engineDebug("run failed", {
+      timestamp: new Date().toISOString(),
+      build: typeof APP_BUILD_VERSION !== "undefined" ? APP_BUILD_VERSION : "unknown",
+      scope: _runFailureLeague || "unknown",
+      market: _runFailureMarket || "unknown",
+      league: _runFailureLeague || "unknown",
+      sample: _runFailureSample,
+      requiredSample: TUNER_REQUIRED_SAMPLE,
+      configVersion:
+        _runFailureLeague && typeof getLiveConfigFingerprint === "function"
+          ? getLiveConfigFingerprint(_runFailureLeague)
+          : "unknown",
+      proposalId: _runFailureProposal?.proposalId || null,
       error: String(err?.message || err),
       stack: err?.stack || "no stack",
     });
+    if (table) {
+      table.innerHTML =
+        "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
+      table.style.display = "table";
+      showRunError(table, "NO RESULTS — Run failed — see Debug");
+    }
+    setStatusText("Run failed — see Debug", "err");
     // Internal engine errors belong in the debug/error surfaces, not underneath the
-    // prediction output table. Preserve whatever output rows were already rendered.
-    // The global alert/header and engine debug panel remain responsible for surfacing
-    // the diagnostic to the developer without contaminating normal prediction output.
+    // prediction output table. Only the neutral NO RESULTS state is user-facing.
     throw err;
   } finally {
     window.__engineRunInProgress = false;
