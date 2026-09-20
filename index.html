@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14805,6 +14806,33 @@ function setFetchAuditIssues(issues = []) {
   renderHeaderErrorState();
 }
 
+function extractSourceEventTimestamp(eventLike) {
+  const e = eventLike || {};
+  const candidates = [
+    ["startTimestamp", e.startTimestamp],
+    ["timestamp", e.timestamp],
+    ["startTime", e.startTime],
+    ["eventDate", e.eventDate],
+    ["date", e.date],
+    ["gameDate", e.gameDate],
+    ["playedAt", e.playedAt],
+  ];
+  for (const [field, raw] of candidates) {
+    if (raw === null || raw === undefined || raw === "") continue;
+    try {
+      const n = Number(raw);
+      if (Number.isFinite(n) && n > 0) {
+        const ms = n < 100000000000 ? n * 1000 : n;
+        const d = new Date(ms);
+        if (Number.isFinite(d.getTime())) return { value: d.toISOString(), sourceField: field };
+      }
+    } catch (_n) {}
+    const d = new Date(String(raw));
+    if (Number.isFinite(d.getTime())) return { value: d.toISOString(), sourceField: field };
+  }
+  return { value: null, sourceField: null };
+}
+
 function getSelectedFixtureOption() {
   const select = document.getElementById("fixtureSelect");
   if (!select || select.selectedIndex < 0) return null;
@@ -18324,7 +18352,24 @@ function getCurrentFixtureMeta() {
         (normA || normB
           ? `manual-${normA}-vs-${normB}-${new Date().toISOString().slice(0, 10)}`
           : ""),
-    eventDate: matchedOpt ? matchedOpt.dataset.eventDate || "" : autoFetchMeta?.eventDate || "",
+    eventDate: (() => {
+      if (matchedOpt) {
+        const raw = matchedOpt.dataset.eventTimestamp || matchedOpt.dataset.startTimestamp || matchedOpt.dataset.eventDate || "";
+        const r = extractSourceEventTimestamp({ startTimestamp: matchedOpt.dataset.eventTimestamp || matchedOpt.dataset.startTimestamp, eventDate: raw });
+        return r.value || null;
+      }
+      const r = extractSourceEventTimestamp(autoFetchMeta || {});
+      return r.value || null;
+    })(),
+    eventDateAvailable: (() => {
+      const raw = matchedOpt
+        ? (matchedOpt.dataset.eventTimestamp || matchedOpt.dataset.startTimestamp || matchedOpt.dataset.eventDate || "")
+        : (autoFetchMeta?.startTimestamp || autoFetchMeta?.timestamp || autoFetchMeta?.eventDate || "");
+      return !!extractSourceEventTimestamp({ startTimestamp: matchedOpt?.dataset?.eventTimestamp || matchedOpt?.dataset?.startTimestamp, eventDate: raw }).value;
+    })(),
+    eventDateSourceField: matchedOpt
+      ? (matchedOpt.dataset.eventTimestamp ? "startTimestamp" : matchedOpt.dataset.startTimestamp ? "startTimestamp" : matchedOpt.dataset.eventDate ? "eventDate" : null)
+      : (autoFetchMeta?.startTimestamp ? "startTimestamp" : autoFetchMeta?.timestamp ? "timestamp" : autoFetchMeta?.eventDate ? "eventDate" : null),
     homeTeam: matchedOpt ? matchedOpt.dataset.home || teamAName : teamAName,
     awayTeam: matchedOpt ? matchedOpt.dataset.away || teamBName : teamBName,
     homeId: matchedOpt
@@ -23638,6 +23683,64 @@ function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKe
 
 <script>
 
+/* SECTION 278A — confidence-model-provenance */
+function getConfidenceModelProvenance(league) {
+  const result = {
+    modelType: "fallback",
+    fallbackReason: "confidence_model_unavailable",
+    settledResults: 0,
+    requiredResults: 40,
+    resolvedScope: "global",
+  };
+  try {
+    const stored = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
+    if (!stored) {
+      result.fallbackReason = "coefficients_unavailable";
+      return result;
+    }
+    const models = JSON.parse(stored);
+    const _mv = models.modelVersion || models._modelVersion;
+    const _cur = typeof getCurrentModelVersion === "function" ? getCurrentModelVersion() : null;
+    if (_mv && _cur && String(_mv) !== String(_cur)) {
+      result.fallbackReason = "model_version_mismatch";
+      result.resolvedScope = "version_mismatch";
+      return result;
+    }
+    const lk = String(league || "").toLowerCase();
+    const leagueGroup = lk === "nba" ? "nba" : (lk === "ncaa" || lk === "ncaaw" ? "ncaa" : "other");
+    let coeff = null;
+    if (models[lk]) {
+      coeff = models[lk];
+      result.resolvedScope = lk;
+    } else if (models[leagueGroup]) {
+      coeff = models[leagueGroup];
+      result.resolvedScope = leagueGroup;
+    } else {
+      coeff = models.global;
+      result.resolvedScope = "global";
+    }
+    const keys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
+    if (!coeff || !keys.every((k) => Number.isFinite(coeff[k]))) {
+      result.fallbackReason = "coefficients_unfitted";
+      return result;
+    }
+    let nMap = {};
+    try { nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}"); } catch (_e) { nMap = {}; }
+    const n = Number(nMap[result.resolvedScope] || 0);
+    result.settledResults = Number.isFinite(n) && n >= 0 ? n : 0;
+    if (result.settledResults < result.requiredResults) {
+      result.fallbackReason = "insufficient_settled_results";
+      return result;
+    }
+    result.modelType = "logistic";
+    result.fallbackReason = null;
+    return result;
+  } catch (_e) {
+    result.fallbackReason = "confidence_provenance_resolution_failed";
+    return result;
+  }
+}
+
 /* SECTION 279 — get-confidence-grade */
 function getConfidenceGrade(params) {
   const {
@@ -26479,7 +26582,13 @@ async function loadFixturesESPN(league, offset, myToken) {
       opt.dataset.away = awayName;
       opt.dataset.homeId = homeId;
       opt.dataset.awayId = awayId;
-      opt.dataset.eventDate = ev.date || "";
+      const _fixtureTs = extractSourceEventTimestamp(ev);
+      if (_fixtureTs.value) {
+        opt.dataset.eventDate = _fixtureTs.value;
+        opt.dataset.eventTimestamp = String(ev.startTimestamp ?? ev.timestamp ?? "");
+      } else {
+        opt.dataset.eventDate = "";
+      }
       opt.dataset.venueCity = comp?.venue?.address?.city || "";
       opt.dataset.venueState = comp?.venue?.address?.state || "";
       sel.appendChild(opt);
@@ -29265,6 +29374,8 @@ function compute2HProjection({
       isFinite(_modelTotalForH2H2) && isFinite(_h2hTotalForDivergence2)
         ? Math.abs(_h2hTotalForDivergence2 - _modelTotalForH2H2)
         : 0;
+    const _h2PreH2HTotal =
+      isFinite(projA2H) && isFinite(projB2H) ? Number(projA2H) + Number(projB2H) : NaN;
     const hw = getH2HWeight(
       decayH2HA.length,
       decayH2HB.length,
@@ -29299,6 +29410,10 @@ function compute2HProjection({
         ? projB2H * (1 - hw) + avgH2HB * hw
         : projB2H
       : avgH2HB;
+    var _h2H2HContribution = 0;
+    if (isFinite(_h2PreH2HTotal) && isFinite(projA2H) && isFinite(projB2H)) {
+      _h2H2HContribution = (Number(projA2H) + Number(projB2H)) - _h2PreH2HTotal;
+    }
 
     const _aInjAdjBaseline2H =
       avgOrNaN(aS2) *
@@ -29349,8 +29464,12 @@ function compute2HProjection({
     h2Edge,
     projA2H,
     projB2H,
+    h2Method: "independent",
+    h2TargetSource: "compute2HProjection",
     h2SampleTier,
     h2HasH2H,
+    h2hWeightApplied: typeof hw !== "undefined" && isFinite(hw) ? hw : 0,
+    h2hContribution: typeof _h2H2HContribution !== "undefined" ? _h2H2HContribution : 0,
     h2ProjectionOnly: !h2HasH2H && h2SampleTier === "thin",
     h2FullModel: h2SampleTier === "full",
     paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
@@ -32708,6 +32827,13 @@ async function runEngine() {
         sampleTier: h2Calc.h2SampleTier,
         hasH2H: h2Calc.h2HasH2H,
         trap: h2Trap,
+        h2Method: h2Calc.h2Method,
+        h2hWeightApplied: h2Calc.h2hWeightApplied,
+        h2hContribution: h2Calc.h2hContribution,
+        modelType: getConfidenceModelProvenance(league).modelType,
+        fallbackReason: getConfidenceModelProvenance(league).fallbackReason,
+        settledResults: getConfidenceModelProvenance(league).settledResults,
+        requiredResults: getConfidenceModelProvenance(league).requiredResults,
         volatility: h2VolatilityForConf,
         volLimit: getMarketVolLimit(league, "h2"),
         coeffFitted: _coeffFitted,
@@ -33135,6 +33261,23 @@ async function runEngine() {
     });
 
     {
+      // Provenance is attached even to NO PLAY rows so every prediction record
+      // states which probability model was actually available.
+      finalPicksForDisplay.forEach((p) => {
+        if (!p) return;
+        const _modelProv = getConfidenceModelProvenance(p.league || league);
+        p.modelType = _modelProv.modelType;
+        p.fallbackReason = _modelProv.fallbackReason;
+        p.settledResults = _modelProv.settledResults;
+        p.requiredResults = _modelProv.requiredResults;
+        p.modelScope = _modelProv.resolvedScope;
+        p.trapEffectMethod = _modelProv.modelType === "logistic"
+          ? "confidence_model_feature"
+          : "informational_only_for_fallback";
+      });
+    }
+
+    {
       finalPicksForDisplay.forEach((p) => {
         const _isMarginMarketForWinProb =
           p.marketKey === "winner" ||
@@ -33208,6 +33351,15 @@ async function runEngine() {
           }
           // Manual mode: injury-feed failures never cap winProbability.
           p.winProbability = _lockWinProb;
+          const _modelProv = getConfidenceModelProvenance(p.league || league);
+          p.modelType = _modelProv.modelType;
+          p.fallbackReason = _modelProv.fallbackReason;
+          p.settledResults = _modelProv.settledResults;
+          p.requiredResults = _modelProv.requiredResults;
+          p.modelScope = _modelProv.resolvedScope;
+          p.trapEffectMethod = _modelProv.modelType === "logistic"
+            ? "confidence_model_feature"
+            : "informational_only_for_fallback";
           // F-11: grade must remain f(winProb). Re-resolve after intel/confidence shifts.
           if (Number.isFinite(_lockWinProb) && typeof resolveConfidenceGradeFromWinProbability === "function") {
             const _syncedGrade = resolveConfidenceGradeFromWinProbability(_lockWinProb, p.league || league, p.marketKey);
@@ -33277,6 +33429,105 @@ async function runEngine() {
     if (typeof suppressCorrelatedHalfPlays === "function") {
       /* SECTION 347 — run-engine-suppress-correlated */
       suppressCorrelatedHalfPlays(finalPicksForDisplay);
+    }
+
+    /* SECTION 347A — final-prediction-integrity */
+    function validateFinalPredictionIntegrity(picks, meta, leagueKey) {
+      const errors = [];
+      const warnings = [];
+      const rows = Array.isArray(picks) ? picks : [];
+      const finite = (v) => Number.isFinite(Number(v));
+      const prov = getConfidenceModelProvenance(leagueKey);
+      if (!meta || !meta.homeTeam || !meta.awayTeam) {
+        errors.push("teams/events not identified");
+      }
+      if (!leagueKey) errors.push("league missing");
+      rows.forEach((p) => {
+        if (!p || !p.marketKey) return;
+        const key = String(p.marketKey);
+        if (p.pick === "NO PLAY") return;
+        if (!finite(p.proj) || !finite(p.edge)) errors.push(key + ": non-finite target/edge");
+        if (key === "h2") {
+          if ((p.h2Method || h2Calc?.h2Method || "independent") !== "independent") {
+            errors.push("h2: undocumented calculation method");
+          }
+          const expectedRawEdge = finite(p.proj) && finite(p.line) ? Number(p.proj) - Number(p.line) : NaN;
+          const expectedEdge = finite(expectedRawEdge) && typeof applyEdgeMult === "function"
+            ? applyEdgeMult(expectedRawEdge, leagueKey)
+            : expectedRawEdge;
+          if (finite(expectedEdge) && Math.abs(Number(p.edge) - Number(expectedEdge)) > 0.000001) {
+            errors.push("h2: edge does not derive from displayed target/line path");
+          }
+          if (p.h2Method === "derived" && finite(ftCalc.ftProj) && finite(h1Calc.h1Proj) &&
+              Math.abs(Number(p.proj) - (Number(ftCalc.ftProj) - Number(h1Calc.h1Proj))) > 0.01) {
+            errors.push("h2: derived target violates FT-H1");
+          }
+        }
+        if (!["logistic", "fallback"].includes(String(p.modelType || ""))) {
+          errors.push(key + ": modelType missing/invalid");
+        }
+        if (p.modelType === "logistic" && Number(p.settledResults) < Number(p.requiredResults || 40)) {
+          errors.push(key + ": logistic model below required sample");
+        }
+        if (p.modelType === "fallback" && !p.fallbackReason) {
+          errors.push(key + ": fallback reason missing");
+        }
+        if (key.startsWith("q") && finite(p.proj)) {
+          // Quarter/FT reconciliation is diagnostic only; never mutate quarter targets here.
+          const qTotal = [1,2,3,4].map(n => rows.find(x => x.marketKey === "q"+n)?.proj)
+            .every(finite)
+            ? [1,2,3,4].reduce((s,n) => s + Number(rows.find(x => x.marketKey === "q"+n).proj), 0)
+            : NaN;
+          if (finite(qTotal) && finite(ftCalc.ftProj)) {
+            const gap = qTotal - Number(ftCalc.ftProj);
+            if (Math.abs(gap) > _Q_GAP_WARN) warnings.push("quarter/FT gap exceeds warning threshold: " + gap.toFixed(2));
+          }
+        }
+      });
+      const h2Row = rows.find((x) => x && x.marketKey === "h2");
+      if (h2Row && h2Row.pick !== "NO PLAY" && h2Row.h2Method === "independent") {
+        // Independent H2 is intentionally not required to equal FT-H1.
+        const independentGap = finite(ftCalc.ftProj) && finite(h1Calc.h1Proj) && finite(h2Row.proj)
+          ? Number(ftCalc.ftProj) - Number(h1Calc.h1Proj) - Number(h2Row.proj)
+          : NaN;
+        if (finite(independentGap) && Math.abs(independentGap) > getReconGapThreshold(ftCalc.ftProj)) {
+          warnings.push("independent FT/H1/H2 gap exceeds reconciliation warning threshold: " + independentGap.toFixed(2));
+        }
+      }
+      const eventDateAvailable = !!(meta && meta.eventDate);
+      if (!eventDateAvailable) warnings.push("event timestamp/date unavailable; retained as null metadata");
+      return {
+        ok: errors.length === 0,
+        errors,
+        warnings,
+        modelType: prov.modelType,
+        requiredResults: prov.requiredResults,
+        eventDateAvailable,
+      };
+    }
+
+    const _finalIntegrity = validateFinalPredictionIntegrity(finalPicksForDisplay, fixtureMeta, league);
+    window.__lastPredictionIntegrity = _finalIntegrity;
+    if (typeof engineDebug === "function") engineDebug("FINAL PREDICTION INTEGRITY", _finalIntegrity);
+    if (!_finalIntegrity.ok) {
+      finalPicksForDisplay.forEach((p) => {
+        if (!p) return;
+        p.pick = "NO PLAY";
+        p.displayPick = "NO PLAY";
+        p.bufferedPickText = "NO PLAY";
+        p.confidence = "NaN";
+        p.isLock = false;
+        p.lockRestricted = true;
+        p.note = "Validation error: " + _finalIntegrity.errors.join(" | ");
+        p.validationStatus = "ERROR";
+        p.validationErrors = _finalIntegrity.errors.slice();
+      });
+    } else {
+      finalPicksForDisplay.forEach((p) => {
+        if (!p) return;
+        p.validationStatus = _finalIntegrity.warnings.length ? "WARNING" : "PASS";
+        p.validationWarnings = _finalIntegrity.warnings.slice();
+      });
     }
 
     /* SECTION 348 — run-engine-select-lock */
@@ -33969,11 +34220,14 @@ async function runEngine() {
           mode: "independent_no_rescale",
           ftProjAnchor: ftCalc.ftProj,
           quarterScalingFormula:
-            "Independent quarter projections (FIX #39 / F-01): NO rescale of Q1+Q2→H1 or Q3+Q4→H2/FT. Gaps Q1+Q2 vs H1, Q3+Q4 vs H2, and sum(Q) vs FT are diagnostic only (warn when |gap| > _Q_GAP_WARN=8). H1 comes from compute1HProjection; H2=FT−H1 for half-market math only; quarters remain unscaled.",
+            "Independent quarter projections (FIX #39 / F-01): NO rescale of Q1+Q2→H1 or Q3+Q4→H2/FT. Gaps Q1+Q2 vs H1, Q3+Q4 vs H2, and sum(Q) vs FT are diagnostic only (warn when |gap| > _Q_GAP_WARN=8). H1 comes from compute1HProjection; H2 comes from compute2HProjection as an independent model; quarters remain unscaled.",
           h1TetheredToQSumFormula:
             "REMOVED (FIX #39): h1Proj is authoritative from compute1HProjection and is no longer overwritten by q1.proj + q2.proj",
+          h2Method: h2Calc?.h2Method || "independent",
+          h2TargetSource: h2Calc?.h2TargetSource || "compute2HProjection",
           finalH1Proj: h1Calc.h1Proj,
           finalFTProj: ftCalc.ftProj,
+          finalH2Proj: h2Calc.h2Proj,
           h1FTRatio:
             isFinite(h1Calc.h1Proj) && isFinite(ftCalc.ftProj)
               ? (h1Calc.h1Proj / ftCalc.ftProj).toFixed(4)
@@ -34127,6 +34381,10 @@ async function runEngine() {
                 fullModel: !!row.fullModel,
                 trap: !!row.trap,
                 hasH2H: !!row.hasH2H,
+                modelType: row.modelType || getConfidenceModelProvenance(row.league || league).modelType,
+                fallbackReason: row.fallbackReason || getConfidenceModelProvenance(row.league || league).fallbackReason,
+                settledResults: Number.isFinite(Number(row.settledResults)) ? Number(row.settledResults) : getConfidenceModelProvenance(row.league || league).settledResults,
+                requiredResults: Number.isFinite(Number(row.requiredResults)) ? Number(row.requiredResults) : 40,
                 marketKey: key,
                 finalGrade: (typeof auditFinalGradeSentinel === "function"
                   ? auditFinalGradeSentinel(row.confidence, row.pick)
@@ -34230,12 +34488,17 @@ async function runEngine() {
           q34Sum: (Number.isFinite(rawQ34Sum) ? rawQ34Sum : null),
           h1Target: (Number.isFinite(h1Target) ? h1Target : null),
           h2Target: (Number.isFinite(h2Target) ? h2Target : null),
+          h2Method: h2Calc?.h2Method || "independent",
+          h2TargetSource: h2Calc?.h2TargetSource || "compute2HProjection",
         },
       },
       eventDateIntegrity: {
         present: !!(fixtureMeta && fixtureMeta.eventDate),
+        available: !!(fixtureMeta && fixtureMeta.eventDate),
         value: fixtureMeta?.eventDate || null,
-        requiredForManualAudit: true,
+        sourceField: fixtureMeta?.eventDateSourceField || null,
+        requiredForManualAudit: false,
+        missingDateIsPredictionError: false,
       },
       reproducibility: {
         modelGradeA_Threshold: _aud_gradeThresholds.aThresh,
