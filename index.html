@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5633,8 +5632,7 @@ async function searchSofascorePlayer(side) {
   const rawName = (nameEl?.value || mainEl?.value || "").trim();
   const existingId = (idEl?.value || "").trim();
 
-  // If an ID is already present, do not call the fragile name-search endpoint.
-  // Go directly through the existing team-events path used by the engine.
+  // An existing numeric ID is authoritative. Never make the user search again.
   if (/^[0-9]+$/.test(existingId)) {
     try {
       if (st) {
@@ -5644,9 +5642,7 @@ async function searchSofascorePlayer(side) {
       if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
 
       const events = await ssFetchTeamLastEvents(existingId);
-      if (!events.length) {
-        throw new Error("No usable SofaScore events returned for team ID " + existingId);
-      }
+      if (!events.length) throw new Error("No usable SofaScore events returned for team ID " + existingId);
 
       const prevEvents = side === "A" ? window.__lastEventsA || [] : window.__lastEventsB || [];
       const mergedMap = new Map();
@@ -5660,7 +5656,6 @@ async function searchSofascorePlayer(side) {
       else window.__lastEventsB = mergedEvents;
 
       reprocessBothTeamsFromEvents();
-
       if (st) {
         st.style.color = "#2f8f4a";
         st.textContent =
@@ -5677,9 +5672,7 @@ async function searchSofascorePlayer(side) {
       });
       if (st) {
         st.style.color = "#d92d2a";
-        st.textContent =
-          "❌ Could not load Team " + side + " from SofaScore ID " + existingId +
-          ". Check Debug or verify the ID.";
+        st.textContent = "❌ Could not load Team " + side + " from SofaScore ID " + existingId + ". Check Debug.";
       }
       if (typeof triggerGlobalEngineAlert === "function") {
         triggerGlobalEngineAlert("SofaScore Team " + side + " lookup failed");
@@ -5692,60 +5685,136 @@ async function searchSofascorePlayer(side) {
     alert("Enter a player/team name first.");
     return;
   }
-
   const searchName = rawName.split(",")[0].trim();
   if (!searchName) {
     alert("Enter a player/team name first.");
     return;
   }
 
+  const leagueSelect = document.getElementById("leagueSelect")?.value || "";
   if (st) {
     st.style.color = "#d98a00";
-    st.textContent = "🔍 Searching SofaScore basketball teams for " + searchName + "…";
+    st.textContent = "🔍 Finding " + searchName + " automatically…";
+  }
+
+  // SofaScore's search service can transiently return 404/empty responses in Safari.
+  // The old engine relied on the user manually reloading the API page. Do that recovery
+  // inside the engine instead: retry the primary route, then use compatible search routes,
+  // merge all candidates, and only then report a real failure.
+  const searchUrls = [
+    "https://api.sofascore.com/api/v1/search/teams/?q=" + encodeURIComponent(searchName) + "&page=0",
+    "https://api.sofascore.com/api/v1/search/teams/?q=" + encodeURIComponent(searchName) + "&page=1",
+    "https://api.sofascore.com/api/v1/search/all/?q=" + encodeURIComponent(searchName) + "&page=0",
+    "https://api.sofascore.com/api/v1/search/player-team-persons/?q=" + encodeURIComponent(searchName) + "&page=0",
+  ];
+
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const candidateMap = new Map();
+  const attempts = [];
+
+  for (let u = 0; u < searchUrls.length; u++) {
+    const url = searchUrls[u];
+    let lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (st) {
+          st.style.color = "#d98a00";
+          st.textContent =
+            "🔍 Searching SofaScore automatically… " + attempt + "/3" +
+            (u > 0 ? " (fallback " + u + ")" : "");
+        }
+        const parsed = await proxyFetch(url);
+        const teams = ssCollectSearchTeams(parsed);
+        teams.forEach((team) => {
+          if (team && team.id != null) candidateMap.set(String(team.id), team);
+        });
+        if (teams.length) attempts.push({ url, attempt, count: teams.length, ok: true });
+        else attempts.push({ url, attempt, count: 0, ok: true });
+
+        // Once a route returns actual team candidates, do not hammer the remaining routes.
+        if (candidateMap.size) break;
+      } catch (err) {
+        lastErr = err;
+        attempts.push({ url, attempt, ok: false, error: err?.message || String(err) });
+        if (attempt < 3) await sleep(350 * attempt);
+      }
+    }
+    if (candidateMap.size) break;
+    if (u < searchUrls.length - 1) await sleep(250);
+    if (lastErr) engineDebug("SofaScore search route retry", { side, query: searchName, url, error: lastErr?.message || String(lastErr) });
+  }
+
+  const teams = Array.from(candidateMap.values());
+  const picked = ssPickTeamFromSearch(teams, leagueSelect);
+  if (!picked) {
+    engineDebug("SofaScore team search failed after automatic retries", {
+      side,
+      query: searchName,
+      attempts,
+      candidateCount: teams.length,
+    });
+    if (st) {
+      st.style.color = "#d92d2a";
+      st.textContent =
+        "❌ SofaScore could not resolve " + searchName + " automatically. Open Debug for the failed routes.";
+    }
+    if (typeof triggerGlobalEngineAlert === "function") {
+      triggerGlobalEngineAlert("SofaScore search failed for " + searchName);
+    }
+    return;
+  }
+
+  // Prefer the selected league/gender candidate, then use the same existing lock-and-fetch path.
+  const nameTarget = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
+  const mainTarget = document.getElementById(side === "A" ? "teamAName" : "teamBName");
+  if (nameTarget) nameTarget.value = picked.name || searchName;
+  if (mainTarget && picked.name) mainTarget.value = picked.name;
+  if (idEl) idEl.value = picked.id;
+  if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
+
+  if (st) {
+    st.style.color = "#d98a00";
+    st.textContent = "✅ Found " + picked.name + " (SofaScore " + picked.id + ") — loading games automatically…";
   }
 
   try {
-    // SofaScore's team-search route uses a trailing slash and page parameter.
-    // Sport filtering is applied to the returned results by ssPickTeamFromSearch().
-    const searchUrl =
-      "https://api.sofascore.com/api/v1/search/teams/?q=" +
-      encodeURIComponent(searchName) +
-      "&page=0";
-    const parsed = await proxyFetch(searchUrl);
+    const events = await ssFetchTeamLastEvents(picked.id);
+    if (!events.length) throw new Error("Team found but no usable last events returned for ID " + picked.id);
 
-    const applied = await ssApplySearchPaste(side, parsed, st);
-    if (!applied || !applied.resolvedTeam) {
-      throw new Error("No matching SofaScore basketball team found for " + searchName);
-    }
+    const prevEvents = side === "A" ? window.__lastEventsA || [] : window.__lastEventsB || [];
+    const mergedMap = new Map();
+    [...prevEvents, ...events].forEach((ev) => {
+      if (ev && ev.id != null) mergedMap.set(ev.id, ev);
+    });
+    const mergedEvents = Array.from(mergedMap.values()).sort(
+      (a, b) => (b.startTimestamp || 0) - (a.startTimestamp || 0),
+    );
+    if (side === "A") window.__lastEventsA = mergedEvents;
+    else window.__lastEventsB = mergedEvents;
 
-    if (applied.events && applied.events.length) {
-      const prevEvents = side === "A" ? window.__lastEventsA || [] : window.__lastEventsB || [];
-      const mergedMap = new Map();
-      [...prevEvents, ...applied.events].forEach((ev) => {
-        if (ev && ev.id != null) mergedMap.set(ev.id, ev);
-      });
-      const mergedEvents = Array.from(mergedMap.values()).sort(
-        (a, b) => (b.startTimestamp || 0) - (a.startTimestamp || 0),
-      );
-      if (side === "A") window.__lastEventsA = mergedEvents;
-      else window.__lastEventsB = mergedEvents;
-      reprocessBothTeamsFromEvents();
+    reprocessBothTeamsFromEvents();
+    if (st) {
+      st.style.color = "#2f8f4a";
+      st.textContent =
+        "✅ " + picked.name + " resolved automatically (ID " + picked.id + ") and " +
+        events.length + " recent event" + (events.length === 1 ? " was" : "s were") + " loaded.";
     }
   } catch (err) {
-    engineDebug("SofaScore team search failed", {
+    engineDebug("SofaScore team found but event fetch failed", {
       side,
       query: searchName,
+      teamId: picked.id,
+      teamName: picked.name,
       error: err?.message || String(err),
       stack: err?.stack || "",
     });
     if (st) {
       st.style.color = "#d92d2a";
       st.textContent =
-        "❌ SofaScore team search failed for " + searchName +
-        ". Enter the team's numeric SofaScore ID and try again.";
+        "❌ " + picked.name + " was found (ID " + picked.id + ") but its games could not be loaded. The search itself succeeded.";
     }
     if (typeof triggerGlobalEngineAlert === "function") {
-      triggerGlobalEngineAlert("SofaScore search failed for " + searchName);
+      triggerGlobalEngineAlert("SofaScore event fetch failed for " + picked.name);
     }
   }
 }
