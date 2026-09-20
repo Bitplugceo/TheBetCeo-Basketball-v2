@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4636,8 +4637,8 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v25_integrity_harden_20260920_persistence_confidence_venue_v2";
-window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260920_persistence_confidence_venue_v2";
+const APP_BUILD_VERSION = "v25_integrity_harden_20260920_persistence_confidence_venue_v3";
+window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260920_persistence_confidence_venue_v3";
 window.__BB_CLEAR_STALE_REPLAY_SNAPSHOTS__ = function __BB_CLEAR_STALE_REPLAY_SNAPSHOTS__() {
   try {
     const want = String(window.__BB_INTEGRITY_BUILD__ || "");
@@ -10192,10 +10193,12 @@ function computeQuarterProjection({
       const qProj = projA + projB;
       let qEdge = Number.isFinite(lineVal) ? qProj - lineVal : NaN;
       if (Number.isFinite(qEdge) && typeof applyEdgeMult === "function") qEdge = applyEdgeMult(qEdge, league);
-      const qPick = getPick(qEdge, lineVal, league, qKey, { aSc: avgOrNaN(aS), bSc: avgOrNaN(bS), _edgeAlreadyScaled: true });
+      const qPick = skipPickAndGrade
+        ? "NO PLAY"
+        : getPick(qEdge, lineVal, league, qKey, { aSc: avgOrNaN(aS), bSc: avgOrNaN(bS), _edgeAlreadyScaled: true });
 
-      const qTrap = detectTrap(qEdge, lineVal, qPick, league, qKey, qCombinedVolPts);
-      const qConf = getConfidenceGrade({
+      const qTrap = skipPickAndGrade ? false : detectTrap(qEdge, lineVal, qPick, league, qKey, qCombinedVolPts);
+      const qConf = skipPickAndGrade ? "NaN" : getConfidenceGrade({
         pick: qPick,
         line: lineVal,
         edge: qEdge,
@@ -13458,7 +13461,7 @@ async function loadTrackerStateFromLocal() {
   }
 }
 
-async function saveTrackerStateToLocal() {
+async function _saveTrackerStateToLocalUnsafe() {
   try {
     const reconciled = reconcileTrackerBucketConflicts(
       AppState.tracker.state.activePicks,
@@ -13470,7 +13473,6 @@ async function saveTrackerStateToLocal() {
     rebuildTrackerStats();
 
     const payload = JSON.stringify(AppState.tracker.state);
-
     const primaryKey = getTrackerLocalStateStableKey();
     if (!primaryKey) {
       throw new Error("Local storage write completely failed (no valid storage key).");
@@ -13480,6 +13482,15 @@ async function saveTrackerStateToLocal() {
     if (writeResult === false) {
       throw new Error("Local storage write completely failed (Quota Exceeded or Blocked).");
     }
+
+    // Mandatory read-after-write verification. A successful API/transaction callback is
+    // not sufficient: the exact tracker payload must be readable from the persistence layer.
+    const stored = await readAsyncStorage(primaryKey);
+    const storedPayload = typeof stored === "string" ? stored : JSON.stringify(stored);
+    if (!storedPayload || storedPayload !== payload) {
+      throw new Error("Tracker persistence verification failed: stored payload does not exactly match the committed payload.");
+    }
+
     try {
       const _verifyDb = await initBBDatabase();
       const _isInDB = await new Promise((res) => {
@@ -13488,28 +13499,36 @@ async function saveTrackerStateToLocal() {
         _vtx.onerror = () => res(false);
       }).catch(() => false);
       if (!_isInDB) {
-        trackerDebug(
-          "WARN: IndexedDB write failed — fell back to localStorage. Check storage quota.",
-        );
+        trackerDebug("WARN: IndexedDB write not present; verified fallback storage payload instead.");
       }
     } catch (_verifyErr) {
       engineDebug("IndexedDB verify step failed", {
         error: _verifyErr?.message || String(_verifyErr),
       });
     }
+    return true;
   } catch (err) {
     console.error("[BB Engine] saveTrackerStateToLocal async failed", err);
     engineDebug("CRITICAL: Local storage failed. Data loss imminent.", String(err));
     triggerGlobalEngineAlert(
-      "STORAGE FAILURE: Your device cannot save tracker data. Ensure Private Browsing is off and storage is not full.",
+      "STORAGE FAILURE: Tracker data was not verified as saved. Ensure Private Browsing is off and storage is not full.",
     );
 
     const runBtn = document.getElementById("runBtn");
     if (runBtn) {
-      runBtn.title = "⚠ Storage failed — data may not save";
+      runBtn.title = "⚠ Storage verification failed — data was not confirmed saved";
       runBtn.style.outline = "2px solid #d91f26";
     }
+    throw err;
   }
+}
+
+// Every local persistence operation enters one FIFO chain. This closes the race where
+// watchdog/visibility/Run saves could overwrite one another out of order.
+async function saveTrackerStateToLocal() {
+  const task = g_trackerLocalSaveChain.then(() => _saveTrackerStateToLocalUnsafe());
+  g_trackerLocalSaveChain = task.catch(() => {});
+  return task;
 }
 
 function getTrackerHeaders(includeJson = false) {
@@ -14055,6 +14074,9 @@ let g_refreshTrackedPicksInFlight = false;
 let g_trackerSaveVersion = 0;
 let g_trackerPersistedVersion = 0;
 let g_trackerSaveInFlight = false;
+// Persistence is serialized: no overlapping local/remote tracker writes may run concurrently.
+let g_trackerLocalSaveChain = Promise.resolve();
+let g_trackerFlushChain = Promise.resolve();
 let g_trackerModalView = "picks";
 const TRACKER_DEBUG_LIMIT = 40;
 let g_trackerDebugLog = [];
@@ -15643,14 +15665,18 @@ function lockFrom(startId) {
 /* SECTION 196 — parse-market-line */
 function parseMarketLine(val) {
   const meta = parseMarketRangeMeta(val);
-  return meta ? meta.mid : null;
+  if (!meta || meta.invalid) return null;
+  if (!Number.isFinite(meta.mid) || meta.mid <= 0) return null;
+  return meta.mid;
 }
 
 /* SECTION 197 — apply-smart-line-to-pick */
-function applySmartLineToPick(pickRow, rawInput, league) {
-  
+function applySmartLineToPick(pickRow, rawInput, league, wideRangeState = null) {
   if (!pickRow) return pickRow;
-  const meta = typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(rawInput) : null;
+  const meta =
+    wideRangeState && wideRangeState.marketKey === String(pickRow.marketKey || "")
+      ? wideRangeState.rangeMeta || null
+      : (typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(rawInput) : null);
   let next = {
     ...pickRow,
     decisionLine: pickRow.line,
@@ -15661,64 +15687,138 @@ function applySmartLineToPick(pickRow, rawInput, league) {
     bufferedPickText: pickRow.pick,
     smartLineMeta: meta,
   };
-  next = applyWideRangeLineGate(next, rawInput, league);
+
+  // The wide-range decision is made once, before normal pick/grade generation.
+  // Here we only attach the already-authoritative result to the output row.
+  if (wideRangeState) {
+    Object.assign(next, {
+      rangeInput: wideRangeState.rangeInput ?? null,
+      rangeLow: wideRangeState.rangeLow ?? null,
+      rangeHigh: wideRangeState.rangeHigh ?? null,
+      rangeMidpoint: wideRangeState.rangeMidpoint ?? null,
+      rangeWidth: wideRangeState.rangeWidth ?? null,
+      wideRangeThreshold: wideRangeState.wideRangeThreshold ?? null,
+      wideRangeBlocked: !!wideRangeState.wideRangeBlocked,
+      wideRangeReason: wideRangeState.wideRangeReason ?? null,
+      marketInputInvalid: !!wideRangeState.marketInputInvalid,
+      marketInputInvalidReason: wideRangeState.marketInputInvalidReason ?? null,
+      wideRangeGateApplied: !!wideRangeState.gateApplied,
+      wideRangeGateVersion: wideRangeState.gateVersion || "v1",
+    });
+    if (wideRangeState.wideRangeBlocked || wideRangeState.marketInputInvalid) {
+      next.pick = "NO PLAY";
+      next.displayPick = "NO PLAY";
+      next.bufferedPickText = "NO PLAY";
+      next.confidence = "NaN";
+      next.isLock = false;
+      next.lockRestricted = true;
+      next.note = wideRangeState.wideRangeReason || wideRangeState.marketInputInvalidReason || next.note || null;
+    }
+  }
   return next;
 }
 
 /* SECTION 198 — parse-market-range-meta */
 function parseMarketRangeMeta(val) {
-  if (!val || !String(val).trim()) return null;
-  const raw = normalizeDashes(String(val).trim());
-  const normalizeLine = (num) => Math.round(num * 2) / 2;
+  if (val === null || val === undefined || !String(val).trim()) return null;
 
-  const rangeMatch = raw.match(/^(\d{1,3}(?:\.\d+)?)\s*-\s*(\d{1,3}(?:\.\d+)?)$/);
+  const raw = String(val).trim();
+  const normalizedRaw = normalizeDashes(raw);
+  const normalizeLine = (num) => Math.round(Number(num) * 2) / 2;
+  const finitePositive = (num) => Number.isFinite(num) && num > 0;
+
+  // Signed endpoints are supported so handicap ranges such as -6.5--2.5
+  // are parsed numerically. The separator is the hyphen between endpoints.
+  const rangeMatch = normalizedRaw.match(
+    /^([+-]?(?:\d{1,3}(?:\.\d+)?|\.\d+))\s*-\s*([+-]?(?:\d{1,3}(?:\.\d+)?|\.\d+))$/,
+  );
   if (rangeMatch) {
-    const a = parseFloat(rangeMatch[1]);
-    const b = parseFloat(rangeMatch[2]);
-    if (!isFinite(a) || !isFinite(b) || a <= 0 || b <= 0 || b < a) return null;
+    const a = Number(rangeMatch[1]);
+    const b = Number(rangeMatch[2]);
+    if (!Number.isFinite(a) || !Number.isFinite(b)) {
+      return {
+        raw,
+        normalizedRaw,
+        low: null,
+        high: null,
+        mid: null,
+        width: null,
+        isRange: true,
+        invalid: true,
+        invalidReason: "Market range endpoints are not finite numbers",
+      };
+    }
+
+    // Safely normalize reversed ranges instead of ever producing a negative width.
+    const reversed = b < a;
+    const lowRaw = Math.min(a, b);
+    const highRaw = Math.max(a, b);
+    const width = highRaw - lowRaw; // width is calculated before display rounding.
+    const midRaw = (lowRaw + highRaw) / 2;
+
     return {
       raw,
-      low: normalizeLine(a),
-      high: normalizeLine(b),
-      mid: normalizeLine((a + b) / 2),
+      normalizedRaw,
+      low: lowRaw,
+      high: highRaw,
+      mid: normalizeLine(midRaw),
+      width: Number(width.toFixed(10)),
+      rawLow: lowRaw,
+      rawHigh: highRaw,
+      rawMidpoint: midRaw,
       isRange: true,
+      invalid: false,
+      reversed,
     };
   }
 
-  const singleMatch = raw.match(/^(\d{1,3}(?:\.\d+)?)$/);
+  const singleMatch = normalizedRaw.match(/^([+-]?(?:\d{1,3}(?:\.\d+)?|\.\d+))$/);
   if (singleMatch) {
-    const x = parseFloat(singleMatch[1]);
-    if (!isFinite(x) || x <= 0) return null;
+    const x = Number(singleMatch[1]);
+    if (!Number.isFinite(x)) return null;
     const line = normalizeLine(x);
     return {
       raw,
-      low: line,
-      high: line,
+      normalizedRaw,
+      low: x,
+      high: x,
       mid: line,
+      width: 0,
+      rawLow: x,
+      rawHigh: x,
+      rawMidpoint: x,
       isRange: false,
+      invalid: false,
     };
   }
 
-  return null;
+  // Any non-empty value that is neither a valid single line nor a valid range is
+  // explicitly invalid. This prevents malformed ranges from being silently
+  // accepted as ordinary input.
+  const looksRangeLike = /[-–—]/.test(raw);
+  return {
+    raw,
+    normalizedRaw,
+    low: null,
+    high: null,
+    mid: null,
+    width: null,
+    isRange: false,
+    invalid: true,
+    invalidReason: looksRangeLike
+      ? "Malformed market range: both endpoints must be numeric"
+      : "Malformed market line: expected a numeric line or numeric range",
+  };
 }
 
-
-/* SECTION 199 — league-aware-market-range-policy */
-// A bookmaker range is a valid market input, not an automatic NO PLAY condition.
-// The selected league remains part of the market context and continues to drive
-// league-specific scoring, volatility, edge and confidence logic elsewhere in the
-// engine. We deliberately do NOT invent universal width cutoffs (8/6/4/3 pts),
-// because legitimate bookmaker ranges differ by league, market and period.
-function getLeagueMarketRangePolicy(league, marketKey) {
-  const lk = normalizeLeagueKey(league || "default");
-  const mk = String(marketKey || "ft").toLowerCase();
-  return {
-    league: lk || "default",
-    marketKey: mk,
-    mode: "ACCEPT_RANGE",
-    lineMethod: "MIDPOINT",
-    hardWidthNoPlay: false,
-  };
+/* SECTION 199 — wide-range-threshold */
+function getWideRangeThreshold(marketKey) {
+  const mk = String(marketKey || "").trim().toLowerCase();
+  if (mk === "ft" || mk === "winner") return 8;
+  if (mk === "h1" || mk === "h2" || mk === "team_a" || mk === "team_b" || mk === "h1_team_a" || mk === "h1_team_b") return 6;
+  if (/^q[1-4]$/.test(mk)) return 4;
+  if (mk === "handicap" || mk === "handicap_h1" || mk === "handicap_h2") return 3;
+  return null;
 }
 
 /* SECTION 200 — force-pick-no-play */
@@ -15742,41 +15842,126 @@ function forcePickNoPlayWithNote(pickRow, noteText) {
   return pickRow;
 }
 
-/* SECTION 201 — league-aware-range-input */
-function applyWideRangeLineGate(pickRow, rawInput, league) {
-  if (!pickRow) return pickRow;
+/* SECTION 201 — apply-wide-range-gate */
+function applyWideRangeGate(pickRow, rawMarketInput, marketKey) {
+  const row = pickRow && typeof pickRow === "object" ? pickRow : {};
+  const key = String(marketKey || row.marketKey || "").trim().toLowerCase();
   const meta =
-    typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(rawInput) : null;
-  if (!meta || !meta.isRange) return pickRow;
+    typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta(rawMarketInput) : null;
+  const threshold = getWideRangeThreshold(key);
 
-  const low = Number(meta.low);
-  const high = Number(meta.high);
-  if (!Number.isFinite(low) || !Number.isFinite(high) || high < low) return pickRow;
-
-  const policy = getLeagueMarketRangePolicy(league || pickRow.league, pickRow.marketKey);
-  const rangeWidth = Number((high - low).toFixed(2));
-
-  // Preserve the complete bookmaker range for diagnostics, but NEVER convert a
-  // syntactically valid range into NO PLAY merely because its width exceeds a
-  // universal threshold. The selected league is already known to the engine and
-  // the normal edge/NO PLAY logic remains responsible for deciding the pick.
-  pickRow.wideRangeBlocked = false;
-  pickRow.wideRangeWidth = rangeWidth;
-  pickRow.wideRangeThreshold = null;
-  pickRow.smartLineRangeAccepted = true;
-  pickRow.smartLineRangePolicy = policy;
-  pickRow.smartLineMeta = meta;
-
-  // The existing market-line parser uses the midpoint for a range. Keep that
-  // behavior consistent for decision/tracker lines rather than silently changing
-  // the model's edge after the prediction has already been calculated.
-  if (Number.isFinite(meta.mid)) {
-    pickRow.displayLineUsed = Number.isFinite(pickRow.displayLineUsed)
-      ? pickRow.displayLineUsed
-      : meta.mid;
+  // Empty input is normal elsewhere in the engine and is not an invalid range.
+  if (meta === null) {
+    return {
+      ...row,
+      marketKey: key,
+      rangeMeta: null,
+      rangeInput: null,
+      rangeLow: null,
+      rangeHigh: null,
+      rangeMidpoint: null,
+      rangeWidth: null,
+      wideRangeThreshold: threshold,
+      wideRangeBlocked: false,
+      wideRangeReason: null,
+      marketInputInvalid: false,
+      marketInputInvalidReason: null,
+      gateApplied: true,
+      gateVersion: "v1",
+    };
   }
 
-  return pickRow;
+  if (meta.invalid) {
+    const reason = meta.invalidReason || "Invalid market input";
+    return forcePickNoPlayWithNote({
+      ...row,
+      marketKey: key,
+      rangeMeta: meta,
+      rangeInput: meta.raw,
+      rangeLow: null,
+      rangeHigh: null,
+      rangeMidpoint: null,
+      rangeWidth: null,
+      wideRangeThreshold: threshold,
+      wideRangeBlocked: false,
+      wideRangeReason: null,
+      marketInputInvalid: true,
+      marketInputInvalidReason: reason,
+      gateApplied: true,
+      gateVersion: "v1",
+    }, reason);
+  }
+
+  // Single-line input preserves the engine's existing behavior and is not subject
+  // to the wide-range gate.
+  if (!meta.isRange) {
+    return {
+      ...row,
+      marketKey: key,
+      rangeMeta: meta,
+      rangeInput: meta.raw,
+      rangeLow: meta.low,
+      rangeHigh: meta.high,
+      rangeMidpoint: meta.mid,
+      rangeWidth: 0,
+      wideRangeThreshold: threshold,
+      wideRangeBlocked: false,
+      wideRangeReason: null,
+      marketInputInvalid: false,
+      marketInputInvalidReason: null,
+      gateApplied: true,
+      gateVersion: "v1",
+    };
+  }
+
+  const width = Number(meta.width);
+  const blocked = Number.isFinite(threshold) && Number.isFinite(width) && width > threshold;
+  const reason = blocked
+    ? `Range width ${displayLine(width)} exceeds the maximum allowed width of ${displayLine(threshold)} points`
+    : null;
+
+  const result = {
+    ...row,
+    marketKey: key,
+    rangeMeta: meta,
+    rangeInput: meta.raw,
+    rangeLow: meta.low,
+    rangeHigh: meta.high,
+    rangeMidpoint: meta.mid,
+    rangeWidth: width,
+    wideRangeThreshold: threshold,
+    wideRangeBlocked: blocked,
+    wideRangeReason: reason,
+    marketInputInvalid: false,
+    marketInputInvalidReason: null,
+    gateApplied: true,
+    gateVersion: "v1",
+  };
+
+  if (blocked) forcePickNoPlayWithNote(result, reason);
+  return result;
+}
+
+/* SECTION 201A — build-wide-range-gate-state */
+function buildWideRangeGateState(rawMarketInputs, league = "") {
+  const raw = rawMarketInputs || {};
+  const keys = [
+    "ft", "winner", "h1", "h2", "team_a", "team_b",
+    "h1_team_a", "h1_team_b", "q1", "q2", "q3", "q4",
+    "handicap", "handicap_h1", "handicap_h2",
+  ];
+  const state = {};
+  keys.forEach((key) => {
+    const probe = { marketKey: key, league };
+    state[key] = applyWideRangeGate(probe, raw[key] || "", key);
+  });
+  return state;
+}
+
+/* SECTION 201B — market-range-play-blocked */
+function isMarketRangePlayBlocked(gateState, marketKey) {
+  const state = gateState && gateState[String(marketKey || "").toLowerCase()];
+  return !!(state && (state.wideRangeBlocked || state.marketInputInvalid));
 }
 
 /* SECTION 202 — sibling-market-contradiction-gate */
@@ -15839,14 +16024,9 @@ function auditFinalGradeSentinel(confidence, pick) {
 
 /* SECTION 204 — parse-handicap-line */
 function parseHandicapLine(val) {
-  if (!val || !String(val).trim()) return null;
-  const raw = normalizeDashes(String(val).trim());
-  const normalizeLine = (num) => Math.round(num * 2) / 2;
-  const match = raw.match(/^([+-]?\d{1,3}(?:\.\d+)?)$/);
-  if (!match) return null;
-  const x = parseFloat(match[1]);
-  if (!isFinite(x)) return null;
-  return normalizeLine(x);
+  const meta = parseMarketRangeMeta(val);
+  if (!meta || meta.invalid || !Number.isFinite(meta.mid)) return null;
+  return Math.round(Number(meta.mid) * 2) / 2;
 }
 
 /* SECTION 205 — raw-market-input-map */
@@ -17162,7 +17342,7 @@ async function pushTrackerStateToServer(state, isExit = false) {
   }
 }
 
-async function flushTrackerSave() {
+async function _flushTrackerSaveUnsafe() {
   if (isTrackerStateMeaningfullyEmpty(AppState.tracker.state)) return;
 
   try {
@@ -17187,6 +17367,13 @@ async function flushTrackerSave() {
       trackerDebug("flush save push error (non-network)", { error: String(err?.message || err) });
     }
   }
+}
+
+// Remote tracker writes are also serialized. A later snapshot can never race ahead of an older one.
+async function flushTrackerSave() {
+  const task = g_trackerFlushChain.then(() => _flushTrackerSaveUnsafe());
+  g_trackerFlushChain = task.catch(() => {});
+  return task;
 }
 
 function scheduleTrackerSave(delayMs = TRACKER_SAVE_DEBOUNCE_MS) {
@@ -31894,6 +32081,11 @@ async function runEngine() {
       handicapH2Line: lines.handicapH2Line,
     });
 
+    // Wide-range gate is precomputed once per market before normal pick/grade generation.
+    const rawMarketInputs = getRawMarketInputMap();
+    const wideRangeGateState = buildWideRangeGateState(rawMarketInputs, league);
+    const rangeBlocks = (marketKey) => isMarketRangePlayBlocked(wideRangeGateState, marketKey);
+
     const memoryFlags = {
       ft: false,
       h1: false,
@@ -32075,7 +32267,7 @@ async function runEngine() {
     }
 
     g_currentLiveComputeMarket = "ft";
-    let ftPick = getPickForLeague(ftCalc.ftEdge, ftLine, "ft", {
+    let ftPick = rangeBlocks("ft") ? "NO PLAY" : getPickForLeague(ftCalc.ftEdge, ftLine, "ft", {
       aSc: ftCalc.aS,
       bSc: ftCalc.bS,
       aScScores: ftCalc.aScores,
@@ -32084,7 +32276,7 @@ async function runEngine() {
       _edgeAlreadyScaled: true,
     });
     g_currentLiveComputeMarket = "h1";
-    let h1Pick = getPickForLeague(h1Calc.h1Edge, h1Line, "h1", {
+    let h1Pick = rangeBlocks("h1") ? "NO PLAY" : getPickForLeague(h1Calc.h1Edge, h1Line, "h1", {
       aSc: h1Calc.aS1,
       bSc: h1Calc.bS1,
       blowoutGap: (Number.isFinite(h1Calc.projA1H) && Number.isFinite(h1Calc.projB1H) ? Math.abs(h1Calc.projA1H - h1Calc.projB1H) : NaN),
@@ -32093,20 +32285,20 @@ async function runEngine() {
 
     g_currentLiveComputeMarket = "h2";
     const h2Line = finalLines.h2Line;
-    let h2Pick = getPickForLeague(h2Calc.h2Edge, h2Line, "h2", {
+    let h2Pick = rangeBlocks("h2") ? "NO PLAY" : getPickForLeague(h2Calc.h2Edge, h2Line, "h2", {
       aSc: h2Calc.aS2,
       bSc: h2Calc.bS2,
       blowoutGap: (Number.isFinite(h2Calc.projA2H) && Number.isFinite(h2Calc.projB2H) ? Math.abs(h2Calc.projA2H - h2Calc.projB2H) : NaN),
       _edgeAlreadyScaled: true,
     });
     g_currentLiveComputeMarket = "team_a";
-    let aPick = getPickForLeague(ftCalc.aEdge, aLine, "team_a", {
+    let aPick = rangeBlocks("team_a") ? "NO PLAY" : getPickForLeague(ftCalc.aEdge, aLine, "team_a", {
       teamSc: ftCalc.aS,
       blowoutGap: ftCalc.blowoutGap,
       _edgeAlreadyScaled: true,
     });
     g_currentLiveComputeMarket = "team_b";
-    let bPick = getPickForLeague(ftCalc.bEdge, bLine, "team_b", {
+    let bPick = rangeBlocks("team_b") ? "NO PLAY" : getPickForLeague(ftCalc.bEdge, bLine, "team_b", {
       teamSc: ftCalc.bS,
       blowoutGap: ftCalc.blowoutGap,
       _edgeAlreadyScaled: true,
@@ -32116,13 +32308,13 @@ async function runEngine() {
     const combinedMarginVolFT = computeCombinedMarginVolatility(ftCalc.aVol, ftCalc.bVol);
     const winnerEdge = marginProjectionFT;
     g_currentLiveComputeMarket = "winner";
-    let winnerPick = getMarginPickForLeague(winnerEdge, "winner");
+    let winnerPick = rangeBlocks("winner") ? "NO PLAY" : getMarginPickForLeague(winnerEdge, "winner");
     const handicapEdge =
       marketAllowedForLeague("handicap") && isFinite(marginProjectionFT) && isFinite(finalLines.handicapLine)
         ? marginProjectionFT + finalLines.handicapLine
         : NaN;
     g_currentLiveComputeMarket = "handicap";
-    let handicapPick = getMarginPickForLeague(handicapEdge, "handicap");
+    let handicapPick = rangeBlocks("handicap") ? "NO PLAY" : getMarginPickForLeague(handicapEdge, "handicap");
 
     const marginProjectionH1 = computeMarginProjection(h1Calc.projA1H, h1Calc.projB1H);
     const _h1VolLimitForMargin = getMarketVolLimit(league, "h1");
@@ -32137,7 +32329,7 @@ async function runEngine() {
         ? marginProjectionH1 + finalLines.handicapH1Line
         : NaN;
     g_currentLiveComputeMarket = "handicap_h1";
-    let handicapH1Pick = getMarginPickForLeague(handicapH1Edge, "handicap_h1");
+    let handicapH1Pick = rangeBlocks("handicap_h1") ? "NO PLAY" : getMarginPickForLeague(handicapH1Edge, "handicap_h1");
     const marginProjectionH2 = computeMarginProjection(h2Calc.projA2H, h2Calc.projB2H);
     const _h2VolLimitForMargin = getMarketVolLimit(league, "h2");
     const combinedMarginVolH2 = computeCombinedMarginVolatility(
@@ -32149,7 +32341,7 @@ async function runEngine() {
         ? marginProjectionH2 + finalLines.handicapH2Line
         : NaN;
     g_currentLiveComputeMarket = "handicap_h2";
-    let handicapH2Pick = getMarginPickForLeague(handicapH2Edge, "handicap_h2");
+    let handicapH2Pick = rangeBlocks("handicap_h2") ? "NO PLAY" : getMarginPickForLeague(handicapH2Edge, "handicap_h2");
 
     function handicapLineWasTyped(id) {
       const raw = String(document.getElementById(id)?.value || "").trim();
@@ -32179,8 +32371,8 @@ async function runEngine() {
       if (Number.isFinite(h1bEdge)) h1bEdge = applyEdgeMult(h1bEdge, league);
     }
 
-    let h1aPick = getPickForLeague(h1aEdge, finalLines.h1aLine, "h1_team_a", { teamSc: h1Calc.aS1, _edgeAlreadyScaled: true }); 
-    let h1bPick = getPickForLeague(h1bEdge, finalLines.h1bLine, "h1_team_b", { teamSc: h1Calc.bS1, _edgeAlreadyScaled: true }); 
+    let h1aPick = rangeBlocks("h1_team_a") ? "NO PLAY" : getPickForLeague(h1aEdge, finalLines.h1aLine, "h1_team_a", { teamSc: h1Calc.aS1, _edgeAlreadyScaled: true }); 
+    let h1bPick = rangeBlocks("h1_team_b") ? "NO PLAY" : getPickForLeague(h1bEdge, finalLines.h1bLine, "h1_team_b", { teamSc: h1Calc.bS1, _edgeAlreadyScaled: true }); 
 
     const hasLevel2 =
       AppState.context.data.A.ortg10?.length >= 1 && AppState.context.data.B.ortg10?.length >= 1;
@@ -32229,6 +32421,7 @@ async function runEngine() {
         config,
         contextData: (typeof AppState !== "undefined" && AppState.context && AppState.context.data) || null,
         siblingEdge: _sib,
+        skipPickAndGrade: rangeBlocks(qKey),
       });
     };
 
@@ -33252,15 +33445,11 @@ async function runEngine() {
         };
     finalPicks.sort((a, b) => (mktOrderMap[a.marketKey] || 99) - (mktOrderMap[b.marketKey] || 99));
 
-    const rawMarketInputs = getRawMarketInputMap();
     const finalPicksForDisplay = finalPicks
-      .map((p) => applySmartLineToPick(p, rawMarketInputs[p.marketKey], league))
+      .map((p) => applySmartLineToPick(p, rawMarketInputs[p.marketKey], league, wideRangeGateState[p.marketKey]))
       .filter(Boolean);
 
-    // H1/H2: range-input metadata + sibling market-line contradiction gates (market inputs, not proj rewrite).
-    finalPicksForDisplay.forEach((p) =>
-      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey], p.league || league),
-    );
+    // Sibling-market contradiction gate remains separate from the single authoritative wide-range gate.
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
 
     finalPicksForDisplay.forEach((p) => {
@@ -33444,10 +33633,8 @@ async function runEngine() {
       });
     }
 
-    // Re-assert range-input metadata and H1/H2 contradiction logic after winProb/grade re-sync.
-    finalPicksForDisplay.forEach((p) =>
-      applyWideRangeLineGate(p, rawMarketInputs[p.marketKey], p.league || league),
-    );
+    // Re-assert only the independent sibling-market contradiction logic here.
+    // Wide-range decisions are authoritative and were already made once before grading.
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
 
     const paceIcon = ftCalc.pace > 100 ? "🔥" : "🧊";
@@ -34509,7 +34696,45 @@ async function runEngine() {
       },
 
       auditProvenance: {
-        
+        wideRangeGate: {
+          version: "v1",
+          decisionPath: "single_pregrade_authoritative_gate",
+          blockingRule: "strict width > threshold",
+          thresholds: {
+            ft: 8,
+            winner: 8,
+            h1: 6,
+            h2: 6,
+            team_a: 6,
+            team_b: 6,
+            h1_team_a: 6,
+            h1_team_b: 6,
+            q1: 4,
+            q2: 4,
+            q3: 4,
+            q4: 4,
+            handicap: 3,
+            handicap_h1: 3,
+            handicap_h2: 3,
+          },
+          markets: Object.keys(wideRangeGateState).reduce((out, key) => {
+            const g = wideRangeGateState[key] || {};
+            out[key] = {
+              rangeInput: g.rangeInput ?? null,
+              rangeLow: Number.isFinite(Number(g.rangeLow)) ? Number(g.rangeLow) : null,
+              rangeHigh: Number.isFinite(Number(g.rangeHigh)) ? Number(g.rangeHigh) : null,
+              rangeMidpoint: Number.isFinite(Number(g.rangeMidpoint)) ? Number(g.rangeMidpoint) : null,
+              rangeWidth: Number.isFinite(Number(g.rangeWidth)) ? Number(g.rangeWidth) : null,
+              wideRangeThreshold: Number.isFinite(Number(g.wideRangeThreshold)) ? Number(g.wideRangeThreshold) : null,
+              wideRangeBlocked: !!g.wideRangeBlocked,
+              wideRangeReason: g.wideRangeReason || null,
+              marketInputInvalid: !!g.marketInputInvalid,
+              marketInputInvalidReason: g.marketInputInvalidReason || null,
+              gateApplied: !!g.gateApplied,
+            };
+            return out;
+          }, {}),
+        },
         venueContext: {
           homeTeam: (fixtureMeta && fixtureMeta.homeTeam) || "",
           awayTeam: (fixtureMeta && fixtureMeta.awayTeam) || "",
@@ -34658,8 +34883,25 @@ async function runEngine() {
       // flush the same state to the remote tracker when configured.
       await addTrackedPicks(trackedToSave);
       await forceTrackerSaveNow();
+
+      // Hard persistence coverage gate: every actionable prediction selected for tracking
+      // must exist in the persisted tracker state before the Run is allowed to complete.
+      const persistedPickKeys = new Set();
+      [...(g_trackerState.activePicks || []), ...(g_trackerState.archivedPicks || [])].forEach((p) => {
+        const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+        if (k) persistedPickKeys.add(k);
+      });
+      const missingTracked = trackedToSave.filter((p) => {
+        const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+        return k && !persistedPickKeys.has(k);
+      });
+      if (missingTracked.length) {
+        const missingSummary = missingTracked.map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`).join(", ");
+        throw new Error(`Tracker persistence coverage failure: ${missingTracked.length}/${trackedToSave.length} predictions missing after verified save. ${missingSummary}`);
+      }
       engineDebug("tracked picks durably saved", {
         trackedToSave: trackedToSave.length,
+        persistedCoverage: `${trackedToSave.length}/${trackedToSave.length}`,
         trackerStateAfterSave: getTrackerStateDebugScore(g_trackerState),
       });
     } else if (actionablePicks.length) {
