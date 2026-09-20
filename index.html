@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5624,28 +5625,128 @@ function updateSofascoreLinks(side) {
   }
 }
 
-function searchSofascorePlayer(side) {
+async function searchSofascorePlayer(side) {
   const nameEl = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
   const mainEl = document.getElementById(side === "A" ? "teamAName" : "teamBName");
+  const idEl = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
+  const st = document.getElementById("ssFetchStatus");
   const rawName = (nameEl?.value || mainEl?.value || "").trim();
+  const existingId = (idEl?.value || "").trim();
+
+  // If an ID is already present, do not call the fragile name-search endpoint.
+  // Go directly through the existing team-events path used by the engine.
+  if (/^[0-9]+$/.test(existingId)) {
+    try {
+      if (st) {
+        st.style.color = "#d98a00";
+        st.textContent = "🔍 Using Team " + side + " ID " + existingId + " — fetching last events…";
+      }
+      if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
+
+      const events = await ssFetchTeamLastEvents(existingId);
+      if (!events.length) {
+        throw new Error("No usable SofaScore events returned for team ID " + existingId);
+      }
+
+      const prevEvents = side === "A" ? window.__lastEventsA || [] : window.__lastEventsB || [];
+      const mergedMap = new Map();
+      [...prevEvents, ...events].forEach((ev) => {
+        if (ev && ev.id != null) mergedMap.set(ev.id, ev);
+      });
+      const mergedEvents = Array.from(mergedMap.values()).sort(
+        (a, b) => (b.startTimestamp || 0) - (a.startTimestamp || 0),
+      );
+      if (side === "A") window.__lastEventsA = mergedEvents;
+      else window.__lastEventsB = mergedEvents;
+
+      reprocessBothTeamsFromEvents();
+
+      if (st) {
+        st.style.color = "#2f8f4a";
+        st.textContent =
+          "✅ Team " + side + " loaded from SofaScore ID " + existingId +
+          " (" + events.length + " event" + (events.length === 1 ? "" : "s") + ").";
+      }
+      return;
+    } catch (err) {
+      engineDebug("SofaScore team-ID lookup failed", {
+        side,
+        teamId: existingId,
+        error: err?.message || String(err),
+        stack: err?.stack || "",
+      });
+      if (st) {
+        st.style.color = "#d92d2a";
+        st.textContent =
+          "❌ Could not load Team " + side + " from SofaScore ID " + existingId +
+          ". Check Debug or verify the ID.";
+      }
+      if (typeof triggerGlobalEngineAlert === "function") {
+        triggerGlobalEngineAlert("SofaScore Team " + side + " lookup failed");
+      }
+      return;
+    }
+  }
+
   if (!rawName) {
     alert("Enter a player/team name first.");
     return;
   }
-  const searchName = rawName.split(",")[0].trim();
 
-  const searchUrl =
-    "https://api.sofascore.com/api/v1/search/teams?q=" +
-    encodeURIComponent(searchName) +
-    "&sport=basketball";
-  window.open(searchUrl, "_blank");
-  const st = document.getElementById("ssFetchStatus");
+  const searchName = rawName.split(",")[0].trim();
+  if (!searchName) {
+    alert("Enter a player/team name first.");
+    return;
+  }
+
   if (st) {
     st.style.color = "#d98a00";
-    st.textContent =
-      "🔍 Basketball-only search opened for " +
-      side +
-      " — paste that search JSON here, or copy the team ID into the ID box.";
+    st.textContent = "🔍 Searching SofaScore basketball teams for " + searchName + "…";
+  }
+
+  try {
+    // SofaScore's team-search route uses a trailing slash and page parameter.
+    // Sport filtering is applied to the returned results by ssPickTeamFromSearch().
+    const searchUrl =
+      "https://api.sofascore.com/api/v1/search/teams/?q=" +
+      encodeURIComponent(searchName) +
+      "&page=0";
+    const parsed = await proxyFetch(searchUrl);
+
+    const applied = await ssApplySearchPaste(side, parsed, st);
+    if (!applied || !applied.resolvedTeam) {
+      throw new Error("No matching SofaScore basketball team found for " + searchName);
+    }
+
+    if (applied.events && applied.events.length) {
+      const prevEvents = side === "A" ? window.__lastEventsA || [] : window.__lastEventsB || [];
+      const mergedMap = new Map();
+      [...prevEvents, ...applied.events].forEach((ev) => {
+        if (ev && ev.id != null) mergedMap.set(ev.id, ev);
+      });
+      const mergedEvents = Array.from(mergedMap.values()).sort(
+        (a, b) => (b.startTimestamp || 0) - (a.startTimestamp || 0),
+      );
+      if (side === "A") window.__lastEventsA = mergedEvents;
+      else window.__lastEventsB = mergedEvents;
+      reprocessBothTeamsFromEvents();
+    }
+  } catch (err) {
+    engineDebug("SofaScore team search failed", {
+      side,
+      query: searchName,
+      error: err?.message || String(err),
+      stack: err?.stack || "",
+    });
+    if (st) {
+      st.style.color = "#d92d2a";
+      st.textContent =
+        "❌ SofaScore team search failed for " + searchName +
+        ". Enter the team's numeric SofaScore ID and try again.";
+    }
+    if (typeof triggerGlobalEngineAlert === "function") {
+      triggerGlobalEngineAlert("SofaScore search failed for " + searchName);
+    }
   }
 }
 
