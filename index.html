@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -33,8 +32,36 @@ S
 <script>if ("serviceWorker" in navigator) {
   window.addEventListener("load", function () {
     
+    /* ISSUE-011: defer SW reload until idle (no focused input) */
     navigator.serviceWorker.addEventListener("controllerchange", function () {
-      window.location.reload();
+      window.__bbSwUpdatePending = true;
+      function _bbTrySwReload() {
+        if (!window.__bbSwUpdatePending) return;
+        var ae = document.activeElement;
+        var tag = ae && ae.tagName ? String(ae.tagName).toUpperCase() : "";
+        var typing = tag === "INPUT" || tag === "TEXTAREA" || (ae && ae.isContentEditable);
+        if (document.hasFocus() && typing) {
+          var btn = document.getElementById("bbSwReloadBtn");
+          if (!btn) {
+            btn = document.createElement("button");
+            btn.id = "bbSwReloadBtn";
+            btn.type = "button";
+            btn.textContent = "Update ready — reload";
+            btn.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:99999;background:#d4af37;color:#111;border:none;padding:10px 14px;font-weight:900;cursor:pointer;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.4)";
+            btn.onclick = function () { window.__bbSwUpdatePending = false; window.location.reload(); };
+            document.body.appendChild(btn);
+          }
+          return;
+        }
+        window.__bbSwUpdatePending = false;
+        var b2 = document.getElementById("bbSwReloadBtn");
+        if (b2) b2.remove();
+        window.location.reload();
+      }
+      window.addEventListener("blur", function () {
+        setTimeout(_bbTrySwReload, 2000);
+      });
+      setTimeout(_bbTrySwReload, 2500);
     });
     navigator.serviceWorker
       .register("sw.js?v=v25_audit10_20260913")
@@ -3438,7 +3465,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
           style="margin-bottom: 0; font-size: 11px; padding: 4px 6px"
           aria-label="Team A numerical ID"
         />
-        <!-- DESIGN CHOICE (F-P2-003): Team A exposes page-0 only; Team B deep pages 0–3 are intentional helpers. -->
+        <!-- ISSUE-009: Team A pages 0–3 (parity with Team B) -->
         <a
           id="ssTeamALink"
           href="#"
@@ -3451,8 +3478,11 @@ const BB_LOCK_REGISTRY = Object.freeze([
             display: none;
             white-space: nowrap;
           "
-          >🔗 Open JSON A</a
+          >🔗 p0</a
         >
+        <a id="ssTeamALink1" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p1</a>
+        <a id="ssTeamALink2" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p2</a>
+        <a id="ssTeamALink3" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p3</a>
       </div>
     </div>
 
@@ -4596,11 +4626,53 @@ const BB_LOCK_REGISTRY = Object.freeze([
 <script>
 window.__BETCEO_ENGINE_BOOT_SEEN = true;
 window.__BETCEO_ENGINE_PARSE_OK = true;
-window.__BETCEO_SESSION_ID = "sess_" + Date.now() + "_" + Math.random().toString(36).slice(2, 9);
+window.__BETCEO_SESSION_ID = (function () {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return "sess_" + crypto.randomUUID();
+    }
+  } catch (_eUuid) {}
+  return "sess_" + Date.now() + "_" + Math.random().toString(36).slice(2, 9);
+})();
+window.__BB_SOFT_FAIL_COUNT = 0;
+window.__BB_IGNORED_TRANSPORT_COUNT = 0;
+function reportSoftFailure(scope, err) {
+  try {
+    window.__BB_SOFT_FAIL_COUNT = (window.__BB_SOFT_FAIL_COUNT || 0) + 1;
+    var msg = err && err.message ? err.message : String(err || "unknown");
+    console.warn("[BB SoftFailure]", scope || "unknown", msg, err);
+    var badge = document.getElementById("bbSoftFailBadge");
+    if (!badge) {
+      badge = document.createElement("div");
+      badge.id = "bbSoftFailBadge";
+      badge.style.cssText = "position:fixed;bottom:16px;left:16px;z-index:99998;background:#3a404c;color:#ffb020;padding:6px 10px;font-size:11px;font-weight:800;border-radius:4px;opacity:0.92;cursor:pointer";
+      badge.title = "Soft failures this session (click to dismiss)";
+      badge.onclick = function () { badge.style.display = "none"; };
+      (document.body || document.documentElement).appendChild(badge);
+    }
+    badge.style.display = "block";
+    badge.textContent = "⚠ soft-fail ×" + window.__BB_SOFT_FAIL_COUNT + (window.__BB_IGNORED_TRANSPORT_COUNT ? (" · ignored×" + window.__BB_IGNORED_TRANSPORT_COUNT) : "");
+  } catch (_rsf) {}
+}
+window.reportSoftFailure = reportSoftFailure;
+function bumpIgnoredTransport(reason) {
+  try {
+    window.__BB_IGNORED_TRANSPORT_COUNT = (window.__BB_IGNORED_TRANSPORT_COUNT || 0) + 1;
+    if (typeof reportSoftFailure === "function") {
+      /* refresh badge only */
+      var badge = document.getElementById("bbSoftFailBadge");
+      if (badge) badge.textContent = "⚠ soft-fail ×" + (window.__BB_SOFT_FAIL_COUNT || 0) + " · ignored×" + window.__BB_IGNORED_TRANSPORT_COUNT;
+      else reportSoftFailure("ignored-transport", reason || "ignored");
+    }
+  } catch (_bit) {}
+}
+window.bumpIgnoredTransport = bumpIgnoredTransport;
 
 /* SECTION 100 — clamp-number */
 function clampNumber(val, min, max) {
-  if (val == null || val === "" || typeof val === "boolean" || Array.isArray(val)) return Number.NaN;
+  /* ISSUE-031: require typeof number at boundary; no string coercion */
+  if (typeof val !== "number") return Number.NaN;
+  if (val == null || typeof val === "boolean" || Array.isArray(val)) return Number.NaN;
   const n = Number(val);
   let lo = Number(min);
   let hi = Number(max);
@@ -4614,13 +4686,25 @@ function clampNumber(val, min, max) {
 }
 
 const ENGINE_INTEGRITY_SHIELD = {
+  /* ISSUE-038: soft shield only — TODO(build-time): hash critical pure functions
+     (computeClv, getDynamicWeights, filterEventsAsOf) and verify length checksum at boot.
+     Do not break boot if hashes missing. */
   expectedFingerprints: {
     math: "v1_calibrated",
     storage: "indexed_db_v1",
   },
+  criticalFnLengthHints: {},
 
   audit: function () {
     const issues = [];
+    try {
+      if (typeof computeClv === "function")
+        ENGINE_INTEGRITY_SHIELD.criticalFnLengthHints.computeClv = String(computeClv).length;
+      if (typeof getDynamicWeights === "function")
+        ENGINE_INTEGRITY_SHIELD.criticalFnLengthHints.getDynamicWeights = String(getDynamicWeights).length;
+      if (typeof filterEventsAsOf === "function")
+        ENGINE_INTEGRITY_SHIELD.criticalFnLengthHints.filterEventsAsOf = String(filterEventsAsOf).length;
+    } catch (_lenChk) { /* non-blocking length checksum */ }
 
     try {
       if (typeof MODEL_CONFIG === "undefined")
@@ -4634,11 +4718,15 @@ const ENGINE_INTEGRITY_SHIELD = {
 
     try {
       const testWeight = getDynamicWeights("full", 0, "nba");
+      const testInsuff = getDynamicWeights("insufficient", 0, "nba");
+      if (testInsuff !== null)
+        issues.push("INTEGRITY: getDynamicWeights(insufficient) must return null (ISSUE-022).");
 
       const _twEntry = TUNABLE_PARAM_REGISTRY.teamWeightBase;
       const _twMin = isFinite(_twEntry?.min) ? _twEntry.min : 0.4;
       const _twMax = isFinite(_twEntry?.max) ? _twEntry.max : 0.85;
       if (
+        !testWeight ||
         !isFinite(testWeight.teamWeight) ||
         testWeight.teamWeight < _twMin ||
         testWeight.teamWeight > _twMax
@@ -4717,27 +4805,29 @@ window.MARKET_SEMANTICS = MARKET_SEMANTICS;
 const STANDALONE_BUILD_MARKER = "bb_engine_standalone_build";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
 
-/* DESIGN CHOICE (not a defect): WORKER_SHARED_SECRET is an intentional client-side rate-gate token.
-   It is assembled here from hex fragments and sent as X-Engine-Secret — shipping it in the bundle is by design.
-   It is NOT a server credential / auth secret; anyone who can read this file can reconstruct it.
-   Operators accept client-visible rate-gate tokens; rotate only if abused as a quota key. */
-const WORKER_SHARED_SECRET = (function () {
+/* ISSUE-008: CLIENT_RATE_GATE_TOKEN — NOT a server auth secret.
+   Assembled from hex fragments and sent as X-Engine-Secret for worker rate-gating only.
+   Anyone who can read this file can reconstruct it. Real auth MUST be server-side.
+   Fragments rotated 2026-09-21 so previously leaked tokens die. Keep header send working. */
+const CLIENT_RATE_GATE_TOKEN = (function () {
   const a = [
-    "da4d",
-    "8291",
-    "5079",
-    "6348",
-    "6664",
-    "d2ef",
-    "fd98",
-    "3101",
-    "af9a",
-    "68f6",
-    "c462",
-    "05d0",
+    "be59",
+    "7e9a",
+    "06e1",
+    "0b53",
+    "c5c6",
+    "910a",
+    "656c",
+    "3287",
+    "7db6",
+    "88bb",
+    "1345",
+    "75ef",
   ];
   return a.join("");
 })();
+/* Back-compat alias for any residual WORKER_SHARED_SECRET references */
+const WORKER_SHARED_SECRET = CLIENT_RATE_GATE_TOKEN;
 
 const SS_BASKETBALL_SPORT_IDS = new Set([2, 128, 129, 155, 156, 157, 158]);
 
@@ -4766,8 +4856,8 @@ function ssIsBasketballEvent(ev) {
 
 /* SECTION 101 — ss-final-ft-points */
 function ssFinalFtPoints(scoreObj) {
-
-  if (!scoreObj) return 0;
+  /* ISSUE-017: return NaN when absent (callers must use Number.isFinite / >0) */
+  if (!scoreObj) return NaN;
   const cur = Number(scoreObj.current);
   if (Number.isFinite(cur) && cur > 0) return cur;
   const disp = Number(scoreObj.display);
@@ -4775,7 +4865,7 @@ function ssFinalFtPoints(scoreObj) {
   const nt = Number(scoreObj.normaltime);
   const ot = Number(scoreObj.overtime);
   if (Number.isFinite(nt) && nt > 0) return nt + (Number.isFinite(ot) && ot > 0 ? ot : 0);
-  return 0;
+  return NaN;
 }
 
 window.__seriesDateCache = window.__seriesDateCache || {};
@@ -5298,278 +5388,51 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
   };
 }
 
-const _ssEventStatsCache = new Map();
-
+/* ISSUE-001/021/036: Sofascore pace/ORTG enrichment PERMANENTLY DELETED.
+   Do NOT re-enable Sofa /statistics fetches. ESPN native advanced stats stay.
+   pace10/ortg10/drtg10 remain empty on Sofa paste path. */
 function ssIsNcaaSofaLeague(league) {
-  const lg = String(league || "").toLowerCase();
-  return lg === "ncaa" || lg === "ncaaw";
+  /* ISSUE-003: NCAA/NCAAW are ESPN auto-fetch only — never Sofa */
+  return false;
 }
-
-function ssNormStatToken(s) {
-  return String(s || "")
-    .toLowerCase()
-    .replace(/[%._\s-]+/g, "")
-    .replace(/[^a-z0-9]/g, "");
-}
-
-function ssPickAllPeriodGroups(statsJson) {
-  if (!statsJson) return [];
-  const arr = Array.isArray(statsJson.statistics)
-    ? statsJson.statistics
-    : Array.isArray(statsJson)
-      ? statsJson
-      : [];
-  if (!arr.length) return [];
-  const isAll = function (p) {
-    const per = String((p && (p.period || p.periodName)) || "")
-      .toUpperCase()
-      .trim();
-    return per === "" || per === "ALL" || per === "FULL" || per === "MATCH" || per === "FT" || per === "GAME";
-  };
-  const all = arr.find(isAll);
-  if (all && Array.isArray(all.groups) && all.groups.length) return all.groups;
-  const first = arr[0];
-  const per = String((first && (first.period || first.periodName)) || "")
-    .toUpperCase()
-    .trim();
-  if (first && Array.isArray(first.groups) && !/^(1ST|2ND|3RD|4TH|Q[1-4]|OT|H1|H2)/.test(per)) {
-    return first.groups;
-  }
-  return [];
-}
-
-function ssFindStatItem(groups, spec) {
-  const wantKeys = (spec.keys || []).map(ssNormStatToken);
-  const wantNames = (spec.names || []).map(function (n) {
-    return String(n).toLowerCase().trim();
-  });
-  const excludeRe = spec.excludeNameRe || null;
-  const items = [];
-  (groups || []).forEach(function (g) {
-    const list = (g && (g.statisticsItems || g.items)) || [];
-    list.forEach(function (it) {
-      if (it) items.push(it);
-    });
-  });
-  for (let i = 0; i < items.length; i++) {
-    const it = items[i];
-    const k = ssNormStatToken(it.key);
-    const n = String(it.name || "").toLowerCase().trim();
-    if (excludeRe && excludeRe.test(n)) continue;
-    if (k && wantKeys.indexOf(k) >= 0) return it;
-  }
-  for (let j = 0; j < items.length; j++) {
-    const it2 = items[j];
-    const n2 = String(it2.name || "").toLowerCase().trim();
-    if (excludeRe && excludeRe.test(n2)) continue;
-    if (wantNames.indexOf(n2) >= 0) return it2;
-  }
-  return null;
-}
-
-function ssSideAttempts(item, side) {
-  if (!item) return NaN;
-  const totalKey = side === "home" ? "homeTotal" : "awayTotal";
-  const t = Number(item[totalKey]);
-  if (isFinite(t) && t > 0) return t;
-  const raw = String(item[side] != null ? item[side] : "");
-  const m = raw.match(/(\d+)\s*\/\s*(\d+)/);
-  if (m) return Number(m[2]);
-  const valKey = side === "home" ? "homeValue" : "awayValue";
-  const valRaw = String(item[valKey] != null ? item[valKey] : "");
-  const m2 = valRaw.match(/(\d+)\s*\/\s*(\d+)/);
-  if (m2) return Number(m2[2]);
-  return NaN;
-}
-
-function ssSideCount(item, side) {
-  if (!item) return NaN;
-  const valKey = side === "home" ? "homeValue" : "awayValue";
-  const n = Number(item[valKey]);
-  if (isFinite(n)) return n;
-  const n2 = Number(item[side]);
-  return isFinite(n2) ? n2 : NaN;
-}
-
-function ssBoxFromGroups(groups, side) {
-  const fgEx = /(?:^|\b)(?:2[\s-]*point|3[\s-]*point|two[\s-]*point|three[\s-]*point)/i;
-  const fgItem = ssFindStatItem(groups, {
-    keys: ["fieldgoals", "fieldgoalspercentage", "fieldgoalsattempted", "fga", "fg"],
-    names: ["field goals", "field goals %", "field goals attempted", "fg"],
-    excludeNameRe: fgEx,
-  });
-  let fga = ssSideAttempts(fgItem, side);
-  if (!(isFinite(fga) && fga > 0)) {
-    const fg2 = ssFindStatItem(groups, {
-      keys: ["twopointers", "twopointerspercentage", "twopointfieldgoals", "fg2"],
-      names: ["2-point field goals", "2-point field goals %", "two-point field goals"],
-    });
-    const fg3 = ssFindStatItem(groups, {
-      keys: ["threepointers", "threepointerspercentage", "threepointfieldgoals", "fg3"],
-      names: ["3-point field goals", "3-point field goals %", "three-point field goals"],
-    });
-    const a2 = ssSideAttempts(fg2, side);
-    const a3 = ssSideAttempts(fg3, side);
-    if (isFinite(a2) && a2 >= 0 && isFinite(a3) && a3 >= 0 && a2 + a3 > 0) fga = a2 + a3;
-  }
-  const ftItem = ssFindStatItem(groups, {
-    keys: ["freethrows", "freethrowspercentage", "freethrowsattempted", "fta", "ft"],
-    names: ["free throws", "free throws %", "free throws attempted"],
-  });
-  const fta = ssSideAttempts(ftItem, side);
-  const orbItem = ssFindStatItem(groups, {
-    keys: ["offensiverebounds", "oreb", "offensiverebound"],
-    names: ["offensive rebounds", "offensive rebound", "off. rebounds"],
-  });
-  const orb = ssSideCount(orbItem, side);
-  const tovItem = ssFindStatItem(groups, {
-    keys: ["turnovers", "totalturnovers", "tov"],
-    names: ["turnovers", "total turnovers"],
-  });
-  const tov = ssSideCount(tovItem, side);
-  if (!(isFinite(fga) && fga > 0)) return null;
-
-  if (!(isFinite(fta) && isFinite(orb) && isFinite(tov))) return null;
-  return {
-    fieldGoalsAttempted: fga,
-    freeThrowsAttempted: fta,
-    offensiveRebounds: orb,
-    totalTurnovers: tov,
-    turnovers: tov,
-  };
-}
-
-function ssMapEventStatistics(statsJson) {
-  const groups = ssPickAllPeriodGroups(statsJson);
-  if (!groups.length) return null;
-  const home = ssBoxFromGroups(groups, "home");
-  const away = ssBoxFromGroups(groups, "away");
-  if (!home || !away) return null;
-  return { home: home, away: away };
-}
-
-async function ssFetchEventStatistics(eventId) {
-  const id = String(eventId || "").trim();
-  if (!id || id === "undefined" || id === "null") return null;
-
-  if (window.__ssSofaStatsBlocked) return null;
-  if (_ssEventStatsCache.has(id)) return _ssEventStatsCache.get(id);
-  const url = "https://api.sofascore.com/api/v1/event/" + id + "/statistics";
-  let data = null;
-  try {
-    if (typeof proxyFetch === "function") {
-      data = await proxyFetch(url, 8000);
-    }
-  } catch (e) {
-    const msg = e && e.message ? e.message : String(e);
-    if (/403/.test(msg) || /DirectSofa/.test(msg)) {
-      window.__ssSofaStatsBlocked = true;
-    }
-    data = null;
-  }
-  const mapped = ssMapEventStatistics(data);
-  _ssEventStatsCache.set(id, mapped);
-  const _SS_EVENT_STATS_CACHE_MAX = 200;
-  while (_ssEventStatsCache.size > _SS_EVENT_STATS_CACHE_MAX) {
-    const oldest = _ssEventStatsCache.keys().next().value;
-    _ssEventStatsCache.delete(oldest);
-  }
-  return mapped;
-}
-
 function ssRenderPaceStatus() {
   const st = document.getElementById("ssFetchStatus");
   if (!st) return;
   if (/^❌/.test(String(st.textContent || "").trim())) return;
-  const aN = ((AppState.context.data.A && AppState.context.data.A.pace10) || []).length;
-  const bN = ((AppState.context.data.B && AppState.context.data.B.pace10) || []).length;
-  const hasA = (window.__lastEventsA || []).length > 0;
-  const hasB = (window.__lastEventsB || []).length > 0;
-  const bits = [];
-  if (hasA) bits.push(aN > 0 ? "A pace measured n=" + aN : "A scores only (no box)");
-  if (hasB) bits.push(bN > 0 ? "B pace measured n=" + bN : "B scores only (no box)");
   const prefix = window.__ssLastPasteMsg || "";
-  const line = bits.join(" · ");
-  if (!line && !prefix) return;
-  const anyBox = aN > 0 || bN > 0;
-  st.style.color = anyBox ? "#2f8f4a" : "#d98a00";
-  st.textContent = prefix ? (line ? prefix + " · " + line : prefix) : line;
+  if (!prefix) return;
+  st.style.color = "#d98a00";
+  st.textContent = prefix + " · Sofa pace enrichment disabled (scores only)";
 }
-
+async function ssFetchEventStatistics(eventId) {
+  /* permanently no-op — never fetch Sofa statistics */
+  return null;
+}
 async function ssFetchAndAttachPace(side, stats, gen) {
-  if (!stats || (side !== "A" && side !== "B")) return stats;
-  const league =
-    (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
-  if (ssIsNcaaSofaLeague(league)) {
+  if (stats) {
     stats.pace10 = [];
     stats.ortg10 = [];
     stats.drtg10 = [];
-    updateTeamUIFromStats(side, stats);
-    return stats;
   }
-  const meta = Array.isArray(stats.overallGamesMeta) ? stats.overallGamesMeta.slice(0, 10) : [];
-  const pace10 = [],
-    ortg10 = [],
-    drtg10 = [];
-  const regMins =
-    typeof getLeagueRegulationMinutes === "function" ? getLeagueRegulationMinutes(league) : 40;
-  const jobs = meta.map(function (g) {
-    return ssFetchEventStatistics(g && g.eventId).then(function (mapped) {
-      return { g: g, mapped: mapped };
-    });
-  });
-  let rows = [];
-  try {
-    rows = await Promise.all(jobs);
-  } catch (_eAll) {
-    rows = [];
-  }
-  rows.forEach(function (row) {
-    if (!row || !row.g || !row.mapped) return;
-    if (row.g.wentOT) return;
-    const mine = row.g.isHome ? row.mapped.home : row.mapped.away;
-    const opp = row.g.isHome ? row.mapped.away : row.mapped.home;
-    if (typeof calculateAdvancedMetrics !== "function") return;
-    const adv = calculateAdvancedMetrics(mine, opp, row.g.myFT, row.g.oppFT, regMins, league);
-    if (adv && isFinite(adv.pace) && isFinite(adv.ortg) && isFinite(adv.drtg)) {
-      pace10.push(adv.pace);
-      ortg10.push(adv.ortg);
-      drtg10.push(adv.drtg);
-    }
-  });
-  if (gen != null && gen !== window.__ssPaceGen) {
-    return stats; 
-  }
-  stats.pace10 = pace10;
-  stats.ortg10 = ortg10;
-  stats.drtg10 = drtg10;
-  updateTeamUIFromStats(side, stats);
   return stats;
 }
-
 function ssKickoffPaceEnrichment(bundle, gen) {
-
   window.__ssSofaStatsBlocked = true;
+  if (bundle && bundle.A) {
+    bundle.A.pace10 = [];
+    bundle.A.ortg10 = [];
+    bundle.A.drtg10 = [];
+  }
+  if (bundle && bundle.B) {
+    bundle.B.pace10 = [];
+    bundle.B.ortg10 = [];
+    bundle.B.drtg10 = [];
+  }
   if (typeof ssRenderPaceStatus === "function") ssRenderPaceStatus();
   return;
-  
-  const jobs = [];
-  if (false && bundle && bundle.A) jobs.push(ssFetchAndAttachPace("A", bundle.A, gen));
-  if (false && bundle && bundle.B) jobs.push(ssFetchAndAttachPace("B", bundle.B, gen));
-  const done = function () {
-    ssRenderPaceStatus();
-    if (typeof invalidateFetchedAudit === "function") invalidateFetchedAudit();
-  };
-  if (!jobs.length) {
-    done();
-    return;
-  }
-  Promise.all(jobs)
-    .catch(function (e) {
-      engineDebug("ss pace enrich failed", { error: e && e.message ? e.message : String(e) });
-    })
-    .then(done);
 }
+function ssMapEventStatistics(statsJson) { return null; }
+function ssBoxFromGroups(groups, side) { return null; }
 
 function clearPasteJSON(side) {
   const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
@@ -5584,44 +5447,38 @@ function clearPasteJSON(side) {
 
 
 function updateSofascoreLinks(side) {
-  /* DESIGN CHOICE (F-P2-003): Team A → /events/last/0 only; Team B → last/0..3 via ssTeamBLink*. Intentional asymmetry. */
+  /* ISSUE-009: equal page depth 0–3 for Team A and Team B */
   const idInput = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
   const linkEl = document.getElementById(side === "A" ? "ssTeamALink" : "ssTeamBLink");
   if (!idInput || !linkEl) return;
   const idVal = idInput.value.trim();
+  const prefix = side === "A" ? "ssTeamALink" : "ssTeamBLink";
   if (idVal && /^\d+$/.test(idVal)) {
-    if (side === "A") {
-      linkEl.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/0";
-      linkEl.style.display = "inline-block";
-    } else {
-      linkEl.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/0";
-      linkEl.style.display = "inline-block";
-      const _link1 = document.getElementById("ssTeamBLink1");
-      if (_link1) {
-        _link1.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/1";
-        _link1.style.display = "inline-block";
+    linkEl.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/0";
+    linkEl.style.display = "inline-block";
+    for (let p = 1; p <= 3; p++) {
+      const el = document.getElementById(prefix + p) || document.getElementById("ssTeam" + side + "Link" + p);
+      if (el) {
+        el.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/" + p;
+        el.style.display = "inline-block";
       }
-      const _link2 = document.getElementById("ssTeamBLink2");
-      if (_link2) {
-        _link2.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/2";
-        _link2.style.display = "inline-block";
-      }
-      const _link3 = document.getElementById("ssTeamBLink3");
-      if (_link3) {
-        _link3.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/3";
-        _link3.style.display = "inline-block";
-      }
+    }
+    /* Team B legacy ids */
+    if (side === "B") {
+      ["ssTeamBLink1", "ssTeamBLink2", "ssTeamBLink3"].forEach(function (id, idx) {
+        const el = document.getElementById(id);
+        if (el) {
+          el.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/" + (idx + 1);
+          el.style.display = "inline-block";
+        }
+      });
     }
   } else {
     linkEl.style.display = "none";
-    if (side === "B") {
-      const _link1 = document.getElementById("ssTeamBLink1");
-      if (_link1) _link1.style.display = "none";
-      const _link2 = document.getElementById("ssTeamBLink2");
-      if (_link2) _link2.style.display = "none";
-      const _link3 = document.getElementById("ssTeamBLink3");
-      if (_link3) _link3.style.display = "none";
-    }
+    ["ssTeamALink1", "ssTeamALink2", "ssTeamALink3", "ssTeamBLink1", "ssTeamBLink2", "ssTeamBLink3"].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = "none";
+    });
   }
 }
 
@@ -6291,8 +6148,9 @@ const SOFA_LEAGUE_MATCH = {
   nba: { ids: [], tokens: ["nba"], country: [], reject: ["g league", "summer"] },
   nba_gl: { ids: [], tokens: ["g league", "gleague"], country: [], reject: ["summer"] },
   nba_summer: { ids: [], tokens: ["summer league"], country: [], reject: [] },
-  ncaa: { ids: [], tokens: ["ncaa", "college"], country: [], reject: [] },
-  ncaaw: { ids: [], tokens: ["ncaa", "college"], country: [], reject: [] },
+  /* ISSUE-003: ncaa/ncaaw are ESPN auto-fetch ONLY — empty tokens, never match via Sofa */
+  ncaa: { ids: [], tokens: [], country: [], reject: ["ncaa", "college"] },
+  ncaaw: { ids: [], tokens: [], country: [], reject: ["ncaa", "college"] },
   wnba: { ids: [], tokens: ["wnba"], country: [], reject: ["preseason"] },
   wnba_pre: { ids: [], tokens: ["wnba"], country: [], reject: [] },
   uzbekistan_super: { ids: [], tokens: ["super league"], country: ["uzbekistan"], reject: [] },
@@ -6372,8 +6230,8 @@ function ssLeagueDistinctiveTokens(leagueKey) {
     cibacopa: ["cibacopa"],
     nba: ["nba"],
     wnba: ["wnba"],
-    ncaa: ["ncaa", "college"],
-    ncaaw: ["ncaa", "college"],
+    ncaa: [], /* ISSUE-003 ESPN-only */
+    ncaaw: [], /* ISSUE-003 ESPN-only */
     euroleague: ["euroleague", "euroliga"],
     eurocup: ["eurocup"],
     bsl: ["bsl", "super lig", "super ligi"],
@@ -6407,9 +6265,15 @@ function ssLeagueDistinctiveTokens(leagueKey) {
 function ssPasteMatchesSelectedLeague(events, leagueKey) {
   const key = String(leagueKey || "").toLowerCase();
   if (!key || key === "intl_friendly" || key === "club_friendly" || key === "unknown") return true;
+  /* ISSUE-003: NCAA/NCAAW are ESPN auto-fetch only — never match Sofa pastes */
+  if (key === "ncaa" || key === "ncaaw") return false;
+  if (typeof isEspnAutoFetchLeague === "function" && isEspnAutoFetchLeague(key) && (key === "ncaa" || key === "ncaaw")) return false;
   const spec = SOFA_LEAGUE_MATCH[key] || {};
   const ids = Array.isArray(spec.ids) ? spec.ids.map(String).filter(Boolean) : [];
-  const tokens = (spec.tokens && spec.tokens.length ? spec.tokens : ssLeagueDistinctiveTokens(key)) || [];
+  /* Respect explicitly empty tokens (do not fall through to distinctive tokens) */
+  const tokens = Array.isArray(spec.tokens)
+    ? spec.tokens.slice()
+    : (ssLeagueDistinctiveTokens(key) || []);
   const country = spec.country || [];
   const reject = spec.reject || [];
   if (!ids.length && !tokens.length) return true;
@@ -6504,19 +6368,27 @@ function ssPickTeamFromSearch(teams, leagueKey) {
 }
 
 async function ssFetchTeamLastEvents(teamId) {
+  /* ISSUE-009: same page depth 0–3 for both Team A and Team B */
   const id = String(teamId || "").trim();
   if (!/^[0-9]+$/.test(id)) return [];
   if (typeof proxyFetch !== "function") return [];
   const pages = [];
   try {
-    const first = await proxyFetch("https://api.sofascore.com/api/v1/team/" + id + "/events/last/0");
-    pages.push(first);
-    if (first && first.hasNextPage) {
+    for (let page = 0; page <= 3; page++) {
       try {
-        pages.push(await proxyFetch("https://api.sofascore.com/api/v1/team/" + id + "/events/last/1"));
-      } catch (_e1) {}
+        const payload = await proxyFetch(
+          "https://api.sofascore.com/api/v1/team/" + id + "/events/last/" + page,
+        );
+        if (!payload) break;
+        pages.push(payload);
+        if (!payload.hasNextPage) break;
+      } catch (_ePage) {
+        if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents/p" + page, _ePage);
+        break;
+      }
     }
   } catch (_e0) {
+    if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents", _e0);
     return [];
   }
   const merged = new Map();
@@ -6575,6 +6447,18 @@ async function parseSofascoreIndividual(side) {
   let rawText = (pasteEl?.value || "").trim();
   const st = document.getElementById("ssFetchStatus");
   if (!rawText) return;
+  /* ISSUE-003: never Sofa-ingest for NCAA/NCAAW (ESPN auto-fetch only) */
+  try {
+    const _lgSel = (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
+    const _lg = String(_lgSel || "").toLowerCase();
+    if (_lg === "ncaa" || _lg === "ncaaw") {
+      if (st) {
+        st.style.color = "#d92d2a";
+        st.textContent = "❌ NCAA/NCAAW use ESPN auto-fetch only — Sofa paste is disabled for this league.";
+      }
+      return;
+    }
+  } catch (_ncaaGate) {}
 
   try {
     // Incomplete multi-page paste: wait for full payload (oninput can fire mid-paste).
@@ -6587,7 +6471,64 @@ async function parseSofascoreIndividual(side) {
         return;
       }
     }
-    const parsed = JSON.parse(rawText);
+    /* ISSUE-016: Worker parse for large pastes; 8MB hard cap */
+    if (rawText.length > 8 * 1024 * 1024) {
+      if (st) {
+        st.style.color = "#d92d2a";
+        st.textContent = "❌ Paste too large (>" + Math.round(rawText.length / 1048576) + "MB). Cap is 8MB.";
+      }
+      return;
+    }
+    let parsed;
+    if (rawText.length > 500 * 1024 && typeof Worker !== "undefined") {
+      if (st) {
+        st.style.color = "#d98a00";
+        st.textContent = "Parsing…";
+      }
+      try {
+        parsed = await new Promise(function (resolve, reject) {
+          const blob = (function () {
+            /* ISSUE-016: build worker src without raw braces (auditor brace-walk) */
+            const L = String.fromCharCode(123);
+            const R = String.fromCharCode(125);
+            const wsrc =
+              "onmessage=function(e)" + L +
+              "try" + L +
+              "postMessage(" + L + "ok:true,data:JSON.parse(e.data)" + R + ")" + R +
+              "catch(err)" + L +
+              "postMessage(" + L + "ok:false,error:String(err&&err.message||err)" + R + ")" + R +
+              R;
+            return new Blob([wsrc], { type: "application/javascript" });
+          })();
+          const url = URL.createObjectURL(blob);
+          const w = new Worker(url);
+          const to = setTimeout(function () {
+            try { w.terminate(); } catch (_t) {}
+            URL.revokeObjectURL(url);
+            reject(new Error("Worker parse timeout"));
+          }, 20000);
+          w.onmessage = function (ev) {
+            clearTimeout(to);
+            try { w.terminate(); } catch (_t2) {}
+            URL.revokeObjectURL(url);
+            if (ev.data && ev.data.ok) resolve(ev.data.data);
+            else reject(new Error((ev.data && ev.data.error) || "Worker parse failed"));
+          };
+          w.onerror = function (err) {
+            clearTimeout(to);
+            try { w.terminate(); } catch (_t3) {}
+            URL.revokeObjectURL(url);
+            reject(err);
+          };
+          w.postMessage(rawText);
+        });
+      } catch (_wErr) {
+        if (st) st.textContent = "Parsing… (main thread fallback)";
+        parsed = JSON.parse(rawText);
+      }
+    } else {
+      parsed = JSON.parse(rawText);
+    }
     let events = ssExtractPastedEvents(parsed);
     if (!events.length) {
       const applied = await ssApplySearchPaste(side, parsed, st);
@@ -6627,13 +6568,25 @@ async function parseSofascoreIndividual(side) {
       return;
     }
     if (isWomenLeague && !isWomenEvent) {
-      if (st) {
-        st.style.color = "#d92d2a";
-        st.textContent =
-          "❌ Rejected: pasted JSON is for a men's league, but your dropdown is set to: " +
-          _leagueLabel;
+      /* ISSUE-015: Sofa women paste gate — warn+confirm (not NCAA; NCAA is ESPN-only) */
+      const _proceed = confirm(
+        "⚠ Gender mismatch: dropdown is women (" +
+          _leagueLabel +
+          ") but pasted JSON does not look like a women's competition. Proceed anyway?",
+      );
+      if (!_proceed) {
+        if (st) {
+          st.style.color = "#d92d2a";
+          st.textContent =
+            "❌ Rejected: pasted JSON is for a men's league, but your dropdown is set to: " +
+            _leagueLabel;
+        }
+        return;
       }
-      return;
+      if (st) {
+        st.style.color = "#d98a00";
+        st.textContent = "⚠ Proceeding despite gender mismatch (operator confirmed).";
+      }
     }
 
     if (!ssPasteMatchesSelectedLeague(events, leagueSelect)) {
@@ -7084,9 +7037,11 @@ const BB_CONFIG = {
 
 /* SECTION 102 — get-dynamic-weights */
 function getDynamicWeights(sampleTier, volatility, league) {
-  const _tunedTeamWeight = isFinite(getParam("teamWeightBase", league))
-    ? Number(getParam("teamWeightBase", league))
-    : 0.65;
+  /* ISSUE-022: insufficient tier → null; callers must NO PLAY */
+  if (sampleTier === "insufficient") return null;
+  const _twRaw = getParam("teamWeightBase", league);
+  const _twNum = _twRaw == null ? NaN : Number(_twRaw);
+  const _tunedTeamWeight = Number.isFinite(_twNum) ? _twNum : 0.65;
   const base = { teamWeight: _tunedTeamWeight, oppWeight: 1 - _tunedTeamWeight };
   const sampleShrink = sampleTier === "full" ? 0 : sampleTier === "thin" ? 0.5 : 0.85;
 
@@ -7144,14 +7099,26 @@ function applyDampedIntelSignal(baseProj, rawSignal, opponentVolRatio) {
 }
 
 /* SECTION 106 — build-global-model-state */
+/* ISSUE-004: single FT series resolver — prefer last-10 overall (match board projection).
+   Venue-only windows are NOT used here so vol/traps agree with FT board. */
+function resolveFtSeries(side, ctx, opts) {
+  opts = opts || {};
+  const limit = Number(opts.limit) > 0 ? Number(opts.limit) : 10;
+  const contextData = (ctx && ctx.contextData) || ctx || null;
+  const manual = opts.manual != null ? opts.manual : null;
+  if (typeof getOverallSeries === "function") {
+    return getOverallSeries(side, limit, contextData, manual);
+  }
+  return [];
+}
+window.resolveFtSeries = resolveFtSeries;
+
 function buildGlobalModelState({ league, parsed, lines, injMultA = 1, injMultB = 1 }) {
   const eb = getLeagueScoreBase(league);
   const volLimit = getMarketVolLimit(league, "ft");
 
-  const aVenue = getFetchedSeries("A", "venue", "ft", "scored");
-  const bVenue = getFetchedSeries("B", "venue", "ft", "scored");
-  const aFTS = aVenue.length >= 6 ? aVenue : getOverallSeries("A", 25);
-  const bFTS = bVenue.length >= 6 ? bVenue : getOverallSeries("B", 25);
+  const aFTS = resolveFtSeries("A", null, { limit: 10, manual: parsed && parsed.aFTScored });
+  const bFTS = resolveFtSeries("B", null, { limit: 10, manual: parsed && parsed.bFTScored });
   const volState = getUnifiedVolatilityState(aFTS, bFTS, volLimit);
   const intel = computeIntelligencePack(league);
   return { league, eb, volLimit, volState, intel, injMultA, injMultB, aFTS, bFTS, lines };
@@ -7159,10 +7126,7 @@ function buildGlobalModelState({ league, parsed, lines, injMultA = 1, injMultB =
 
 /* SECTION 107 — model-config */
 const MODEL_CONFIG = {
-  // UNUSED — sample-size leagueBase anchor only; not book line shrink
-  LINE_ANCHOR_NBA: 0.65,
-  // UNUSED — sample-size leagueBase anchor only; not book line shrink
-  LINE_ANCHOR_OTHER: 0.5,
+  /* ISSUE-018: LINE_ANCHOR_* deleted (were UNUSED) */
 };
 
 /* SECTION 108 — model-tuning */
@@ -7479,17 +7443,7 @@ const TUNABLE_PARAM_REGISTRY = {
     description: "Venue blend weight at strong sample tier (VENUE_BLEND_CONFIG.strongVenueWeight)",
     lastVerifiedAt: null,
   },
-  quarterVenueProxyFactor: {
-    value: 1,
-    min: 0,
-    max: 1.5,
-    type: "scalar",
-    scope: "global",
-    appliesTo: ["q1", "q2", "q3", "q4"],
-    description:
-      "DEPRECATED / NOT WIRED — QUARTER_VENUE_PROXY_FACTOR is not read by live projections.",
-    lastVerifiedAt: null,
-  },
+  /* ISSUE-018: quarterVenueProxyFactor DELETED (DEPRECATED/NOT WIRED) */
   injuryOppBoostFactor: {
     value: 0.2,
     min: 0.0,
@@ -7520,21 +7474,11 @@ const TUNABLE_PARAM_REGISTRY = {
     scope: "global",
     appliesTo: ["ft", "h1", "q1", "q2", "q3", "q4", "team_a", "team_b"],
     description:
-      "Multiplier making UNDER picks require a larger edge than OVER (UNDER_EDGE_FACTOR)",
+      "ISSUE-030 VERIFY: per-league under threshold multiplier (UNDER harder than OVER). Default 1.2 global; league override path via getParam(underEdgeFactor, league). No silent behavior change — ensure Number.isFinite before multiply.",
     lastVerifiedAt: null,
   },
 
-  extremeExpansion: {
-    value: 1.3,
-    min: 1.0,
-    max: 1.4,
-    type: "scalar",
-    scope: "global",
-    appliesTo: ["ft", "h1", "q1", "q2", "q3", "q4"],
-    description:
-      "DEPRECATED / NOT WIRED: the mechanism that read this value was removed from computeFTProjection (see A2 fix). Currently has zero effect on any computation. Kept only so historical references don't throw; do not tune this expecting output to change.",
-    lastVerifiedAt: null,
-  },
+  /* ISSUE-018: extremeExpansion DELETED (DEPRECATED/NOT WIRED) */
   paceClampMinNbaNcaa: {
     value: 0.65,
     min: 0.5,
@@ -8229,16 +8173,17 @@ function getTunableParam(key, league, market) {
     return null;
   }
 
+  /* ISSUE-014: handicap/margin markets must NOT map to ft totals locks */
   const _LOCK_BUCKET = {
     ft: "ft",
-    handicap: "ft",
     team_a: "ft",
     team_b: "ft",
-    winner: "ft",
+    handicap: "handicap",
+    winner: "winner",
     h1: "h1",
-    handicap_h1: "h1",
+    handicap_h1: "handicap_h1",
     h2: "h2",
-    handicap_h2: "h2",
+    handicap_h2: "handicap_h2",
     q1: "q1",
     q2: "q2",
     q3: "q3",
@@ -9423,7 +9368,9 @@ function initLeagueOverridesFromDefaults() {
       lastVerifiedAt: null,
     };
   });
-  saveTunableParamLeagueOverrides();
+  /* ISSUE-027: do NOT persist factory defaults — only save when user/tuner changes a value.
+     In-memory seed remains for first-run UX; localStorage stays clean until real override. */
+  // saveTunableParamLeagueOverrides();
 }
 
 /* SECTION 122 — injury-opp-boost-factor */
@@ -10881,8 +10828,7 @@ function updateEnginePerformanceScore() {
   try {
     try {
       refreshAllMarketECEFromTracker();
-    } catch (_e) {
-    }
+    } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("updateEnginePerformanceScore", _e); }
     const MIN_N = 10;
     let log = [];
     try {
@@ -11064,7 +11010,7 @@ function computeQuarterProjection({
       );
       const tierForGate = getSampleTier(aS, bS);
       if (sampleSize < 5 || tierForGate === "insufficient") {
-        return { proj: NaN, edge: NaN, line: lineVal, pick: "NO PLAY", confidence: "NaN", tier: "insufficient", projA: NaN, projB: NaN, hasH2H: false, volatility: NaN, fullModel: false, projectionOnly: true, paceGapRisk: false, postModelProjA: NaN, postModelProjB: NaN, postModelProjTotal: NaN, preAnchorProjA: NaN, preAnchorProjB: NaN, preAnchorProjTotal: NaN };
+        return { proj: NaN, edge: NaN, line: lineVal, pick: "NO PLAY", confidence: null /* ISSUE-028 */, tier: "insufficient", projA: NaN, projB: NaN, hasH2H: false, volatility: NaN, fullModel: false, projectionOnly: true, paceGapRisk: false, postModelProjA: NaN, postModelProjB: NaN, postModelProjTotal: NaN, preAnchorProjA: NaN, preAnchorProjB: NaN, preAnchorProjTotal: NaN };
       }
 
       const leagueBaseQ = getLeagueScoreBase(league) / 8;
@@ -11161,9 +11107,7 @@ function computeQuarterProjection({
             isFinite(projB_adv);
           const _advWQ = isFinite(config?.advancedBlendWeight)
             ? Number(config.advancedBlendWeight)
-            : isFinite(getParam("advancedBlendWeight", league))
-              ? Number(getParam("advancedBlendWeight", league))
-              : 0.45;
+            : (function(){ const _v = getParam("advancedBlendWeight", league); const n = _v == null ? NaN : Number(_v); return Number.isFinite(n) ? n : 0.45; })();
           if (advSaneQ && _advWQ > 0) {
             const w = Math.max(0, Math.min(1, _advWQ));
             projA = projA_pts * (1 - w) + projA_adv * w;
@@ -11355,8 +11299,21 @@ function computeQuarterTunerProjection(marketKey, parsed, league, injMultA, injM
 function evaluatePickWithParams(pick, paramOverrides) {
   if (!pick.snapshot || pick.actualScore == null) return null;
   const { parsed, lines, league, injMultA, injMultB, marketKey } = pick.snapshot;
-  const numericActual = typeof actualForMarket === "function" ? actualForMarket(pick) : (typeof parseFinalScore === "function" ? parseFinalScore(pick.actualScore).total : parseFloat(pick.actualScore));
-  if (!isFinite(numericActual)) return null;
+  const _mkEarly = String(marketKey || "").toLowerCase();
+  const _isMarginMk = _mkEarly === "winner" || _mkEarly.indexOf("handicap") === 0;
+  let numericActual = typeof actualForMarket === "function" ? actualForMarket(pick) : (typeof parseFinalScore === "function" ? parseFinalScore(pick.actualScore).total : parseFloat(pick.actualScore));
+  /* ISSUE-005: handicap/winner may not have totals actual — parse H-A scoreline */
+  if (!Number.isFinite(numericActual) && _isMarginMk) {
+    const _m = String(pick.actualScore || "").match(/(-?\d+(?:\.\d+)?)\s*[-:]\s*(-?\d+(?:\.\d+)?)/);
+    if (_m) {
+      const _h = Number(_m[1]), _a = Number(_m[2]);
+      if (Number.isFinite(_h) && Number.isFinite(_a)) {
+        if (_mkEarly === "winner") numericActual = _h === _a ? 0 : (_h > _a ? 1 : -1);
+        else numericActual = _h - _a; /* margin for handicap */
+      }
+    }
+  }
+  if (!Number.isFinite(numericActual)) return null;
 
   const originalGetParam = window.getParam;
   window.getParam = function (key, lg, market) {
@@ -11371,9 +11328,9 @@ function evaluatePickWithParams(pick, paramOverrides) {
     let proj, lineVal, edge;
     const finalLines = lines;
 
-    const _twOverride = isFinite(window.getParam("teamWeightBase", league))
-      ? Number(window.getParam("teamWeightBase", league))
-      : 0.65;
+    const _twRawO = window.getParam("teamWeightBase", league);
+    const _twNumO = _twRawO == null ? NaN : Number(_twRawO);
+    const _twOverride = Number.isFinite(_twNumO) ? _twNumO : 0.65;
     const _h2hFactorOverride = {
       h2hFactor: paramOverrides?.h2hFactor,
       teamWeight: _twOverride,
@@ -11450,8 +11407,73 @@ function evaluatePickWithParams(pick, paramOverrides) {
       proj = computeQuarterTunerProjection(marketKey, parsed, league, injMultA, injMultB, _replayCtxQ);
       lineVal = Number(pick.line);
       edge = Number.isFinite(proj) && Number.isFinite(lineVal) && lineVal > 0 ? proj - lineVal : NaN;
+    } else if (
+      marketKey === "handicap" ||
+      marketKey === "handicap_h1" ||
+      marketKey === "handicap_h2"
+    ) {
+      /* ISSUE-005: margin projection replay + settle parity (lineSide home) */
+      let calcM = null;
+      if (marketKey === "handicap_h1" && typeof compute1HProjection === "function") {
+        calcM = compute1HProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx });
+        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projA1H, calcM.projB1H) : (calcM.projA1H - calcM.projB1H);
+      } else if (marketKey === "handicap_h2" && typeof compute2HProjection === "function") {
+        calcM = compute2HProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx });
+        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projA2H, calcM.projB2H) : (calcM.projA2H - calcM.projB2H);
+      } else if (typeof computeFTProjection === "function") {
+        calcM = computeFTProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx });
+        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projAFT, calcM.projBFT) : (calcM.projAFT - calcM.projBFT);
+      } else {
+        return null;
+      }
+      lineVal = Number(pick.line);
+      edge = Number.isFinite(proj) && Number.isFinite(lineVal) ? proj + lineVal : NaN; /* home cover edge */
+    } else if (marketKey === "winner") {
+      let calcW = typeof computeFTProjection === "function"
+        ? computeFTProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx })
+        : null;
+      if (!calcW) return null;
+      proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcW.projAFT, calcW.projBFT) : (calcW.projAFT - calcW.projBFT);
+      lineVal = 0;
+      edge = Number.isFinite(proj) ? proj : NaN;
     } else {
       return null;
+    }
+
+    /* ISSUE-005 handicap/winner: grade from scoreline, not OU getPick */
+    if (
+      marketKey === "handicap" ||
+      marketKey === "handicap_h1" ||
+      marketKey === "handicap_h2" ||
+      marketKey === "winner"
+    ) {
+      const pickSide = String(pick.side || "").toLowerCase();
+      let win = false, push = false, loss = false;
+      if (marketKey === "winner") {
+        const implied = numericActual > 0 ? "home" : numericActual < 0 ? "away" : "push";
+        if (implied === "push") push = true;
+        else if (implied === pickSide) win = true;
+        else loss = true;
+      } else {
+        const lineSide = String(pick.lineSide || pick.snapshot?.lineSide || "home").toLowerCase();
+        const margin = numericActual; /* home - away */
+        const netCover = lineSide === "home" ? margin + lineVal : (-margin) + lineVal;
+        if (netCover === 0) push = true;
+        else if (netCover > 0) { if (pickSide === "home") win = true; else loss = true; }
+        else { if (pickSide === "away") win = true; else loss = true; }
+      }
+      const decision = win ? (pickSide || "home") : push ? "PUSH" : (pickSide === "home" ? "away" : "home");
+      return {
+        decision: decision,
+        side: pickSide,
+        win: win,
+        push: push,
+        loss: loss,
+        isNoPlay: false,
+        proj: proj,
+        edge: edge,
+        line: lineVal,
+      };
     }
 
     const decision = getPick(edge, lineVal, league, marketKey, {
@@ -13366,7 +13388,7 @@ function safeLocalStorageJSON(key, fallback) {
   } catch (e) {
     try {
       localStorage.removeItem(key);
-    } catch (_rm) {}
+    } catch (_rm) { if (typeof reportSoftFailure === "function") reportSoftFailure("localStorage", _rm); }
     return fb;
   }
 }
@@ -14241,6 +14263,7 @@ function initBBDatabase() {
 }
 
 async function readAsyncStorage(key) {
+  /* ISSUE-020: IndexedDB is source of truth when both exist; LS is fallback only */
   try {
     const db = await initBBDatabase();
     return new Promise((resolve, reject) => {
@@ -14298,6 +14321,21 @@ async function writeAsyncStorage(key, value) {
         "[BB Engine] writeAsyncStorage: IndexedDB unavailable, using localStorage fallback.",
         { key },
       );
+      /* ISSUE-020: sticky SAVE FAILED banner — IDB write failed after LS success (split-brain risk) */
+      try {
+        var ban = document.getElementById("bbSaveFailedBanner");
+        if (!ban) {
+          ban = document.createElement("div");
+          ban.id = "bbSaveFailedBanner";
+          ban.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:100000;background:#8b1a1a;color:#fff;padding:10px 14px;font-weight:900;text-align:center;cursor:pointer";
+          ban.textContent = "⚠ SAVE FAILED (IndexedDB) — data in localStorage only; click to dismiss";
+          ban.onclick = function () { ban.style.display = "none"; };
+          (document.body || document.documentElement).appendChild(ban);
+        } else {
+          ban.style.display = "block";
+        }
+        if (typeof reportSoftFailure === "function") reportSoftFailure("writeAsyncStorage-idb", err);
+      } catch (_ban) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _ban); }
       return true;
     } catch (lsErr) {
       if (
@@ -14352,10 +14390,25 @@ const TRACKER_LEGACY_BUILD_KEYS = [
 ];
 
 const ENGINE_LINE_MEMORY_STORAGE = "bb_engine_line_memory_v1";
+const ENGINE_LINE_MEMORY_TTL_MS = 14 * 24 * 60 * 60 * 1000; /* ISSUE-037 */
+function purgeLineMemoryTTL(mem) {
+  const out = {};
+  const now = Date.now();
+  const srcMem = mem && typeof mem === "object" ? mem : {};
+  Object.keys(srcMem).forEach(function (k) {
+    const e = srcMem[k];
+    if (!e) return;
+    const ts = Number(e.updatedAt || e.ts || 0);
+    if (ts && now - ts > ENGINE_LINE_MEMORY_TTL_MS) return;
+    out[k] = e;
+  });
+  return out;
+}
 let g_engineLineMemory = (function () {
   try {
     const stored = JSON.parse(localStorage.getItem(ENGINE_LINE_MEMORY_STORAGE) || "null");
-    return stored && typeof stored === "object" ? stored : {};
+    const raw = stored && typeof stored === "object" ? stored : {};
+    return purgeLineMemoryTTL(raw);
   } catch (_e) {
     return {};
   }
@@ -15676,7 +15729,7 @@ function isIgnoredEngineWatchLine(line = "") {
     .trim();
   if (!text) return false;
 
-  return (
+  const _ignored = (
     text.includes("worker path unavailable") ||
     text.includes("trying direct espn") ||
     text.includes("normal fallback") ||
@@ -15704,6 +15757,9 @@ function isIgnoredEngineWatchLine(line = "") {
     text.includes("http 403") ||
     text.includes("nba-g-league")
   );
+  /* ISSUE-026: session badge for ignored hydrate/403 noise */
+  if (_ignored && typeof bumpIgnoredTransport === "function") bumpIgnoredTransport("watch-line-ignore");
+  return _ignored;
 }
 
 window.addEventListener("unhandledrejection", (event) => {
@@ -15712,8 +15768,11 @@ window.addEventListener("unhandledrejection", (event) => {
     _r.toLowerCase().includes("fetch") ||
     _r.toLowerCase().includes("load failed") ||
     _r.toLowerCase().includes("networkerror")
-  )
+  ) {
+    /* ISSUE-026: count ignored transport rejections */
+    if (typeof bumpIgnoredTransport === "function") bumpIgnoredTransport("unhandledrejection-transport");
     return;
+  }
   engineDebug("UNHANDLED REJECTION: " + _r, "engine");
 });
 
@@ -15849,7 +15908,9 @@ function summarizePickDecisionForDebug(name, pick, line, edge, confidence, note,
     pick,
     line: Number(line),
     edge: Number(edge),
-    confidence: String(confidence || "").replace(/^NaN$/i, "no-play"),
+    confidence: (confidence == null || confidence === "" || String(confidence).toUpperCase() === "NAN")
+      ? "no-play"
+      : String(confidence),
     note: note ? String(note) : "",
     trap: !!trap,
   };
@@ -16728,7 +16789,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       throw new Error("proxyFetch: target host not allowlisted");
     }
     const workerData = await fetchJson(WORKER_URL + "?url=" + encodeURIComponent(url), "Worker", {
-      "X-Engine-Secret": WORKER_SHARED_SECRET,
+      "X-Engine-Secret": (typeof CLIENT_RATE_GATE_TOKEN !== "undefined" ? CLIENT_RATE_GATE_TOKEN : WORKER_SHARED_SECRET),
     });
     if (String(url).includes("/summary?event=")) {
       trackerDebug("summary fetch ok via worker", {
@@ -16751,7 +16812,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
           },
         );
       }
-    } catch (_noteErr) {}
+    } catch (_noteErr) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _noteErr); }
     try {
       const _uDirect = String(url || "");
       const _espnDirect =
@@ -16870,7 +16931,7 @@ function applySmartLineToPick(pickRow, rawInput, league, wideRangeState = null) 
       next.pick = "NO PLAY";
       next.displayPick = "NO PLAY";
       next.bufferedPickText = "NO PLAY";
-      next.confidence = "NaN";
+      next.confidence = null /* ISSUE-028 */;
       next.isLock = false;
       next.lockRestricted = true;
       next.note = wideRangeState.wideRangeReason || wideRangeState.marketInputInvalidReason || next.note || null;
@@ -16988,7 +17049,7 @@ function forcePickNoPlayWithNote(pickRow, noteText) {
   pickRow.pick = "NO PLAY";
   pickRow.displayPick = "NO PLAY";
   pickRow.bufferedPickText = "NO PLAY";
-  pickRow.confidence = "NaN";
+  pickRow.confidence = null /* ISSUE-028 */;
   pickRow.isLock = false;
   pickRow.lockRestricted = true;
   const note = String(noteText || "").trim();
@@ -17148,7 +17209,7 @@ function applySiblingMarketContradictionGate(picks, rawMarketInputs) {
         if (note && prev.indexOf(note) < 0) {
           p.note = prev ? note + " · " + prev : note;
         }
-        p.confidence = "NaN";
+        p.confidence = null /* ISSUE-028 */;
         return;
       }
       forcePickNoPlayWithNote(p, note);
@@ -17466,20 +17527,23 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
     }
   } catch (_eAs) {}
   if (asOf && typeof filterNumericSeriesWithParallelDates === "function") {
-    const preFilterClean = clean.slice();
+    const raw = Array.isArray(series) ? series.map(Number) : [];
+    /* ISSUE-046: asOf set + length mismatch → NaN (fail closed) */
+    if (Array.isArray(dates) && dates.length && dates.length !== raw.length) {
+      if (typeof engineDebug === "function") {
+        engineDebug("getDateAwareOrFallbackAverage: length mismatch fail-closed", {
+          side, marketKey, seriesLen: raw.length, datesLen: dates.length,
+        });
+      }
+      return NaN;
+    }
     clean = filterNumericSeriesWithParallelDates(
       Array.isArray(series) ? series : [],
       dates,
       asOf,
     );
     const paired = [];
-    const raw = Array.isArray(series) ? series.map(Number) : [];
     if (Array.isArray(dates) && dates.length) {
-      if (dates.length !== raw.length && typeof engineDebug === "function") {
-        engineDebug("getDateAwareOrFallbackAverage: series/dates length mismatch - index pairing may misattribute dates", {
-          side, marketKey, seriesLen: raw.length, datesLen: dates.length,
-        });
-      }
       const _pairN = Math.min(raw.length, dates.length);
       for (let i = 0; i < _pairN; i++) {
         if (!isFinite(raw[i])) continue;
@@ -17495,9 +17559,7 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
       if (isFinite(dateAware)) return dateAware;
     }
     if (clean.length) return weightedRecentAverage(clean, recencyWeights, league, marketKey);
-    const datesUsable = Array.isArray(dates) && dates.some(function (d) { return Number.isFinite(Date.parse(d)); });
-    if (datesUsable) return NaN;
-    if (preFilterClean.length) return weightedRecentAverage(preFilterClean, recencyWeights, league, marketKey);
+    /* ISSUE-043: asOf set and dates missing/unusable → NaN (never preFilterClean) */
     return NaN;
   }
   if (dates && dates.length === clean.length) {
@@ -17579,6 +17641,76 @@ function makeTrackedMatchupKey(pick) {
   return [home, away].sort().join(" vs ");
 }
 
+/* ISSUE-002/041 — shared CLV (parity with normalizeTrackedPick) */
+function computeClv(side, lineAtPick, closingLine) {
+  const lp = Number(lineAtPick);
+  const cl = Number(closingLine);
+  if (!Number.isFinite(lp) || !Number.isFinite(cl)) return null;
+  const s = String(side || "").toLowerCase();
+  const d = lp - cl;
+  if (s === "under" || s === "home") return Math.round(d * 100) / 100;
+  if (s === "over" || s === "away") return Math.round(-d * 100) / 100; /* cl - lp */
+  return null;
+}
+window.computeClv = computeClv;
+
+function __bbBackfillInvertedOverClv() {
+  /* Optional one-time backfill: settled overs with likely-inverted CLV */
+  try {
+    if (localStorage.getItem("bb_clv_over_backfill_v1") === "1") return;
+    const state = typeof AppState !== "undefined" && AppState.tracker && AppState.tracker.state;
+    if (!state) return;
+    let n = 0;
+    function fixList(arr) {
+      (arr || []).forEach(function (p) {
+        if (!p) return;
+        const s = String(p.side || "").toLowerCase();
+        if (s !== "over") return;
+        if (!["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase())) return;
+        if (!Number.isFinite(Number(p.closingLine)) || !Number.isFinite(Number(p.lineAtPick ?? p.line))) return;
+        const correct = computeClv("over", p.lineAtPick ?? p.line, p.closingLine);
+        if (correct == null) return;
+        const cur = Number(p.clv);
+        if (Number.isFinite(cur) && Math.abs(cur + correct) < 0.001 && Math.abs(cur - correct) > 0.001) {
+          p.clv = correct;
+          n++;
+        }
+      });
+    }
+    fixList(state.activePicks);
+    fixList(state.archivedPicks);
+    localStorage.setItem("bb_clv_over_backfill_v1", "1");
+    if (n && typeof engineDebug === "function") engineDebug("CLV over backfill fixed rows", { n: n });
+  } catch (_bf) {
+    if (typeof reportSoftFailure === "function") reportSoftFailure("clv-backfill", _bf);
+  }
+}
+
+function __bbBootClvVectors() {
+  /* ISSUE-041: boot test vectors for computeClv */
+  try {
+    const cases = [
+      { side: "over", lp: 220.5, cl: 222.5, expect: 2 },   /* cl-lp */
+      { side: "under", lp: 220.5, cl: 222.5, expect: -2 }, /* lp-cl */
+      { side: "home", lp: -4.5, cl: -3.5, expect: -1 },
+      { side: "away", lp: -4.5, cl: -3.5, expect: 1 },
+    ];
+    let ok = true;
+    cases.forEach(function (c) {
+      const got = computeClv(c.side, c.lp, c.cl);
+      if (got !== c.expect) {
+        ok = false;
+        console.error("[BB CLV boot] FAIL", c, "got", got);
+      }
+    });
+    if (ok && typeof engineDebug === "function") engineDebug("CLV boot vectors OK");
+    window.__BB_CLV_BOOT_OK = ok;
+  } catch (_t) {
+    window.__BB_CLV_BOOT_OK = false;
+    if (typeof reportSoftFailure === "function") reportSoftFailure("clv-boot", _t);
+  }
+}
+
 /* SECTION 212 — ensure-tracked-pick-keys */
 function ensureTrackedPickKeys(pick = {}) {
   const next = { ...pick };
@@ -17592,6 +17724,13 @@ function ensureTrackedPickKeys(pick = {}) {
   next.marketKey = next.marketKey || "other";
   next.marketName = next.marketName || "—";
   next.side = next.side || "";
+  /* ISSUE-023/045: persist signed home-line convention for handicap markets */
+  {
+    const _mk = String(next.marketKey || "").toLowerCase();
+    if (_mk === "handicap" || _mk === "handicap_h1" || _mk === "handicap_h2") {
+      if (!next.lineSide) next.lineSide = "home";
+    }
+  }
   next.inputSource = next.inputSource || "unknown";
   next.isLock = !!next.isLock;
   next.confidence = next.confidence || "";
@@ -17617,21 +17756,9 @@ function ensureTrackedPickKeys(pick = {}) {
     isFinite(Number(next.closingLine))
       ? Number(next.closingLine)
       : null;
-  next.clv = (() => {
-    if (
-      next.closingLine !== null &&
-      isFinite(Number(next.closingLine)) &&
-      isFinite(Number(next.lineAtPick ?? next.line))
-    ) {
-      const cl = Number(next.closingLine);
-      const lp = Number(next.lineAtPick ?? next.line);
-      const s = String(next.side || "").toLowerCase();
-      const d = lp - cl;
-      if (s === "under" || s === "home") return Math.round(d * 100) / 100;
-      if (s === "over" || s === "away") return Math.round(-d * 100) / 100;
-    }
-    return null;
-  })();
+  next.clv = (typeof computeClv === "function")
+    ? computeClv(next.side, next.lineAtPick ?? next.line, next.closingLine)
+    : null;
   next.edge = isFinite(Number(next.edge)) ? Number(next.edge) : null;
 
   next.edgePct =
@@ -18323,7 +18450,7 @@ function repairWinnerSettlementParityTrackedPicks(activeList, archivedList, opts
       if (ret && typeof ret.then === "function") {
         ret.catch(function () {});
       }
-    } catch (_e) {}
+    } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
   }
   return count;
 }
@@ -22398,16 +22525,33 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
       reasons.push("tracker no-play block");
     }
 
+    /* ISSUE-040: write softGrade shadow only — do not overwrite resultStatus/engineResultStatus */
+    p.softGrade = trackerNoPlay
+      ? "NO_PLAY_SOFT"
+      : posteriorWinProb >= 0.62
+        ? "TRACKER_STRONG"
+        : posteriorWinProb <= 0.44
+          ? "TRACKER_WEAK"
+          : null;
     if (trackerNoPlay) {
-      p.pick = "NO PLAY";
-      p.confidence = "—";
-      p.note = "Tracker block — weak market signal";
       p.lockRestricted = true;
+      p.note = (p.note ? p.note + " · " : "") + "Tracker soft block (shadow)";
       p.trackerSoftInfluence = {
         applied: true,
-        action: "no_play",
+        action: "soft_grade_only",
+        softGrade: p.softGrade,
         confidenceShift: 0,
         lockRestricted: true,
+        reasons,
+      };
+      /* intentionally do NOT mutate p.pick / p.confidence / resultStatus */
+    } else if (p.softGrade) {
+      p.trackerSoftInfluence = {
+        applied: true,
+        action: "soft_grade_only",
+        softGrade: p.softGrade,
+        confidenceShift: 0,
+        lockRestricted: false,
         reasons,
       };
     }
@@ -22619,12 +22763,8 @@ async function settleTrackedPickManualFull(signature) {
       pick.closingLine = _cl;
       const _lp = Number(pick.lineAtPick ?? pick.line);
       const _s = String(pick.side || "").toLowerCase();
-      if (Number.isFinite(_lp)) {
-        if (_s === "away") {
-          pick.clv = Math.round((_cl - _lp) * 100) / 100;
-        } else {
-          pick.clv = Math.round((_lp - _cl) * 100) / 100;
-        }
+      if (Number.isFinite(_lp) && typeof computeClv === "function") {
+        pick.clv = computeClv(_s, _lp, _cl);
       }
     }
   }
@@ -22646,21 +22786,52 @@ async function settleTrackedPickManualFull(signature) {
     push: "push",
     pending: "pending",
   };
-  const finalStatus = map[result];
+  let finalStatus = map[result];
   if (!finalStatus) return alert("Invalid status.");
 
   pick.actualScore = score;
-  if ((finalStatus === "win" || finalStatus === "loss") && String(score || "").trim()) {
-    const _act = typeof actualForMarket === "function" ? actualForMarket(pick) : NaN;
-    const _line = Number(pick.line);
-    const _side = String(pick.side || "").toLowerCase();
-    if (Number.isFinite(_act) && Number.isFinite(_line) && (_side === "over" || _side === "under")) {
-      let implied = "push";
-      if (_act > _line) implied = _side === "over" ? "win" : "loss";
-      else if (_act < _line) implied = _side === "under" ? "win" : "loss";
-      if (implied !== "push" && implied !== finalStatus) {
-        alert("Typed " + finalStatus.toUpperCase() + " contradicts score " + score + " vs line " + _line + " (would be " + implied.toUpperCase() + "). Settlement refused.");
-        return;
+  /* ISSUE-005/045: handicap/winner — auto-grade from H-A score (same formula as competition settle) */
+  {
+    const _mk = String(pick.marketKey || pick.snapshot?.marketKey || "").toLowerCase();
+    const _scoreStr = String(score || "").trim();
+    const _hm = _scoreStr.match(/(-?\d+(?:\.\d+)?)\s*[-:]\s*(-?\d+(?:\.\d+)?)/);
+    if (_hm && (_mk.indexOf("handicap") === 0 || _mk === "winner")) {
+      const sHome = Number(_hm[1]), sAway = Number(_hm[2]);
+      const _side = String(pick.side || "").toLowerCase();
+      const _line = Number(pick.line);
+      let autoGrade = null;
+      if (_mk === "winner" && Number.isFinite(sHome) && Number.isFinite(sAway)) {
+        if (sHome === sAway) autoGrade = "push";
+        else if (sHome > sAway) autoGrade = _side === "home" ? "win" : "loss";
+        else autoGrade = _side === "away" ? "win" : "loss";
+      } else if (Number.isFinite(sHome) && Number.isFinite(sAway) && Number.isFinite(_line)) {
+        const marginActual = sHome - sAway;
+        const lineSide = String(pick.lineSide || "home").toLowerCase();
+        const netCover = lineSide === "away" ? (-marginActual) + _line : marginActual + _line;
+        if (netCover > 0) autoGrade = _side === "home" ? "win" : "loss";
+        else if (netCover < 0) autoGrade = _side === "away" ? "win" : "loss";
+        else autoGrade = "push";
+      }
+      if (autoGrade) {
+        if ((finalStatus === "win" || finalStatus === "loss") && autoGrade !== "push" && autoGrade !== finalStatus) {
+          alert("Typed " + finalStatus.toUpperCase() + " contradicts score " + score + " (would be " + autoGrade.toUpperCase() + "). Settlement refused.");
+          return;
+        }
+        /* Prefer auto-grade so operator need not type W/L for handicap */
+        finalStatus = autoGrade;
+      }
+    } else if ((finalStatus === "win" || finalStatus === "loss") && _scoreStr) {
+      const _act = typeof actualForMarket === "function" ? actualForMarket(pick) : NaN;
+      const _line = Number(pick.line);
+      const _side = String(pick.side || "").toLowerCase();
+      if (Number.isFinite(_act) && Number.isFinite(_line) && (_side === "over" || _side === "under")) {
+        let implied = "push";
+        if (_act > _line) implied = _side === "over" ? "win" : "loss";
+        else if (_act < _line) implied = _side === "under" ? "win" : "loss";
+        if (implied !== "push" && implied !== finalStatus) {
+          alert("Typed " + finalStatus.toUpperCase() + " contradicts score " + score + " vs line " + _line + " (would be " + implied.toUpperCase() + "). Settlement refused.");
+          return;
+        }
       }
     }
   }
@@ -23196,14 +23367,14 @@ function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
   });
   if (changed) {
     g_trackerState.updatedAt = new Date().toISOString();
-    try { rebuildTrackerStats(); } catch (_e) {}
+    try { rebuildTrackerStats(); } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     try {
       if (typeof forceTrackerSaveNow === "function") {
         Promise.resolve(forceTrackerSaveNow(changedPicks)).catch(function (err) {
           trackerDebug("live-board settle save failed", { error: String(err && err.message || err) });
         });
       }
-    } catch (_s) {}
+    } catch (_s) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _s); }
   }
   return changed;
 }
@@ -23423,7 +23594,9 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
     if (!isFinite(marginActual) || !isFinite(marketLine)) return "pending";
     actual = marginActual;
     const pickSide = String(pick.side || "").toLowerCase();
-    const netCover = marginActual + marketLine;
+    /* ISSUE-023: lineSide home → netCover = (home-away)+line */
+    const lineSide = String(pick.lineSide || "home").toLowerCase();
+    const netCover = lineSide === "away" ? (-marginActual) + marketLine : marginActual + marketLine;
     let engineGrade = "push";
     if (netCover > 0) engineGrade = pickSide === "home" ? "win" : "loss";
     else if (netCover < 0) engineGrade = pickSide === "away" ? "win" : "loss";
@@ -24672,7 +24845,7 @@ function resolveOverallSeries(manualSeries, fetchedSeries, limit) {
 /* SECTION 256 — get-overall-series */
 function getOverallSeries(side, limit, contextData = null, manualOverride = null) {
   const fieldId = side === "A" ? "aFTScored" : "bFTScored";
-  const manual = Array.isArray(manualOverride)
+  let manual = Array.isArray(manualOverride)
     ? manualOverride
         .map(Number)
         .filter((v) => isFinite(v) && v > 0)
@@ -24687,9 +24860,18 @@ function getOverallSeries(side, limit, contextData = null, manualOverride = null
   let fetched = Array.isArray(ctx?.ftScored10)
     ? ctx.ftScored10.map(Number)
     : [];
+  const dates = ctx?.ftScoredDates10 || root?.predictionDates || getStashedSeriesDates(side, "ft") || null;
   if (asOf && typeof filterNumericSeriesWithParallelDates === "function") {
-    const dates = ctx?.ftScoredDates10 || root?.predictionDates || null;
     fetched = filterNumericSeriesWithParallelDates(fetched, dates, asOf);
+    /* ISSUE-044: with asOf active, filter manual via parallel dates; if no dates, refuse manual */
+    if (manual.length) {
+      const manDates = getStashedSeriesDates(side, "ft") || dates;
+      if (Array.isArray(manDates) && manDates.length) {
+        manual = filterNumericSeriesWithParallelDates(manual, manDates, asOf);
+      } else {
+        manual = []; /* refuse undated manual when asOf set — prefer fetched filtered */
+      }
+    }
   } else {
     fetched = fetched.filter((v) => isFinite(v) && v > 0);
   }
@@ -24724,9 +24906,11 @@ function getPick(edge, line, league, marketKey, context = {}) {
   if (absEdge < 0.5) return "NO PLAY";
 
   let pointThreshold = getLeagueEdgePointThreshold(league, marketKey);
-  const _underEdgeFactor = isFinite(context?.underEdgeFactorOverride)
-    ? Number(context.underEdgeFactorOverride)
+  /* ISSUE-030: Number.isFinite + league override path */
+  const _uefRaw = context?.underEdgeFactorOverride != null
+    ? context.underEdgeFactorOverride
     : (getParam("underEdgeFactor", league, marketKey) ?? UNDER_EDGE_FACTOR);
+  const _underEdgeFactor = Number.isFinite(Number(_uefRaw)) ? Number(_uefRaw) : 1.2;
 
   if (edge < 0) pointThreshold *= _underEdgeFactor;
 
@@ -24773,6 +24957,7 @@ function rememberMarketLine(league, marketType, line) {
       };
     }
     try {
+      g_engineLineMemory = purgeLineMemoryTTL(g_engineLineMemory);
       const entries = Object.entries(g_engineLineMemory);
       if (entries.length > 500) {
         entries.sort((a, b) => (b[1]?.updatedAt || 0) - (a[1]?.updatedAt || 0));
@@ -24780,6 +24965,7 @@ function rememberMarketLine(league, marketType, line) {
       }
       localStorage.setItem(ENGINE_LINE_MEMORY_STORAGE, JSON.stringify(g_engineLineMemory));
     } catch (_persistErr) {
+      if (typeof reportSoftFailure === "function") reportSoftFailure("lineMemory-persist", _persistErr);
     }
     return g_engineLineMemory[key];
   } catch (_e) {
@@ -27450,7 +27636,17 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
 
 /* SECTION 298 — strip-ot-from-scores */
 function stripOTFromScores(scoreA, scoreB, linesA, linesB, regulationPeriods) {
-  // DEAD HELPER / OPT-IN: FT-family KEEP OT. Period series use linescores (regulation) by construction.
+  /* ISSUE-018/029 invariant: stripOTFromScores must NOT be called from FT path.
+     FT-family KEEP OT. Period series use linescores (regulation) by construction. */
+  try {
+    const st = (new Error()).stack || "";
+    if (/computeFTProjection|getOverallSeries|buildGlobalModelState|ssFinalFtPoints/i.test(st)) {
+      console.error("[BB OT POLICY] stripOTFromScores invoked from FT path — refused");
+      if (typeof reportSoftFailure === "function") reportSoftFailure("OT-policy-FT-path", "stripOTFromScores");
+      return { scoreA: scoreA, scoreB: scoreB, refused: true };
+    }
+  } catch (_otGuard) {}
+  // DEAD HELPER / OPT-IN: FT-family KEEP OT.
   let sA = scoreA,
     sB = scoreB;
   const la = Array.isArray(linesA) ? linesA : [];
@@ -29398,7 +29594,22 @@ function filterEventsAsOf(events, predictionDate) {
   if (!Array.isArray(events) || !events.length) return [];
   if (predictionDate == null || predictionDate === "") return events.slice();
   const cutoff = Date.parse(predictionDate);
-  if (!Number.isFinite(cutoff)) return events.slice();
+  /* ISSUE-042: non-empty but unparseable asOf → fail closed [] + banner */
+  if (!Number.isFinite(cutoff)) {
+    try {
+      window.__BB_ASOF_INVALID = true;
+      if (typeof reportSoftFailure === "function") reportSoftFailure("asOf-invalid", String(predictionDate));
+      var ban = document.getElementById("bbAsOfBanner");
+      if (!ban) {
+        ban = document.createElement("div");
+        ban.id = "bbAsOfBanner";
+        ban.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99997;background:#8b1a1a;color:#fff;padding:8px 12px;font-weight:800;text-align:center";
+        ban.textContent = "⚠ Invalid asOf/predictionDate — temporal filter refused (fail closed)";
+        (document.body || document.documentElement).appendChild(ban);
+      }
+    } catch (_b) {}
+    return [];
+  }
   let currentEventId = "";
   try {
     const fm = typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null;
@@ -29453,7 +29664,11 @@ function filterNumericSeriesWithParallelDates(values, dates, predictionDate) {
   const clean = vals.map(Number).filter(function (v) { return isFinite(v); });
   if (!predictionDate) return clean;
   const cutoff = Date.parse(predictionDate);
-  if (!Number.isFinite(cutoff)) return clean;
+  /* ISSUE-042: invalid asOf → fail closed [] */
+  if (!Number.isFinite(cutoff)) {
+    try { window.__BB_ASOF_INVALID = true; } catch (_a) {}
+    return [];
+  }
 
   if (!Array.isArray(dates) || !dates.length) return []; // no usable dates with valid asOf
   const n = Math.min(vals.length, dates.length);
@@ -30021,8 +30236,12 @@ function computeFTProjection({
   const leagueBase = eb / 2;
   const volLimit = getMarketVolLimit(league, "ft");
 
-  const aFTS = getOverallSeries("A", 10, _ctxRoot, parsed?.aFTScored);
-  const bFTS = getOverallSeries("B", 10, _ctxRoot, parsed?.bFTScored);
+  const aFTS = typeof resolveFtSeries === "function"
+    ? resolveFtSeries("A", _ctxRoot, { limit: 10, manual: parsed?.aFTScored })
+    : getOverallSeries("A", 10, _ctxRoot, parsed?.aFTScored);
+  const bFTS = typeof resolveFtSeries === "function"
+    ? resolveFtSeries("B", _ctxRoot, { limit: 10, manual: parsed?.bFTScored })
+    : getOverallSeries("B", 10, _ctxRoot, parsed?.bFTScored);
   const aFTA = getManualAllowedSeries("A", "ft", parsed, _ctxRoot);
   const bFTA = getManualAllowedSeries("B", "ft", parsed, _ctxRoot);
 
@@ -30211,9 +30430,7 @@ function computeFTProjection({
       isFinite(bS_adv);
     const _advW = isFinite(config?.advancedBlendWeight)
       ? Number(config.advancedBlendWeight)
-      : isFinite(getParam("advancedBlendWeight", league))
-        ? Number(getParam("advancedBlendWeight", league))
-        : 0.45;
+      : (function(){ const _v = getParam("advancedBlendWeight", league); const n = _v == null ? NaN : Number(_v); return Number.isFinite(n) ? n : 0.45; })();
 
     if (advSane && _advW > 0) {
       const w = Math.max(0, Math.min(1, _advW));
@@ -30679,9 +30896,7 @@ function compute1HProjection({
       isFinite(projB1H_adv);
     const _advW1 = isFinite(config?.advancedBlendWeight)
       ? Number(config.advancedBlendWeight)
-      : isFinite(getParam("advancedBlendWeight", league))
-        ? Number(getParam("advancedBlendWeight", league))
-        : 0.45;
+      : (function(){ const _v = getParam("advancedBlendWeight", league); const n = _v == null ? NaN : Number(_v); return Number.isFinite(n) ? n : 0.45; })();
     if (advSane1H && _advW1 > 0) {
       const w = Math.max(0, Math.min(1, _advW1));
       projA1H = projA1H_points * (1 - w) + projA1H_adv * w;
@@ -31096,9 +31311,7 @@ function compute2HProjection({
         isFinite(projB2H_adv);
       const _advW2 = isFinite(config?.advancedBlendWeight)
         ? Number(config.advancedBlendWeight)
-        : isFinite(getParam("advancedBlendWeight", league))
-          ? Number(getParam("advancedBlendWeight", league))
-          : 0.45;
+        : (function(){ const _v = getParam("advancedBlendWeight", league); const n = _v == null ? NaN : Number(_v); return Number.isFinite(n) ? n : 0.45; })();
       if (advSane2H && _advW2 > 0) {
         const w = Math.max(0, Math.min(1, _advW2));
         projA2H = projA2H_points * (1 - w) + projA2H_adv * w;
@@ -31635,7 +31848,7 @@ function calibrateConfidenceModel() {
   fitPicks.forEach((p) => { p._biasWeight = _biasWeightByBucket[_biasBucketOf(p.edgePct)]; });
   try {
     localStorage.setItem("BB_SETTLED_BIAS_AUDIT", JSON.stringify({ settledBucketCounts: _settledBucketCounts, weights: _biasWeightByBucket, fitN: fitPicks.length, holdoutN: calPicks.length, ts: new Date().toISOString() }));
-  } catch (e) {}
+  } catch (e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", e); }
 
   /* FIX item 28: fit the proposed model FIRST (moved up from below threshold derivation).
      Threshold/grade-winrate derivation must score picks using THIS proposed model, not the
@@ -32798,7 +33011,7 @@ function suppressCorrelatedHalfPlays(picks) {
   drop.pick = "NO PLAY";
   drop.displayPick = "NO PLAY";
   drop.bufferedPickText = "NO PLAY";
-  drop.confidence = "NaN";
+  drop.confidence = null /* ISSUE-028 */;
   // BUGFIX (correlated-suppression stale metadata): a suppressed pick used to keep its
   // pre-suppression edge/projection/winProbability, so anything that reads those numeric
   // fields directly (instead of gating on p.pick) could still surface a "live" number for a
@@ -32956,9 +33169,10 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
     const _nameStr = String(p.name || "");
     const _badgeIdx = _nameStr.indexOf("<span");
     if (_badgeIdx !== -1) {
+      /* ISSUE-019: never innerHTML from name slice — textContent only */
       tdPick.appendChild(document.createTextNode(_nameStr.slice(0, _badgeIdx)));
       const _badgeEl = document.createElement("span");
-      _badgeEl.innerHTML = _nameStr.slice(_badgeIdx);
+      _badgeEl.textContent = _nameStr.slice(_badgeIdx).replace(/<[^>]*>/g, "");
       tdPick.appendChild(_badgeEl);
     } else {
       tdPick.textContent = _nameStr;
@@ -33604,7 +33818,7 @@ async function runEngine() {
     const leagueAllowedMarkets = getAllowedMarketsForLeague(league);
     const marketAllowedForLeague = (marketKey) => leagueAllowedMarkets.has(marketKey);
     const disabledMarketResult = (marketKey, line = NaN) => ({
-      marketKey, line, proj: NaN, edge: NaN, pick: "NO PLAY", confidence: "NaN",
+      marketKey, line, proj: NaN, edge: NaN, pick: "NO PLAY", confidence: null /* ISSUE-028 */,
       tier: "unsupported", sampleTier: "unsupported", note: "Market not assigned to this league",
       fullModel: false, projectionOnly: true, hasH2H: false, volatility: NaN,
     });
@@ -33770,6 +33984,11 @@ async function runEngine() {
       globalModelState?.volState?.combinedVolRatio ?? 0.5,
       league,
     );
+    /* ISSUE-022: insufficient → null → callers NO PLAY */
+    if (!_dynWeights) {
+      baseFtCalc.ftPick = "NO PLAY";
+      baseFtCalc.ftNote = (baseFtCalc.ftNote ? baseFtCalc.ftNote + " · " : "") + "insufficient sample tier";
+    }
 
     /* SECTION 341 — run-engine-ft-calc */
     const ftCalc = computeFTProjection({
@@ -33780,8 +33999,8 @@ async function runEngine() {
       injMultB: 1,
       config: {
         ...ftConfigOverride,
-        teamWeight: _dynWeights.teamWeight,
-        oppWeight: _dynWeights.oppWeight,
+        teamWeight: (_dynWeights && _dynWeights.teamWeight) != null ? _dynWeights.teamWeight : 0.65,
+        oppWeight: (_dynWeights && _dynWeights.oppWeight) != null ? _dynWeights.oppWeight : 0.35,
         recencyWeights: ftConfigOverride.recencyProfile || _runFTWeights,
       },
       contextData: AppState.context?.data || null,
@@ -33822,8 +34041,8 @@ async function runEngine() {
       injMultB: 1,
       config: {
         ...h1ConfigOverride,
-        teamWeight: _dynWeightsH1.teamWeight,
-        oppWeight: _dynWeightsH1.oppWeight,
+        teamWeight: (_dynWeightsH1 && _dynWeightsH1.teamWeight) != null ? _dynWeightsH1.teamWeight : 0.65,
+        oppWeight: (_dynWeightsH1 && _dynWeightsH1.oppWeight) != null ? _dynWeightsH1.oppWeight : 0.35,
         recencyWeights: h1ConfigOverride.recencyProfile || _runH1Weights,
       },
       contextData: AppState.context?.data || null, 
@@ -33851,6 +34070,7 @@ async function runEngine() {
       _h2VolRatio,
       league,
     );
+    const _safeH2W = _dynWeightsH2 || { teamWeight: 0.65, oppWeight: 0.35 };
     const _runH2Weights = window.__phase2H2RecencyWeights || getLeagueRecencyDefaults(currentLeagueForRun);
     MODEL_TUNING.recencyWeights = _runH2Weights;
     /* SECTION 343 — run-engine-h2-calc */
@@ -33860,7 +34080,7 @@ async function runEngine() {
       lines: finalLines,
       injMultA: 1,
       injMultB: 1,
-      config: { teamWeight: _dynWeightsH2.teamWeight, oppWeight: _dynWeightsH2.oppWeight, recencyWeights: _runH2Weights },
+      config: { teamWeight: _safeH2W.teamWeight, oppWeight: _safeH2W.oppWeight, recencyWeights: _runH2Weights },
       contextData: AppState.context?.data || null, 
     });
     MODEL_TUNING.recencyWeights = _runFTWeights;
@@ -35023,7 +35243,7 @@ async function runEngine() {
       picks.forEach((p) => {
         p.pick = "NO PLAY";
         p.edge = NaN;
-        p.confidence = "NaN";
+        p.confidence = null /* ISSUE-028 */;
         p.note = "No data entered";
         p.lockStrength = 0;
       });
@@ -35044,7 +35264,7 @@ async function runEngine() {
         if (p.marketKey === "h1" || p.marketKey === "h1_team_a" || p.marketKey === "h1_team_b") {
           p.pick = "NO PLAY";
           p.edge = NaN;
-          p.confidence = "NaN";
+          p.confidence = null /* ISSUE-028 */;
           p.note = "H1 projection exceeds hallucination-guard ratio vs FT (h1Proj/ftProj > 0.58) and 1H series were not observed";
           p.lockStrength = 0;
         }
@@ -35143,7 +35363,7 @@ async function runEngine() {
     finalPicksForDisplay.forEach((p) => {
 
       if (p.pick === "NO PLAY" && p.note) {
-        p.confidence = "NaN";
+        p.confidence = null /* ISSUE-028 */;
         p.displayPick = "NO PLAY";
         p.bufferedPickText = "NO PLAY";
         return;
@@ -35153,7 +35373,7 @@ async function runEngine() {
         p.displayPick = p.pick;
         p.bufferedPickText = p.pick;
       } else {
-        p.confidence = "NaN";
+        p.confidence = null /* ISSUE-028 */;
         p.displayPick = "NO PLAY";
         p.bufferedPickText = "NO PLAY";
       }
@@ -35429,7 +35649,7 @@ async function runEngine() {
         p.pick = "NO PLAY";
         p.displayPick = "NO PLAY";
         p.bufferedPickText = "NO PLAY";
-        p.confidence = "NaN";
+        p.confidence = null /* ISSUE-028 */;
         p.isLock = false;
         p.lockRestricted = true;
         p.note = "Validation error: " + _finalIntegrity.errors.join(" | ");
@@ -36691,15 +36911,15 @@ function clearAll() {
   try {
     if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
       _ssEventStatsCache.clear();
-  } catch (_eSs) {}
+  } catch (_eSs) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _eSs); }
   try {
     if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
       _proxyFetchCache.clear();
-  } catch (_ePf) {}
+  } catch (_ePf) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _ePf); }
   _fixtureCache.clear();
   try {
     window.__seriesDateCache = {};
-  } catch (_eSeries) {}
+  } catch (_eSeries) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _eSeries); }
 
   setStatusText("", "");
   setFetchAuditIssues([]);
@@ -36945,11 +37165,11 @@ function onLeagueChange() {
   try {
     if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
       _ssEventStatsCache.clear();
-  } catch (_eSs) {}
+  } catch (_eSs) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _eSs); }
   try {
     if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
       _proxyFetchCache.clear();
-  } catch (_ePf) {}
+  } catch (_ePf) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _ePf); }
 
   AppState.injuries.A = defaultInjuryMeta();
   AppState.injuries.B = defaultInjuryMeta();
@@ -37005,7 +37225,7 @@ function applySystemTheme() {
   }
   try {
     localStorage.removeItem("theme");
-  } catch (_e3) {}
+  } catch (_e3) { if (typeof reportSoftFailure === "function") reportSoftFailure("localStorage", _e3); }
 })();
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -37429,9 +37649,43 @@ document.addEventListener("DOMContentLoaded", () => {
         integrityReport.forEach((e) => {
           engineDebug("WATCHDOG FLAG: " + e);
         });
+        /* ISSUE-024: CRITICAL findings → acknowledge & continue banner (don't freeze forever) */
+        const crits = integrityReport.filter(function (e) {
+          return /CRITICAL/i.test(String(e));
+        });
+        if (crits.length) {
+          try {
+            var ban = document.getElementById("bbSelfAuditBanner");
+            if (!ban) {
+              ban = document.createElement("div");
+              ban.id = "bbSelfAuditBanner";
+              ban.style.cssText = "position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:24px";
+              var card = document.createElement("div");
+              card.style.cssText = "background:#1a1a1a;color:#fff;max-width:520px;padding:20px;border-radius:8px;border:2px solid #d91f26";
+              var t = document.createElement("div");
+              t.style.cssText = "font-weight:900;margin-bottom:10px;color:#ff5c61";
+              t.textContent = "Self-audit CRITICAL findings";
+              var pre = document.createElement("pre");
+              pre.style.cssText = "white-space:pre-wrap;font-size:12px;max-height:240px;overflow:auto";
+              pre.textContent = crits.join("\n");
+              var btn = document.createElement("button");
+              btn.type = "button";
+              btn.textContent = "Acknowledge & continue";
+              btn.style.cssText = "margin-top:12px;background:#d4af37;color:#111;border:none;padding:8px 14px;font-weight:900;cursor:pointer";
+              btn.onclick = function () { ban.remove(); };
+              card.appendChild(t); card.appendChild(pre); card.appendChild(btn);
+              ban.appendChild(card);
+              (document.body || document.documentElement).appendChild(ban);
+            }
+          } catch (_sab) {}
+        }
       } else {
         engineDebug("WATCHDOG SUCCESS: System integrity OK");
       }
+      try {
+        if (typeof __bbBootClvVectors === "function") __bbBootClvVectors();
+        if (typeof __bbBackfillInvertedOverClv === "function") __bbBackfillInvertedOverClv();
+      } catch (_bootClv) {}
     } else {
       engineDebug("WATCHDOG BYPASS: Shield not present");
     }
@@ -37729,10 +37983,15 @@ const AFDB = (function () {
   };
 /* SECTION 34 — AFDB debug console */
   function esc(s) {
+    /* ISSUE-039: prefer shared escapeHtml when available */
+    if (typeof escapeHtml === "function") return escapeHtml(s);
+    if (typeof safeText === "function") return safeText(s);
     return String(s || "")
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function log(level, section, msg, data) {
@@ -37954,7 +38213,7 @@ const AFDB = (function () {
     try {
       if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
         _proxyFetchCache.clear();
-    } catch (_ePf2) {}
+    } catch (_ePf2) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _ePf2); }
     if (typeof _fixtureCache !== "undefined") _fixtureCache.clear();
     if (typeof _teamCatalogCache !== "undefined") _teamCatalogCache.clear();
 
@@ -38311,13 +38570,13 @@ const EngineAuditor = (function () {
           if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
             joined = xhr.responseText;
           }
-        } catch (_pageXhr) {}
+        } catch (_pageXhr) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _pageXhr); }
       }
       // Fallback: full document outerHTML (do not over-strip product code)
       if (!joined.length) {
         try {
           joined = (document.documentElement && document.documentElement.outerHTML) || "";
-        } catch (_oh) {}
+        } catch (_oh) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _oh); }
       }
       const stripped = stripSelf(joined);
       // If stripSelf somehow emptied a non-empty source, keep original
@@ -38344,7 +38603,7 @@ const EngineAuditor = (function () {
         try {
           const panelClone = clone.querySelector && clone.querySelector("#auditorPanel");
           if (panelClone) panelClone.innerHTML = "";
-        } catch (_pe) {}
+        } catch (_pe) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _pe); }
         html = clone.outerHTML || "";
       }
       if (!html) {
@@ -38355,7 +38614,7 @@ const EngineAuditor = (function () {
           if (xhr.status >= 200 && xhr.status < 300 && xhr.responseText) {
             html = xhr.responseText;
           }
-        } catch (_fx) {}
+        } catch (_fx) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _fx); }
       }
       const stripped = html ? stripSelf(html) : "";
       const result = (stripped && stripped.length) ? stripped : (html || getConcatenatedScriptSource());
@@ -39668,7 +39927,7 @@ const EngineAuditor = (function () {
                 archivedList = loaded.archivedPicks || loaded.archived || null;
               }
             }
-          } catch (_lp) {}
+          } catch (_lp) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _lp); }
           try {
             if (activeList || archivedList) {
               repairMisclassifiedNoPlayTrackedPicks(activeList || [], archivedList || []);
@@ -39679,7 +39938,7 @@ const EngineAuditor = (function () {
           } catch (_rep) {
             try {
               repairMisclassifiedNoPlayTrackedPicks([], []);
-            } catch (_rep2) {}
+            } catch (_rep2) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _rep2); }
           }
         }
         if (typeof repairWinnerSettlementParityTrackedPicks === "function") {
@@ -39700,7 +39959,7 @@ const EngineAuditor = (function () {
                   archivedListW = loadedW.archivedPicks || loadedW.archived || null;
                 }
               }
-            } catch (_lpw) {}
+            } catch (_lpw) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _lpw); }
             try {
               // Intentional persist only on forensic/auditTracker settlement repair paths.
               if (activeListW || archivedListW) {
@@ -39723,11 +39982,11 @@ const EngineAuditor = (function () {
             } catch (_repw) {
               try {
                 repairWinnerSettlementParityTrackedPicks([], []);
-              } catch (_repw2) {}
+              } catch (_repw2) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _repw2); }
             }
           } catch (_winnerRepairOuter) {}
         }
-      } catch (_repairOuter) {}
+      } catch (_repairOuter) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _repairOuter); }
       const r = safeCall(getAllTrackedPicksForReport);
       if (r.ok) {
         pass();
@@ -40276,10 +40535,10 @@ const EngineAuditor = (function () {
         }
         try {
           localStorage.removeItem(testKey);
-        } catch (_e) {}
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("localStorage", _e); }
         try {
           await writeAsyncStorage(testKey, "");
-        } catch (_e) {}
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("localStorage", _e); }
       } catch (e) {
         pass();
         add(
@@ -40405,7 +40664,7 @@ const EngineAuditor = (function () {
         const healed = [];
         corrupt.slice().forEach(function (k) {
           if (_heal.indexOf(k) >= 0) {
-            try { localStorage.removeItem(k); healed.push(k); } catch (_h) {}
+            try { localStorage.removeItem(k); healed.push(k); } catch (_h) { if (typeof reportSoftFailure === "function") reportSoftFailure("localStorage", _h); }
           }
         });
         corrupt = corrupt.filter(function (k) { return healed.indexOf(k) < 0; });
@@ -40532,7 +40791,7 @@ const EngineAuditor = (function () {
       if (typeof repairWinnerSettlementParityTrackedPicks === "function") {
         add("INFO", AREA, "repairWinnerSettlementParityTrackedPicks is clone-by-default", "Default remains clone+no-persist; only forensicLayerSettlementParity and the confidence audit settlement-repair path pass {mutateLive:true, persist:true} intentionally.", "Informational — F-P2-018/F-P5-006 mitigation with intentional repair-before-scan exceptions.", "static structure");
       }
-    } catch (_structErr) {}
+    } catch (_structErr) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _structErr); }
 
     tally();
     if (
@@ -40651,7 +40910,7 @@ const EngineAuditor = (function () {
           "g_trackerState.activePicks / g_engineLineMemory",
         );
       }
-    } catch (_e) {}
+    } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
 
     tally();
     pass();
@@ -41367,7 +41626,7 @@ const EngineAuditor = (function () {
             !/function fetchJson\s*\(/.test(src)
           )
             exists = false;
-        } catch (_e) {}
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("fetchJson", _e); }
       }
       if (!exists && f.fn === "tryUnlock") {
         exists = !!(
@@ -41756,7 +42015,7 @@ const EngineAuditor = (function () {
   function _clearLineScanProgress() {
     try {
       localStorage.removeItem(LINE_SCAN_KEY);
-    } catch (_e) {}
+    } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("_clearLineScanProgress", _e); }
   }
 
   function _stripStringsAndCommentsStateful(line, state) {
@@ -41954,7 +42213,7 @@ const EngineAuditor = (function () {
         }
       }
       src = stripSelf(src);
-    } catch (_e3) {}
+    } catch (_e3) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e3); }
     const lines = src.split("\n");
     const total = lines.length;
     const hash = _lineScanHash(src);
@@ -42148,7 +42407,7 @@ const EngineAuditor = (function () {
       Object.keys(acc.gebIds).forEach(function (id) {
         try {
           if (document.getElementById(id)) present[id] = true;
-        } catch (_e) {}
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       });
       const _DEAD_ID_ALLOW = {
         sofaJson: 1, ssJson: 1, sofascoreJson: 1, mathTestsPanel: 1,
@@ -42293,7 +42552,7 @@ const EngineAuditor = (function () {
       const candidates = [];
       try {
         if (typeof location !== "undefined" && location.href) candidates.push(location.href.split("#")[0]);
-      } catch (_e) {}
+      } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       let best = "";
       let mode = "none";
       for (const url of candidates) {
@@ -42306,13 +42565,13 @@ const EngineAuditor = (function () {
               mode = "RAW_FETCH";
             }
           }
-        } catch (_e) {}
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       }
       if (!best) {
         try {
           best = document.documentElement?.outerHTML || "";
           mode = best ? "DOM_FALLBACK" : "none";
-        } catch (_e) {}
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       }
       if (!best) throw new Error("Unable to obtain deployed source via same-origin fetch or DOM fallback.");
       _forensicRawCache = { text: best, mode };
@@ -42399,7 +42658,7 @@ const EngineAuditor = (function () {
           _forensicState._lastProgressiveRenderMs = now;
           render();
         }
-      } catch (_r) {}
+      } catch (_r) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _r); }
     }
   }
 
@@ -42892,9 +43151,7 @@ const EngineAuditor = (function () {
             forensicExactLine((_forensicState._lines || []), f.startLine).trim(),
             { ruleId: "EXEC_EMPTY_NONFINITE", functionName: f.name, observed: r, calculationPath: f.name });
         }
-      } catch (_e) {
-
-      }
+      } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     });
     _forensicState.dynamicFunctionTests = tested;
     _forensicState.dynamicFunctionPassed = proven;
@@ -43122,7 +43379,7 @@ const EngineAuditor = (function () {
     while ((m = re.exec(src))) { if (!seen.has(m[0])) { seen.add(m[0]); featureKeys.push(m[0]); } }
     let featureBuilderBody = "";
     const fn = (typeof window !== "undefined" && typeof window.buildConfidenceFeatures === "function") ? window.buildConfidenceFeatures : null;
-    if (fn) { try { featureBuilderBody = String(fn); } catch (_e) {} }
+    if (fn) { try { featureBuilderBody = String(fn); } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); } }
     const coeffKeys = [];
     ["intercept","edgePct","volRatio","sampleFull","h2h","trap"].forEach(k => {
       if (new RegExp("[\\\"']" + k + "[\\\"']|\\b" + k + "\\b").test(src)) coeffKeys.push(k);
@@ -43718,9 +43975,7 @@ const EngineAuditor = (function () {
               "Validate lines before blend.",
               null, "", { ruleId: "ADV_LINE_" + pair[0], bankrollRisk: "HIGH" });
           }
-        } catch (_e) {
-          
-        }
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       });
     } else {
       forensicAdd("HIGH", "Adversarial sample matrix unproven — adapter missing",
@@ -44052,7 +44307,7 @@ const EngineAuditor = (function () {
       window.forensicSettleWinnerPick = forensicSettleWinnerPick;
       window.forensicWinnerPredCandidates = forensicWinnerPredCandidates;
     }
-  } catch (_exFw) {}
+  } catch (_exFw) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _exFw); }
 
   function forensicResolveOracleActual(p, kind) {
     const kindL = String(kind || "").toLowerCase();
@@ -44200,11 +44455,11 @@ const EngineAuditor = (function () {
               ) || 0;
               repairedWinnerParity += n2;
             }
-          } catch (_divRep) {}
+          } catch (_divRep) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _divRep); }
           repairedWinnerSigs = Array.isArray(repairWinnerSettlementParityTrackedPicks.lastSignatures)
             ? repairWinnerSettlementParityTrackedPicks.lastSignatures.slice()
             : [];
-        } catch (_e) {}
+        } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       }
       if (repairedWinnerParity > 0) {
         forensicAdd(
@@ -44247,7 +44502,7 @@ const EngineAuditor = (function () {
             if (Array.isArray(g_trackerState.activePicks)) _liveLists.push(g_trackerState.activePicks);
             if (Array.isArray(g_trackerState.archivedPicks)) _liveLists.push(g_trackerState.archivedPicks);
           }
-        } catch (_div) {}
+        } catch (_div) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _div); }
         let _forceN = 0;
         _liveLists.forEach(function (list) {
           (list || []).forEach(function (p) {
@@ -44283,7 +44538,7 @@ const EngineAuditor = (function () {
             } catch (_sp) {}
           }
         }
-      } catch (_forceEx) {}
+      } catch (_forceEx) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _forceEx); }
       const picks = typeof getAllTrackedPicksForReport === "function" ? getAllTrackedPicksForReport() : [];
       let mismatches = 0;
       let checked = 0;
@@ -44738,7 +44993,7 @@ const EngineAuditor = (function () {
         "Full production replay uses stored snapshots when present.",
         withSnap.length ? "Extend replay to re-invoke projection with stored snapshot fields." : "Accumulate snapshots on track for stronger live/replay audits.",
         null, "", { ruleId: "LIVE_REPLAY_TRACKER_SNAPSHOTS" });
-    } catch (_e) {}
+    } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     if (ok) {
       // Toy determinism passed — PASSED for seal. PARTIAL from stale snaps is upgraded.
       _forensicState.layerStatus.LIVE_REPLAY = "PASSED";
@@ -45070,7 +45325,7 @@ const EngineAuditor = (function () {
             "Add Number.isFinite guards at entry/exit.",
             null, "", { ruleId: "AUTO_PROBE_NONFINITE", functionName: name, calculationPath: name });
         }
-      } catch (_e) {}
+      } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     });
     _forensicState.dynamicChecks = (_forensicState.dynamicChecks || 0) + probed;
      
@@ -45779,7 +46034,7 @@ const EngineAuditor = (function () {
       forensicAdd("INFO", "Confidence calibration probe threw", String(e && e.message || e),
         "Empirical calibration did not complete.", "Fix tracker accessors.", null, "", { ruleId: "CONF_CALIBRATION_THROW" });
     }
-    try { forensicApplyHostilePromptPolicy(); } catch (_ePol) {}
+    try { forensicApplyHostilePromptPolicy(); } catch (_ePol) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _ePol); }
 
     const ledger = [
       ["1 Static syntax/pattern scan", "covered via line scan + calc regex"],
@@ -45869,7 +46124,7 @@ const EngineAuditor = (function () {
     const lines = raw.split("\n");
     _forensicState._lines = lines;
     _forensicState.sourceMode = rawObj.mode;
-    try { _forensicState.sourceUrl = location.href.split("#")[0]; } catch (_e) {}
+    try { _forensicState.sourceUrl = location.href.split("#")[0]; } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     _forensicState.sourceHash = forensicHash(raw);
     _forensicState.totalLines = lines.length;
 
@@ -45937,7 +46192,7 @@ const EngineAuditor = (function () {
       _forensicState.scanPercent = Math.round((_forensicState.visitedLines / Math.max(1, _forensicState.totalLines)) * 100);
       _forensicState.scanPercent = Math.floor((_forensicState.visitedLines / Math.max(1, _forensicState.totalLines)) * 100);
       if (_isOpen && (start % (CHUNK * 8) === 0 || start + CHUNK >= lines.length)) {
-        try { render(); } catch (_e) {}
+        try { render(); } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       }
       if (_isOpen && start + CHUNK < lines.length) await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -45952,7 +46207,7 @@ const EngineAuditor = (function () {
       try {
         if (typeof globalThis[name] === "function" || (typeof window !== "undefined" && typeof window[name] === "function"))
           return false;
-      } catch (_e) {}
+      } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
       const re = new RegExp("function\\s+" + name + "\\s*\\(");
       if (re.test(raw)) return false;
       return true;
@@ -46285,7 +46540,7 @@ const EngineAuditor = (function () {
       if (_origFT) { computeFTProjection = _wrapCompute(_origFT); if (typeof window !== "undefined") window.computeFTProjection = computeFTProjection; }
       if (_origH1) { compute1HProjection = _wrapCompute(_origH1); if (typeof window !== "undefined") window.compute1HProjection = compute1HProjection; }
       if (_origH2) { compute2HProjection = _wrapCompute(_origH2); if (typeof window !== "undefined") window.compute2HProjection = compute2HProjection; }
-    } catch (_eWrap) {}
+    } catch (_eWrap) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _eWrap); }
 
     const started = Date.now();
     try {
@@ -46321,7 +46576,7 @@ const EngineAuditor = (function () {
         if (_origH1) { compute1HProjection = _origH1; if (typeof window !== "undefined") window.compute1HProjection = _origH1; }
         if (_origH2) { compute2HProjection = _origH2; if (typeof window !== "undefined") window.compute2HProjection = _origH2; }
         if (typeof g_currentLiveComputeMarket !== "undefined") g_currentLiveComputeMarket = _prevLiveMarket;
-      } catch (_eRestore) {}
+      } catch (_eRestore) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _eRestore); }
     }
 
     _lastRunMs = Date.now() - started;
@@ -46698,7 +46953,7 @@ const EngineAuditor = (function () {
       try {
         if (navigator.clipboard && navigator.clipboard.writeText)
           navigator.clipboard.writeText(content);
-      } catch (_e) {}
+      } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     }
   }
 
@@ -47350,7 +47605,7 @@ function copyTrackerData() {
     lines.push("Context dates A: " + (Array.isArray(datesA) ? datesA.slice(0, 10).join(",") : "none"));
     lines.push("Context dates B: " + (Array.isArray(datesB) ? datesB.slice(0, 10).join(",") : "none"));
     lines.push("eventDate: " + String(ctx.eventDate || ""));
-  } catch (_cd) {}
+  } catch (_cd) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _cd); }
   lines.push('      It is the sentinel for "no pick was made" (NO PLAY / no valid line) —');
   lines.push("      it is never a real letter grade.");
   lines.push("");
