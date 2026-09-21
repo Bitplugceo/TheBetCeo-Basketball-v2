@@ -1,8 +1,9 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <!-- board-fix-v3 -->
-  <meta name="generator" content="bb-engine-board-fix-v3-league-match" />
+  <meta name="generator" content="bb-engine-board-fix-v5-settle-fix" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -15145,6 +15146,7 @@ let g_refreshTrackedPicksInFlight = false;
 let g_trackerSaveVersion = 0;
 let g_trackerPersistedVersion = 0;
 let g_trackerSaveInFlight = false;
+let g_manualSettleInFlight = false;
 // Persistence is serialized: no overlapping local/remote tracker writes may run concurrently.
 let g_trackerLocalSaveChain = Promise.resolve();
 let g_trackerFlushChain = Promise.resolve();
@@ -18773,7 +18775,7 @@ function throttledRefreshBackground(force = false) {
 }
 
 async function refreshTrackerInBackground(forceHydrate = false) {
-  if (g_trackerDeleteInFlight) {
+  if (g_trackerDeleteInFlight || g_manualSettleInFlight) {
     queueTrackerFollowupRefresh(400);
     return;
   }
@@ -19004,6 +19006,10 @@ async function pollLiveGameClocks() {
         if (completed) {
           g_liveGameStatus.delete(eid);
           didChange = true;
+          if (typeof settlePendingPicksFromCompetition === "function") {
+            const _fin = settlePendingPicksFromCompetition(eid, comp, true);
+            if (_fin) didChange = true;
+          }
           return;
         }
         const state = String(comp?.status?.type?.state || "");
@@ -19050,6 +19056,13 @@ async function pollLiveGameClocks() {
               _expiredAt: existing?._expiredAt ?? null,
             });
             didChange = true;
+            if (
+              typeof settlePendingPicksFromCompetition === "function" &&
+              (isHalf || Number(period || 0) >= 2)
+            ) {
+              const _mid = settlePendingPicksFromCompetition(eid, comp, false);
+              if (_mid) didChange = true;
+            }
           } else if (existing && !existing._expiredAt && newClock !== "HALF") {
             if (!existing.clockFrozen) {
               existing.clockFrozen = true;
@@ -19066,6 +19079,13 @@ async function pollLiveGameClocks() {
             if (_pQScores && _pQScores.home?.length) {
               existing.qScores = _pQScores;
               didChange = true;
+            }
+            if (
+              typeof settlePendingPicksFromCompetition === "function" &&
+              (isHalf || Number(period || 0) >= 2 || (_pQScores && (_pQScores.home || []).length >= 2))
+            ) {
+              const _retry = settlePendingPicksFromCompetition(eid, comp, false);
+              if (_retry) didChange = true;
             }
           }
         } else if (state === "pre") {
@@ -19348,6 +19368,52 @@ function collectTrackedPickKeys(pick, extra) {
     add(pick.pickId);
   }
   return [...new Set(keys)];
+}
+
+function findTrackedPickBySignature(signature) {
+  const want = String(signature || "");
+  if (!want) return null;
+  const pools = [
+    AppState?.tracker?.state?.activePicks,
+    AppState?.tracker?.state?.archivedPicks,
+    typeof g_trackerState !== "undefined" ? g_trackerState.activePicks : null,
+    typeof g_trackerState !== "undefined" ? g_trackerState.archivedPicks : null,
+  ];
+  for (const arr of pools) {
+    if (!Array.isArray(arr)) continue;
+    const hit = arr.find((p) => collectTrackedPickKeys(p).includes(want));
+    if (hit) return hit;
+  }
+  return null;
+}
+
+function eventStillHasPendingPicks(eventId, exceptPick) {
+  const eid = String(eventId || "");
+  if (!eid) return false;
+  const active = Array.isArray(AppState?.tracker?.state?.activePicks)
+    ? AppState.tracker.state.activePicks
+    : [];
+  return active.some((p) => {
+    if (!p || p === exceptPick) return false;
+    if (String(p.eventId || "") !== eid) return false;
+    return String(p.resultStatus || "pending").toLowerCase() === "pending";
+  });
+}
+
+function isPeriodAutoSettleMarket(marketKey) {
+  const mk = String(marketKey || "").toLowerCase();
+  return (
+    mk === "q1" ||
+    mk === "q2" ||
+    mk === "q3" ||
+    mk === "q4" ||
+    mk === "h1" ||
+    mk === "h1_team_a" ||
+    mk === "h1_team_b" ||
+    mk === "q1_team_a" ||
+    mk === "q1_team_b" ||
+    mk === "handicap_h1"
+  );
 }
 
 function lockDeletedPickKeys(keys) {
@@ -19713,6 +19779,22 @@ function getTrackedPickTimeMs(pick) {
   return 0;
 }
 
+function isTrackedPickLiveOnPage(pick) {
+  if (!pick) return false;
+  if (String(pick.resultStatus || "pending").toLowerCase() !== "pending") return false;
+  const eid = pick.eventId;
+  return !!(eid && typeof g_liveGameStatus !== "undefined" && g_liveGameStatus.has(eid));
+}
+
+// Tracker list groups: upcoming PENDING first, LIVE just above SETTLED, SETTLED last.
+// Live rows must never sit in the middle of other pending games.
+function getTrackedPickListGroup(pick) {
+  const pending = String(pick?.resultStatus || "pending").toLowerCase() === "pending";
+  if (!pending) return 2;
+  if (isTrackedPickLiveOnPage(pick)) return 1;
+  return 0;
+}
+
 function isTrackedPickVisibleOnPage(pick) {
   if (!pick) return false;
   const status = String(pick.resultStatus || "pending").toLowerCase();
@@ -19924,13 +20006,14 @@ function renderTrackedPicks() {
   window.__trackerRenderLimit = window.__trackerRenderLimit || 50;
   const displayPicks = visiblePicks
     .sort((a, b) => {
-      const aPending = String(a.resultStatus || "pending").toLowerCase() === "pending";
-      const bPending = String(b.resultStatus || "pending").toLowerCase() === "pending";
+      const aGroup = getTrackedPickListGroup(a);
+      const bGroup = getTrackedPickListGroup(b);
+      if (aGroup !== bGroup) return aGroup - bGroup;
 
-      if (aPending && !bPending) return -1;
-      if (!aPending && bPending) return 1;
+      const aPending = aGroup < 2;
+      const bPending = bGroup < 2;
 
-      if (aPending) {
+      if (aPending && bPending) {
         const aCreated = Date.parse(a.createdAt) || 0;
         const bCreated = Date.parse(b.createdAt) || 0;
         if (aCreated !== bCreated) return bCreated - aCreated;
@@ -22488,16 +22571,26 @@ function promptManualSettleValue(pick, status) {
 }
 
 async function settleTrackedPick(signature, status) {
-  const _sigMatch = (p) =>
-    p.signature === signature ||
-    (typeof makeTrackedSignature === "function" && makeTrackedSignature(p) === signature);
-  let pick = AppState.tracker.state.activePicks.find(_sigMatch);
-  if (!pick) pick = AppState.tracker.state.archivedPicks.find(_sigMatch);
-  if (!pick) return;
+  let pick = typeof findTrackedPickBySignature === "function"
+    ? findTrackedPickBySignature(signature)
+    : null;
+  if (!pick) {
+    const _sigMatch = (p) =>
+      p.signature === signature ||
+      (typeof makeTrackedSignature === "function" && makeTrackedSignature(p) === signature);
+    pick = (AppState.tracker.state.activePicks || []).find(_sigMatch);
+    if (!pick) pick = (AppState.tracker.state.archivedPicks || []).find(_sigMatch);
+  }
+  if (!pick) {
+    trackerDebug("manual settle missed pick", { signature, status });
+    return false;
+  }
   const score = await promptManualSettleValue(pick, status);
-  if (score === null) return;
+  if (score === null) return false;
   if (String(score).trim()) pick.actualScore = String(score).trim();
-  await applyManualSettlementToTrackedPick(signature, status);
+  return await applyManualSettlementToTrackedPick(signature, status, {
+    actualScore: String(score).trim(),
+  });
 }
 
 /* SECTION 236 — settle-tracked-pick-manual-full */
@@ -22571,38 +22664,59 @@ async function settleTrackedPickManualFull(signature) {
       }
     }
   }
-  await applyManualSettlementToTrackedPick(signature, finalStatus);
+  await applyManualSettlementToTrackedPick(signature, finalStatus, {
+    actualScore: String(score || "").trim(),
+  });
 }
 
 /* SECTION 237 — manual-settlement-to-tracked-pick */
-async function applyManualSettlementToTrackedPick(signature, resultStatus) {
+async function applyManualSettlementToTrackedPick(signature, resultStatus, extras) {
   const normalizedStatus = String(resultStatus || "").toLowerCase();
   if (!signature || !["win", "loss", "push", "pending"].includes(normalizedStatus)) return false;
 
   const nowIso = new Date().toISOString();
-  let touchedPick = null;
+  const extraScore = extras && extras.actualScore != null ? String(extras.actualScore).trim() : "";
+  let touchedPick = typeof findTrackedPickBySignature === "function"
+    ? findTrackedPickBySignature(signature)
+    : null;
 
-  const active = AppState.tracker.state.activePicks.filter((p) => {
-    if (makeTrackedSignature(p) === signature) {
-      touchedPick = p;
+  const matchesSig = (p) => {
+    if (!p) return false;
+    if (touchedPick && p === touchedPick) return true;
+    return collectTrackedPickKeys(p).includes(String(signature));
+  };
+
+  const active = (AppState.tracker.state.activePicks || []).filter((p) => {
+    if (matchesSig(p)) {
+      touchedPick = touchedPick || p;
       return false;
     }
     return true;
   });
-  const archived = AppState.tracker.state.archivedPicks.filter((p) => {
-    if (makeTrackedSignature(p) === signature) {
-      touchedPick = p;
+  const archived = (AppState.tracker.state.archivedPicks || []).filter((p) => {
+    if (matchesSig(p)) {
+      touchedPick = touchedPick || p;
       return false;
     }
     return true;
   });
 
-  if (!touchedPick) return false;
+  if (!touchedPick) {
+    trackerDebug("manual settle apply missed pick", { signature, result: normalizedStatus });
+    return false;
+  }
+
+  if (extraScore) touchedPick.actualScore = extraScore;
 
   if (
     (normalizedStatus === "win" || normalizedStatus === "loss") &&
     !String(touchedPick.actualScore || "").trim()
   ) {
+    trackerDebug("manual settle refused — score missing", {
+      signature,
+      result: normalizedStatus,
+      market: touchedPick.marketKey,
+    });
     return false;
   }
 
@@ -22934,19 +23048,21 @@ function handleTrackedPicksActionClick(event) {
   btn.disabled = true;
 
   const settle = async () => {
-    if (g_trackerSaveInFlight) {
-      engineDebug("Manual settle waiting for save to complete...");
-
+    g_manualSettleInFlight = true;
+    try {
       let waited = 0;
-      while (g_trackerSaveInFlight && waited < 5000) {
+      while ((g_trackerSaveInFlight || g_refreshTrackedPicksInFlight) && waited < 5000) {
+        engineDebug("Manual settle waiting for save/refresh to complete...");
         await new Promise((r) => setTimeout(r, 100));
         waited += 100;
       }
-      if (g_trackerSaveInFlight) {
-        engineDebug("Manual settle proceeding despite save still in flight (timeout)");
+      const ok = await settleTrackedPick(signature, resultStatus);
+      if (!ok) {
+        trackerDebug("manual settle did not apply", { signature, result: resultStatus });
       }
+    } finally {
+      g_manualSettleInFlight = false;
     }
-    await settleTrackedPick(signature, resultStatus);
   };
 
   settle()
@@ -23009,6 +23125,89 @@ function isPickPeriodComplete(
   }
 }
 
+function applyAutoSettleStatus(pick, settled, source) {
+  if (!pick || !settled || settled === "pending") return false;
+  if (String(pick.resultStatus || "pending").toLowerCase() === String(settled).toLowerCase())
+    return false;
+  pick.resultStatus = settled;
+  pick.settledAt = new Date().toISOString();
+  pick.settlementSource = source || "api";
+  pick.settledVersion = typeof ENGINE_MODEL_VERSION !== "undefined" ? ENGINE_MODEL_VERSION : pick.settledVersion;
+  pick.updatedAt = pick.settledAt;
+  if (!eventStillHasPendingPicks(pick.eventId, pick)) {
+    try { g_liveGameStatus.delete(pick.eventId); } catch (_e) {}
+  }
+  return true;
+}
+
+function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
+  if (!eventId || !competition) return false;
+  const eid = String(eventId);
+  const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
+  const pending = active.filter(
+    (p) =>
+      p &&
+      String(p.eventId || "") === eid &&
+      String(p.resultStatus || "pending").toLowerCase() === "pending",
+  );
+  if (!pending.length) return false;
+  let changed = false;
+  const changedPicks = [];
+  const statusName = String(competition?.status?.type?.name || "");
+  const period = Number(competition?.status?.period || 0);
+  const _liveMetaHalf = typeof isEspnCompetitionLive === "function"
+    ? isEspnCompetitionLive(competition && competition.status)
+    : { half: false };
+  const isHalf = !!_liveMetaHalf.half ||
+    String(statusName).toUpperCase().includes("HALFTIME") ||
+    String(competition?.status?.type?.description || "").toUpperCase().includes("HALFTIME");
+  const completed = !!(
+    gameFinal ||
+    competition?.status?.type?.completed ||
+    competition?.status?.type?.state === "post" ||
+    statusName === "STATUS_FINAL"
+  );
+  pending.forEach((pick) => {
+    const mk = String(pick.marketKey || "").toLowerCase();
+    const periodDone =
+      completed ||
+      (typeof isPickPeriodComplete === "function" &&
+        isPickPeriodComplete(
+          pick.marketKey,
+          period,
+          isHalf,
+          completed,
+          LEAGUE_FETCH_RULES[pick.league || ""]?.regulationPeriods ?? 4,
+        ));
+    if (!completed && !isPeriodAutoSettleMarket(mk)) return;
+    if (!periodDone) return;
+    const settled = settleTrackedPickFromCompetition(pick, competition, !completed);
+    if (applyAutoSettleStatus(pick, settled, completed ? "api_scoreboard" : "api_period_live")) {
+      changed = true;
+      changedPicks.push(pick);
+      trackerDebug("live-board settled pick", {
+        eventId: pick.eventId,
+        market: pick.marketKey,
+        result: settled,
+        actual: pick.actualScore,
+        source: completed ? "final" : "period",
+      });
+    }
+  });
+  if (changed) {
+    g_trackerState.updatedAt = new Date().toISOString();
+    try { rebuildTrackerStats(); } catch (_e) {}
+    try {
+      if (typeof forceTrackerSaveNow === "function") {
+        Promise.resolve(forceTrackerSaveNow(changedPicks)).catch(function (err) {
+          trackerDebug("live-board settle save failed", { error: String(err && err.message || err) });
+        });
+      }
+    } catch (_s) {}
+  }
+  return changed;
+}
+
 /* SECTION 239 — settle-tracked-pick-from-competition */
 function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlement = false) {
   if (!pick || !competition) return "pending";
@@ -23052,8 +23251,20 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
   const sHome = getVal(home.score);
   const sAway = getVal(away.score);
 
-  const lsHome = home.linescores || [];
-  const lsAway = away.linescores || [];
+  let lsHome = home.linescores || [];
+  let lsAway = away.linescores || [];
+  if (
+    (lsHome.length < 2 || lsAway.length < 2) &&
+    pick.eventId &&
+    typeof g_liveGameStatus !== "undefined" &&
+    g_liveGameStatus.has(pick.eventId)
+  ) {
+    const qs = g_liveGameStatus.get(pick.eventId)?.qScores;
+    if (qs && Array.isArray(qs.home) && Array.isArray(qs.away) && qs.home.length && qs.away.length) {
+      lsHome = qs.home.map((v) => ({ value: v }));
+      lsAway = qs.away.map((v) => ({ value: v }));
+    }
+  }
 
   let h1Home = NaN,
     h1Away = NaN;
@@ -23483,7 +23694,7 @@ async function refreshTrackedPickResults() {
             ) !== false);
 
         if (apiFinal || forceSettle) {
-          const settled = settleTrackedPickFromCompetition(pick, competition);
+          const settled = settleTrackedPickFromCompetition(pick, competition, !apiFinal);
           g_settlementDebugLog.set(_dbgKey, {
             pick: `${pick.homeTeam} vs ${pick.awayTeam} · ${pick.marketKey}`,
             eventId: pick.eventId,
@@ -23508,7 +23719,9 @@ async function refreshTrackedPickResults() {
             pick.settledVersion = ENGINE_MODEL_VERSION;
             changed = true;
             changedPicks.push(pick);
-            g_liveGameStatus.delete(pick.eventId);
+            if (!eventStillHasPendingPicks(pick.eventId, pick)) {
+              g_liveGameStatus.delete(pick.eventId);
+            }
             trackerDebug("auto-settled pick", {
               eventId: pick.eventId,
               market: pick.marketKey,
@@ -23577,17 +23790,7 @@ async function refreshTrackedPickResults() {
               false,
               _regPeriods,
             );
-            const _isPeriodMarket = [
-              "q1",
-              "q2",
-              "q3",
-              "q4",
-              "h1",
-              "q1_team_a",
-              "q1_team_b",
-              "h1_team_a",
-              "h1_team_b",
-            ].includes(pick.marketKey);
+            const _isPeriodMarket = isPeriodAutoSettleMarket(pick.marketKey);
             if (_periodDone && _isPeriodMarket) {
               const midSettled = settleTrackedPickFromCompetition(pick, competition, true);
               if (midSettled && midSettled !== "pending" && pick.resultStatus !== midSettled) {
@@ -23597,7 +23800,9 @@ async function refreshTrackedPickResults() {
                 pick.settledVersion = ENGINE_MODEL_VERSION;
                 changed = true;
                 changedPicks.push(pick);
-                g_liveGameStatus.delete(pick.eventId);
+                if (!eventStillHasPendingPicks(pick.eventId, pick)) {
+                  g_liveGameStatus.delete(pick.eventId);
+                }
                 g_settlementDebugLog.set(_dbgKey, {
                   pick: `${pick.homeTeam} vs ${pick.awayTeam} · ${pick.marketKey}`,
                   eventId: pick.eventId,
