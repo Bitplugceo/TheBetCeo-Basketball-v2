@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -591,6 +590,15 @@ button:disabled {
   background: #49a443 !important;
   color: #fff !important;
   border-color: #49a443 !important;
+}
+
+/* TEMP: Diana test button — remove after Euro tips */
+.fixture-day-temp {
+  min-width: auto !important;
+  padding: 4px 8px !important;
+  font-size: 11px !important;
+  font-weight: 700;
+  opacity: 0.88;
 }
 
 .autocomplete-wrap {
@@ -3309,15 +3317,17 @@ const BB_LOCK_REGISTRY = Object.freeze([
 
   <div class="section" id="espnSection" style="display: none">
     <h3>
-      ⚡ ESPN Auto-Fetch
+      ⚡ Auto-Fetch
       <span style="font-size: 11px; color: #aaa"
-        >(NBA · WNBA · NCAA Men's · NCAA Women's · NBA G League · NBA Summer League)</span
+        >(NBA · WNBA · NCAA · G League · Summer · Aus NBL · EuroLeague · EuroCup)</span
       >
     </h3>
 
     <div id="fixtureToolbar" class="fixture-toolbar">
       <button type="button" class="fixture-day active" id="fixturesTodayBtn">Today</button>
       <button type="button" class="fixture-day" id="fixturesTomorrowBtn">Tomorrow</button>
+      <!-- TEMP: Diana test button — remove after Euro tips. EL-focused (EuroCup 1st tip 2026-09-29; 24th may be empty for U). -->
+      <button type="button" class="fixture-day fixture-day-temp" id="fixtures24thBtn" data-day="2026-09-24" title="TEMP: load 2026-09-24 fixtures (Lagos/WAT)">24th</button>
     </div>
 
     <label id="fixtureSelectLabel" style="font-size: 12px">Select match</label>
@@ -4642,29 +4652,16 @@ function reportSoftFailure(scope, err) {
     window.__BB_SOFT_FAIL_COUNT = (window.__BB_SOFT_FAIL_COUNT || 0) + 1;
     var msg = err && err.message ? err.message : String(err || "unknown");
     console.warn("[BB SoftFailure]", scope || "unknown", msg, err);
+    /* UI badge permanently disabled — counts stay in console only */
     var badge = document.getElementById("bbSoftFailBadge");
-    if (!badge) {
-      badge = document.createElement("div");
-      badge.id = "bbSoftFailBadge";
-      badge.style.cssText = "position:fixed;bottom:16px;left:16px;z-index:99998;background:#3a404c;color:#ffb020;padding:6px 10px;font-size:11px;font-weight:800;border-radius:4px;opacity:0.92;cursor:pointer";
-      badge.title = "Soft failures this session (click to dismiss)";
-      badge.onclick = function () { badge.style.display = "none"; };
-      (document.body || document.documentElement).appendChild(badge);
-    }
-    badge.style.display = "block";
-    badge.textContent = "⚠ soft-fail ×" + window.__BB_SOFT_FAIL_COUNT + (window.__BB_IGNORED_TRANSPORT_COUNT ? (" · ignored×" + window.__BB_IGNORED_TRANSPORT_COUNT) : "");
+    if (badge) badge.remove();
   } catch (_rsf) {}
 }
 window.reportSoftFailure = reportSoftFailure;
 function bumpIgnoredTransport(reason) {
   try {
     window.__BB_IGNORED_TRANSPORT_COUNT = (window.__BB_IGNORED_TRANSPORT_COUNT || 0) + 1;
-    if (typeof reportSoftFailure === "function") {
-      /* refresh badge only */
-      var badge = document.getElementById("bbSoftFailBadge");
-      if (badge) badge.textContent = "⚠ soft-fail ×" + (window.__BB_SOFT_FAIL_COUNT || 0) + " · ignored×" + window.__BB_IGNORED_TRANSPORT_COUNT;
-      else reportSoftFailure("ignored-transport", reason || "ignored");
-    }
+    /* no on-screen badge — ignored transport stays silent in UI */
   } catch (_bit) {}
 }
 window.bumpIgnoredTransport = bumpIgnoredTransport;
@@ -11029,9 +11026,9 @@ function computeQuarterProjection({
           ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown) ||
         110;
 
-      const isEspnLeagueQ = typeof isUsEspnLeague === "function"
-        ? isUsEspnLeague(league)
-        : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+      const isEspnLeagueQ = typeof isEspnAutoFetchLeague === "function"
+        ? isEspnAutoFetchLeague(league)
+        : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl"].includes(
             String(league || "").toLowerCase(),
           );
 
@@ -13302,7 +13299,7 @@ const ESPN_LEAGUE_SLUGS = {
   wnba_pre: "wnba",
   ncaa: "mens-college-basketball",
   ncaaw: "womens-college-basketball",
-  nba_gl: "nba-g-league",
+  nba_gl: "nba-development",
   nba_summer: "nba-summer-las-vegas",
   euroleague: "euroleague",
   eurocup: "eurocup",
@@ -13339,9 +13336,32 @@ const ESPN_SITE_API_DEAD_KEYS = new Set([
 function isEspnAutoFetchLeague(league) {
   const k = String(league || "").toLowerCase();
   if (isUsEspnLeague(k)) return true;
-  /* ISSUE: promote Australia NBL — ESPN site API has live teams/schedules/scoreboard */
+  /* Australia NBL: full ESPN site API parity (fixtures, schedule/summary, live clock, settle).
+     Advanced pace/ORTG/DRTG blend, quality-pace card, and tracker poll all key off this. */
   if (k === "ausnbl") return true;
   return false;
+}
+function getIncrowdEuroCompetition(league) {
+  const k = String(league || "").toLowerCase();
+  if (k === "eurocup") {
+    return { competition: "U", label: "EuroCup", source: "eurocup", leagueKey: "eurocup" };
+  }
+  return { competition: "E", label: "EuroLeague", source: "euroleague", leagueKey: "euroleague" };
+}
+/** Incrowd euroleague-feeds auto-fetch: EuroLeague (E) + EuroCup (U). */
+function isIncrowdEuroAutoFetchLeague(league) {
+  const k = String(league || "").toLowerCase();
+  return k === "euroleague" || k === "eurocup";
+}
+/** @deprecated alias — use isIncrowdEuroAutoFetchLeague */
+function isEuroleagueAutoFetchLeague(league) {
+  return isIncrowdEuroAutoFetchLeague(league);
+}
+/** Umbrella: ESPN site-API autos + Incrowd EuroLeague/EuroCup. Use for UI/fixtures/Fetch Stats gates.
+ *  Live clock + auto-settle for euroleague/eurocup now route via Incrowd (not ESPN). */
+function isAutoFetchLeague(league) {
+  const k = String(league || "").toLowerCase();
+  return isEspnAutoFetchLeague(k) || isIncrowdEuroAutoFetchLeague(k);
 }
 
 const US_ESPN_LEAGUES = ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"];
@@ -13350,6 +13370,7 @@ function isUsEspnLeague(league) {
 }
 function espnIntlSofaHint(league) {
   const k = String(league || "").toLowerCase();
+  if (typeof isAutoFetchLeague === "function" && isAutoFetchLeague(k)) return "";
   if (typeof isEspnAutoFetchLeague === "function" && isEspnAutoFetchLeague(k)) return "";
   const us = ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"];
   if (!Object.prototype.hasOwnProperty.call(ESPN_LEAGUE_SLUGS, k) || us.indexOf(k) >= 0) return "";
@@ -16714,6 +16735,10 @@ async function proxyFetch(url, timeoutMs = 12000) {
     const s = String(requestUrl || "");
     if (/\/injuries/i.test(s)) return 3 * 60 * 1000;
     if (/\/scoreboard|\/summary\?event=/i.test(s)) return 10 * 1000;
+    /* Incrowd / api-live euro game lists used for live clock + settle — keep fresh */
+    if (/feeds\.incrowdsports\.com.*\/games/i.test(s)) return 10 * 1000;
+    if (/api-live\.euroleague\.net.*\/games/i.test(s)) return 10 * 1000;
+    if (/live\.euroleague\.net\/api\/Header/i.test(s)) return 8 * 1000;
     return 15 * 60 * 1000;
   }
   if (_proxyFetchCache.has(cacheKey)) {
@@ -16788,7 +16813,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       throw new Error("proxyFetch: URL unparseable");
     }
     const _allowedHost =
-      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app)$/i.test(_host);
+      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net)$/i.test(_host);
     if (!_allowedHost) {
       engineDebug("proxyFetch blocked non-allowlisted host", { request: fetchLabel, host: _host });
       throw new Error("proxyFetch: target host not allowlisted");
@@ -16823,10 +16848,15 @@ async function proxyFetch(url, timeoutMs = 12000) {
       const _espnDirect =
         /site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com/i.test(_uDirect);
       const _sofaDirect = /api\.sofascore\.com|api\.sofascore\.app/i.test(_uDirect);
-      if (!_espnDirect && !_sofaDirect) {
+      const _euroDirect =
+        /feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net/i.test(_uDirect);
+      if (!_espnDirect && !_sofaDirect && !_euroDirect) {
         throw workerErr;
       }
-      const directData = await fetchJson(url, _espnDirect ? "DirectESPN" : "DirectSofa");
+      const directData = await fetchJson(
+        url,
+        _espnDirect ? "DirectESPN" : _sofaDirect ? "DirectSofa" : "DirectEuroleague",
+      );
       _proxyFetchCache.set(cacheKey, { data: directData, timestamp: Date.now() });
       _proxyFetchCacheEvictIfNeeded();
       return directData;
@@ -19113,6 +19143,18 @@ async function pollLiveGameClocks() {
   }
   let didChange = false;
   for (const [league, eventIds] of byLeague) {
+    /* EuroLeague / EuroCup: Incrowd live clock + settle (not ESPN scoreboard). */
+    if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
+      try {
+        if (typeof pollIncrowdEuroLiveForLeague === "function") {
+          const _euroChanged = await pollIncrowdEuroLiveForLeague(league, eventIds, _liveClockSignal);
+          if (_euroChanged) didChange = true;
+        }
+      } catch (err) {
+        engineDebug("incrowd euro live poll failed", { league, error: err?.message || String(err) });
+      }
+      continue;
+    }
     const base = getTrackedLeagueApiBase(league);
     if (!base) continue;
     try {
@@ -23770,9 +23812,15 @@ async function refreshTrackedPickResults() {
         ...new Map(
           pendingPicks
             .map((p) => {
+              if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(p.league)) {
+                return [
+                  `${p.league}:${p.eventId}`,
+                  { source: "incrowd", league: p.league, eventId: p.eventId },
+                ];
+              }
               const base = getTrackedLeagueApiBase(p.league);
               if (!base) return null;
-              return [`${p.league}:${p.eventId}`, { base, eventId: p.eventId }];
+              return [`${p.league}:${p.eventId}`, { source: "espn", base, eventId: p.eventId }];
             })
             .filter(Boolean),
         ).values(),
@@ -23780,6 +23828,19 @@ async function refreshTrackedPickResults() {
 
       const eventResults = await Promise.all(
         eventEntries.map(async (entry) => {
+          if (entry.source === "incrowd") {
+            let competition = null;
+            try {
+              if (typeof fetchIncrowdEuroCompetitionForEvent === "function") {
+                competition = await fetchIncrowdEuroCompetitionForEvent(entry.league, entry.eventId);
+              }
+            } catch (_eInc) {
+              competition = null;
+            }
+            /* Shape like ESPN summary so downstream can use header.competitions[0] */
+            const data = competition ? { header: { competitions: [competition] }, _incrowd: true } : null;
+            return [entry.eventId, data];
+          }
           const url = `${entry.base}/summary?event=${entry.eventId}&_=${Date.now()}`;
           let data = null;
           try {
@@ -26417,9 +26478,9 @@ function renderQualityPaceCard() {
   const league =
     (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
   const isEspnQualityPace = !!String(league || "").trim() && (
-    typeof isUsEspnLeague === "function"
-      ? isUsEspnLeague(league)
-      : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+    typeof isEspnAutoFetchLeague === "function"
+      ? isEspnAutoFetchLeague(league)
+      : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl"].includes(
           String(league || "").toLowerCase(),
         )
   );
@@ -26902,12 +26963,29 @@ function getLocalDateKeyFromISO(iso) {
   return getDateKeyLocal(d);
 }
 
-function setFixtureDay(offset) {
+function setFixtureDay(offsetOrDate) {
   const todayBtn = document.getElementById("fixturesTodayBtn");
   const tomorrowBtn = document.getElementById("fixturesTomorrowBtn");
+  const day24Btn = document.getElementById("fixtures24thBtn");
   if (!todayBtn || !tomorrowBtn) return;
-  todayBtn.classList.toggle("active", offset === 0);
-  tomorrowBtn.classList.toggle("active", offset === 1);
+  const isAbs = typeof offsetOrDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(offsetOrDate);
+  todayBtn.classList.toggle("active", !isAbs && offsetOrDate === 0);
+  tomorrowBtn.classList.toggle("active", !isAbs && offsetOrDate === 1);
+  if (day24Btn) {
+    day24Btn.classList.toggle("active", isAbs && offsetOrDate === "2026-09-24");
+  }
+}
+
+/** Convert YYYY-MM-DD → YYYYMMDD local key used by fixture filters. */
+function dateStringToLocalKey(dateStr) {
+  const m = String(dateStr || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return "";
+  return m[1] + m[2] + m[3];
+}
+
+/** TEMP helper: load fixtures for an absolute Lagos/WAT calendar date. */
+async function loadFixturesForDate(dateStr) {
+  return loadFixtures(String(dateStr || ""));
 }
 
 function formatFixtureTime(dateStr) {
@@ -27044,6 +27122,33 @@ function getCurrentSeasonYear(league) {
 }
 
 async function fetchLeagueTeamCatalog(league) {
+  const lk = String(league || "").toLowerCase();
+  if (
+    (lk === "euroleague" || lk === "eurocup") &&
+    typeof fetchEuroleagueClubs === "function"
+  ) {
+    if (_teamCatalogCache.has(league)) return _teamCatalogCache.get(league);
+    const promise = (async () => {
+      const seasons =
+        typeof getEuroleagueSeasonCodes === "function"
+          ? getEuroleagueSeasonCodes(lk)
+          : {
+              primary: (lk === "eurocup" ? "U" : "E") + new Date().getFullYear(),
+              competition: lk === "eurocup" ? "U" : "E",
+            };
+      const clubs = await fetchEuroleagueClubs(seasons.primary, seasons.competition);
+      return (clubs || [])
+        .filter((c) => c && c.code && c.name)
+        .map((c) => ({ id: String(c.code), name: String(c.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    })().catch((err) => {
+      _teamCatalogCache.delete(league);
+      logDebug("fetchLeagueTeamCatalog incrowd-euro failed", err);
+      return [];
+    });
+    cacheSet(_teamCatalogCache, league, promise);
+    return promise;
+  }
   const base = getLeagueBase(league);
   if (!base) return [];
   if (_teamCatalogCache.has(league)) return _teamCatalogCache.get(league);
@@ -27207,7 +27312,7 @@ async function onTeamInput(side) {
     closeDrop(dropId);
     return;
   }
-  if (!isEspnAutoFetchLeague(league)) {
+  if (!(typeof isAutoFetchLeague === "function" ? isAutoFetchLeague(league) : isEspnAutoFetchLeague(league))) {
     closeDrop(dropId);
     return;
   }
@@ -28482,16 +28587,1368 @@ function renderInjuryBox(boxId, contentId, inj) {
   box.style.display = "none";
 }
 
-async function loadFixtures(offset = 0) {
+/* ── Incrowd EuroLeague/EuroCup auto-fetch + live/settle (NOT ESPN) ──
+ * Source: feeds.incrowdsports.com euroleague-feeds v2
+ *   competition E = EuroLeague (season EYYYY), U = EuroCup (UYYYY).
+ * Quarters/FT live on each game object (minute/quarter/remainingTime/score).
+ * Live clock + auto-settle: Incrowd season games → ESPN-shaped competition
+ *   (same settleTrackedPickFromCompetition path). Fallback: api-live.euroleague.net
+ *   matched by identifier/gameCode; optional live.euroleague.net Header for clock.
+ */
+const EUROLEAGUE_FEEDS_BASE =
+  "https://feeds.incrowdsports.com/provider/euroleague-feeds/v2";
+const _euroleagueSeasonCache = new Map();
+
+function getEuroleagueSeasonCodes(league) {
+  const now = new Date();
+  const y = now.getFullYear();
+  const month = now.getMonth(); /* 0-11; Sep=8 → new season prefix+Y */
+  const primaryYear = month >= 8 ? y : y - 1;
+  const meta =
+    typeof getIncrowdEuroCompetition === "function"
+      ? getIncrowdEuroCompetition(league)
+      : { competition: "E" };
+  const prefix = String(meta.competition || "E").toUpperCase();
+  return {
+    primary: prefix + primaryYear,
+    previous: prefix + (primaryYear - 1),
+    competition: prefix,
+  };
+}
+
+function euroleagueGamesUrl(seasonCode, competition) {
+  const code = String(seasonCode || "");
+  const comp = String(
+    competition || (code && code.charAt(0)) || "E",
+  ).toUpperCase();
+  return (
+    EUROLEAGUE_FEEDS_BASE +
+    "/competitions/" +
+    encodeURIComponent(comp) +
+    "/seasons/" +
+    encodeURIComponent(code) +
+    "/games?limit=500"
+  );
+}
+
+function euroleagueClubsUrl(seasonCode, competition) {
+  const code = String(seasonCode || "");
+  const comp = String(
+    competition || (code && code.charAt(0)) || "E",
+  ).toUpperCase();
+  return (
+    EUROLEAGUE_FEEDS_BASE +
+    "/competitions/" +
+    encodeURIComponent(comp) +
+    "/seasons/" +
+    encodeURIComponent(code) +
+    "/clubs"
+  );
+}
+
+function euroleagueGameIsPlayed(g) {
+  const st = String(g?.status || "").toLowerCase();
+  if (st === "result" || st === "played" || st === "closed" || st === "final") return true;
+  if (st === "confirmed" || st === "scheduled" || st === "fixture") return false;
+  const hs = Number(g?.home?.score);
+  const as = Number(g?.away?.score);
+  return Number.isFinite(hs) && Number.isFinite(as) && hs > 0 && as > 0;
+}
+
+function euroleagueGameIsUpcoming(g) {
+  const st = String(g?.status || "").toLowerCase();
+  if (st === "result" || st === "played" || st === "closed" || st === "final") return false;
+  if (euroleagueGameIsPlayed(g)) return false;
+  return st === "confirmed" || st === "scheduled" || st === "fixture" || !st;
+}
+
+function euroleagueGameIsLive(g) {
+  if (!g || euroleagueGameIsPlayed(g)) return false;
+  const st = String(g?.status || "").toLowerCase();
+  if (
+    st === "playing" ||
+    st === "live" ||
+    st === "inprogress" ||
+    st === "in_progress" ||
+    st === "in play" ||
+    st === "running" ||
+    st === "active"
+  )
+    return true;
+  if (st === "confirmed" || st === "scheduled" || st === "fixture" || !st) {
+    /* Tip-off started: quarter / remaining clock present before status flips */
+    if (g.quarter != null && String(g.quarter).trim() !== "") return true;
+    if (g.remainingTime != null && String(g.remainingTime).trim() !== "" && String(g.remainingTime) !== "00:00")
+      return true;
+    if (g.quarterMinute != null && String(g.quarterMinute).trim() !== "") return true;
+    const hs = Number(g?.home?.score);
+    const as = Number(g?.away?.score);
+    if ((Number.isFinite(hs) && hs > 0) || (Number.isFinite(as) && as > 0)) return true;
+  }
+  return false;
+}
+
+function euroleagueQuarterToPeriod(g) {
+  const q = g?.quarter;
+  if (typeof q === "number" && Number.isFinite(q) && q > 0) return q;
+  const s = String(q || "").trim();
+  if (!s) {
+    /* Finished regulation often has minute 40:00 and null quarter */
+    if (euroleagueGameIsPlayed(g)) return 4;
+    return 0;
+  }
+  if (/ot|overtime/i.test(s)) {
+    const otm = s.match(/(\d+)/);
+    return 4 + (otm ? parseInt(otm[1], 10) || 1 : 1);
+  }
+  const m = s.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) || 0 : 0;
+}
+
+function euroleagueDisplayClock(g) {
+  const rem = g?.remainingTime != null ? String(g.remainingTime).trim() : "";
+  if (rem) return rem;
+  const qm = g?.quarterMinute != null ? String(g.quarterMinute).trim() : "";
+  if (qm) return qm;
+  const min = g?.minute != null ? String(g.minute).trim() : "";
+  return min || "";
+}
+
+function euroleagueQuartersToLinescores(side) {
+  const q = side?.quarters || {};
+  const vals = [q.q1, q.q2, q.q3, q.q4];
+  const out = [];
+  for (let i = 0; i < vals.length; i++) {
+    const n = Number(vals[i]);
+    if (!Number.isFinite(n)) break;
+    out.push({ value: n });
+  }
+  /* OT partials if present */
+  for (let i = 1; i <= 5; i++) {
+    const ot = q["ot" + i];
+    if (ot == null) break;
+    const n = Number(ot);
+    if (!Number.isFinite(n)) break;
+    out.push({ value: n });
+  }
+  return out;
+}
+
+/** Map Incrowd (or api-live-normalized) game → ESPN competition shape for settle/live. */
+function incrowdGameToEspnCompetition(g) {
+  if (!g) return null;
+  const played = euroleagueGameIsPlayed(g);
+  const live = !played && euroleagueGameIsLive(g);
+  const period = euroleagueQuarterToPeriod(g);
+  const clock = euroleagueDisplayClock(g);
+  const half =
+    live &&
+    (period === 2 || period === 3) &&
+    (String(clock) === "0:00" ||
+      String(clock) === "00:00" ||
+      String(clock) === "0.0" ||
+      /half/i.test(String(g?.status || "")));
+  const home = g.home || g.local || {};
+  const away = g.away || g.road || {};
+  const homeClub = home.club || home;
+  const awayClub = away.club || away;
+  const homeScore = home.score != null ? home.score : home.standingsScore;
+  const awayScore = away.score != null ? away.score : away.standingsScore;
+  let homeLs = euroleagueQuartersToLinescores(home);
+  let awayLs = euroleagueQuartersToLinescores(away);
+  if (!homeLs.length && home.partials) {
+    const p = home.partials;
+    homeLs = [p.partials1, p.partials2, p.partials3, p.partials4]
+      .filter((v) => v != null && Number.isFinite(Number(v)))
+      .map((v) => ({ value: Number(v) }));
+  }
+  if (!awayLs.length && away.partials) {
+    const p = away.partials;
+    awayLs = [p.partials1, p.partials2, p.partials3, p.partials4]
+      .filter((v) => v != null && Number.isFinite(Number(v)))
+      .map((v) => ({ value: Number(v) }));
+  }
+  return {
+    id: String(g.id || g.identifier || g.code || ""),
+    status: {
+      displayClock: half ? "HALF" : clock,
+      period: period,
+      type: {
+        completed: !!played,
+        state: played ? "post" : live ? "in" : "pre",
+        name: played
+          ? "STATUS_FINAL"
+          : live
+            ? half
+              ? "STATUS_HALFTIME"
+              : "STATUS_IN_PROGRESS"
+            : "STATUS_SCHEDULED",
+        description: played ? "Final" : live ? (half ? "Halftime" : "In Progress") : "Scheduled",
+        shortDetail: played ? "FINAL" : live ? (half ? "HALF" : clock) : "Sched",
+      },
+    },
+    competitors: [
+      {
+        homeAway: "home",
+        id: String(homeClub.code || home.code || home.id || ""),
+        score: homeScore != null ? String(homeScore) : "0",
+        team: {
+          id: String(homeClub.code || home.code || ""),
+          displayName: homeClub.name || home.name || "Home",
+          shortDisplayName: homeClub.abbreviatedName || home.abbreviatedName || "",
+        },
+        linescores: homeLs,
+      },
+      {
+        homeAway: "away",
+        id: String(awayClub.code || away.code || away.id || ""),
+        score: awayScore != null ? String(awayScore) : "0",
+        team: {
+          id: String(awayClub.code || away.code || ""),
+          displayName: awayClub.name || away.name || "Away",
+          shortDisplayName: awayClub.abbreviatedName || away.abbreviatedName || "",
+        },
+        linescores: awayLs,
+      },
+    ],
+  };
+}
+
+function matchIncrowdGameByEventId(games, eventId) {
+  const eid = String(eventId || "");
+  if (!eid || !Array.isArray(games)) return null;
+  return (
+    games.find(
+      (g) =>
+        String(g?.id || "") === eid ||
+        String(g?.identifier || "") === eid ||
+        String(g?.code || "") === eid,
+    ) || null
+  );
+}
+
+function normalizeApiLiveEuroGame(g) {
+  if (!g) return null;
+  /* api-live uses local/road + played/gameStatus; reshape toward Incrowd */
+  const played = g.played === true || String(g.gameStatus || "").toLowerCase() === "result";
+  return {
+    id: g.id,
+    identifier: g.identifier,
+    code: g.gameCode != null ? g.gameCode : g.code,
+    status: played ? "result" : String(g.gameStatus || "confirmed").toLowerCase(),
+    date: g.utcDate || g.date,
+    minute: null,
+    quarter: null,
+    remainingTime: null,
+    home: g.local
+      ? {
+          code: g.local?.club?.code,
+          name: g.local?.club?.name,
+          abbreviatedName: g.local?.club?.abbreviatedName,
+          score: g.local?.score,
+          quarters: {
+            q1: g.local?.partials?.partials1,
+            q2: g.local?.partials?.partials2,
+            q3: g.local?.partials?.partials3,
+            q4: g.local?.partials?.partials4,
+          },
+        }
+      : g.home,
+    away: g.road
+      ? {
+          code: g.road?.club?.code,
+          name: g.road?.club?.name,
+          abbreviatedName: g.road?.club?.abbreviatedName,
+          score: g.road?.score,
+          quarters: {
+            q1: g.road?.partials?.partials1,
+            q2: g.road?.partials?.partials2,
+            q3: g.road?.partials?.partials3,
+            q4: g.road?.partials?.partials4,
+          },
+        }
+      : g.away,
+  };
+}
+
+async function fetchApiLiveEuroSeasonGames(seasonCode, competition) {
+  const code = String(seasonCode || "");
+  const comp = String(competition || (code && code.charAt(0)) || "E").toUpperCase();
+  if (!code) return [];
+  const url =
+    "https://api-live.euroleague.net/v2/competitions/" +
+    encodeURIComponent(comp) +
+    "/seasons/" +
+    encodeURIComponent(code) +
+    "/games";
+  try {
+    const data = await proxyFetch(url, 15000);
+    const games = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+    return games.map(normalizeApiLiveEuroGame).filter(Boolean);
+  } catch (e) {
+    logDebug("fetchApiLiveEuroSeasonGames failed", e);
+    return [];
+  }
+}
+
+async function findIncrowdEuroGameByEventId(league, eventId, opts) {
+  const eid = String(eventId || "");
+  if (!eid) return null;
+  const maxAgeMs = opts && Number.isFinite(Number(opts.maxAgeMs)) ? Number(opts.maxAgeMs) : 10000;
+  const { primary, previous, competition } = getEuroleagueSeasonCodes(league);
+  for (const code of [primary, previous]) {
+    try {
+      const games = await fetchEuroleagueSeasonGames(code, competition, { maxAgeMs });
+      const hit = matchIncrowdGameByEventId(games, eid);
+      if (hit) return hit;
+    } catch (e) {
+      logDebug("findIncrowdEuroGame ByEventId season failed", { code, error: String(e && e.message || e) });
+    }
+  }
+  /* Fallback: api-live.euroleague.net (IDs differ — match identifier/code) */
+  for (const code of [primary, previous]) {
+    try {
+      const games = await fetchApiLiveEuroSeasonGames(code, competition);
+      const hit = matchIncrowdGameByEventId(games, eid);
+      if (hit) return hit;
+    } catch (_e) {}
+  }
+  return null;
+}
+
+async function enrichIncrowdGameWithLiveHeader(g) {
+  if (!g || euroleagueGameIsPlayed(g)) return g;
+  const seasonCode = g?.season?.code || String(g?.identifier || "").split("_")[0] || "";
+  const gameCode = g?.code != null ? g.code : String(g?.identifier || "").split("_")[1];
+  if (!seasonCode || gameCode == null || gameCode === "") return g;
+  try {
+    const url =
+      "https://live.euroleague.net/api/Header?gamecode=" +
+      encodeURIComponent(String(gameCode)) +
+      "&seasoncode=" +
+      encodeURIComponent(String(seasonCode));
+    const hdr = await proxyFetch(url, 6000).catch(() => null);
+    if (!hdr || typeof hdr !== "object") return g;
+    const out = Object.assign({}, g);
+    out.home = Object.assign({}, g.home || {});
+    out.away = Object.assign({}, g.away || {});
+    if (hdr.ScoreA != null) out.home.score = parseFloat(hdr.ScoreA) || out.home.score;
+    if (hdr.ScoreB != null) out.away.score = parseFloat(hdr.ScoreB) || out.away.score;
+    if (hdr.RemainingPartialTime != null) out.remainingTime = String(hdr.RemainingPartialTime).trim();
+    if (hdr.GameTime != null && !out.minute) out.minute = String(hdr.GameTime).trim();
+    if (hdr.Quarter != null && String(hdr.Quarter).trim()) {
+      const qm = String(hdr.Quarter).match(/(\d+)/);
+      out.quarter = qm ? parseInt(qm[1], 10) : hdr.Quarter;
+    }
+    if (hdr.Live === true && String(out.status || "").toLowerCase() === "confirmed") {
+      out.status = "playing";
+    }
+    /* Header quarter scores are cumulative — convert to per-period when all present */
+    const cA = [hdr.ScoreQuarter1A, hdr.ScoreQuarter2A, hdr.ScoreQuarter3A, hdr.ScoreQuarter4A];
+    const cB = [hdr.ScoreQuarter1B, hdr.ScoreQuarter2B, hdr.ScoreQuarter3B, hdr.ScoreQuarter4B];
+    if (cA.every((v) => v != null) && cB.every((v) => v != null)) {
+      out.home.quarters = {
+        q1: Number(cA[0]) || 0,
+        q2: Math.max(0, (Number(cA[1]) || 0) - (Number(cA[0]) || 0)),
+        q3: Math.max(0, (Number(cA[2]) || 0) - (Number(cA[1]) || 0)),
+        q4: Math.max(0, (Number(cA[3]) || 0) - (Number(cA[2]) || 0)),
+      };
+      out.away.quarters = {
+        q1: Number(cB[0]) || 0,
+        q2: Math.max(0, (Number(cB[1]) || 0) - (Number(cB[0]) || 0)),
+        q3: Math.max(0, (Number(cB[2]) || 0) - (Number(cB[1]) || 0)),
+        q4: Math.max(0, (Number(cB[3]) || 0) - (Number(cB[2]) || 0)),
+      };
+    }
+    return out;
+  } catch (_e) {
+    return g;
+  }
+}
+
+async function pollIncrowdEuroLiveForLeague(league, eventIds, signal) {
+  if (!eventIds || !eventIds.size) return false;
+  let didChange = false;
+  const { primary, previous, competition } = getEuroleagueSeasonCodes(league);
+  let games = [];
+  try {
+    games = await fetchEuroleagueSeasonGames(primary, competition, { maxAgeMs: 8000 });
+  } catch (_e) {
+    games = [];
+  }
+  if (!games.length) {
+    try {
+      games = await fetchEuroleagueSeasonGames(previous, competition, { maxAgeMs: 8000 });
+    } catch (_e2) {
+      games = [];
+    }
+  }
+  for (const eid of eventIds) {
+    if (signal && signal.aborted) break;
+    let g = matchIncrowdGameByEventId(games, eid);
+    if (!g) {
+      g = await findIncrowdEuroGameByEventId(league, eid, { maxAgeMs: 8000 });
+    }
+    if (!g) continue;
+    if (euroleagueGameIsLive(g) && !euroleagueGameIsPlayed(g)) {
+      g = await enrichIncrowdGameWithLiveHeader(g);
+    }
+    const comp = incrowdGameToEspnCompetition(g);
+    if (!comp) continue;
+    const completed = !!comp.status?.type?.completed;
+    if (completed) {
+      g_liveGameStatus.delete(String(eid));
+      didChange = true;
+      if (typeof settlePendingPicksFromCompetition === "function") {
+        if (settlePendingPicksFromCompetition(eid, comp, true)) didChange = true;
+      }
+      continue;
+    }
+    const _liveMeta = isEspnCompetitionLive(comp.status);
+    if (_liveMeta.live) {
+      const period = Number(comp.status?.period || 0);
+      const clock = _liveMeta.half ? "HALF" : String(comp.status?.displayClock || "");
+      const statusName = String(comp.status?.type?.name || "");
+      const competitors = comp.competitors || [];
+      const homeC = competitors.find((c) => c.homeAway === "home");
+      const awayC = competitors.find((c) => c.homeAway === "away");
+      const homeScore = homeC ? parseFloat(homeC.score) || 0 : null;
+      const awayScore = awayC ? parseFloat(awayC.score) || 0 : null;
+      const homeLs = (homeC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
+      const awayLs = (awayC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
+      const existing = g_liveGameStatus.get(String(eid));
+      const qScores =
+        homeLs.length && awayLs.length
+          ? { home: homeLs, away: awayLs }
+          : existing?.qScores || null;
+      if (!existing || existing.period !== period || existing.clock !== clock) {
+        g_liveGameStatus.set(String(eid), {
+          period,
+          clock,
+          statusName,
+          league,
+          capturedAt: Date.now(),
+          clockFrozen: false,
+          homeScore,
+          awayScore,
+          qScores,
+          _expiredAt: existing?._expiredAt ?? null,
+        });
+        didChange = true;
+      } else {
+        if (homeScore !== null && (existing.homeScore !== homeScore || existing.awayScore !== awayScore)) {
+          existing.homeScore = homeScore;
+          existing.awayScore = awayScore;
+          didChange = true;
+        }
+        if (qScores) existing.qScores = qScores;
+        if (!existing.clockFrozen && clock !== "HALF") {
+          existing.clockFrozen = true;
+          didChange = true;
+        }
+      }
+      if (
+        typeof settlePendingPicksFromCompetition === "function" &&
+        (_liveMeta.half || Number(period || 0) >= 2)
+      ) {
+        if (settlePendingPicksFromCompetition(eid, comp, false)) didChange = true;
+      }
+    } else if (String(comp.status?.type?.state || "") === "pre") {
+      if (g_liveGameStatus.has(String(eid))) {
+        g_liveGameStatus.delete(String(eid));
+        didChange = true;
+      }
+    }
+  }
+  return didChange;
+}
+
+async function fetchIncrowdEuroCompetitionForEvent(league, eventId) {
+  const g0 = await findIncrowdEuroGameByEventId(league, eventId, { maxAgeMs: 10000 });
+  if (!g0) return null;
+  let g = g0;
+  if (euroleagueGameIsLive(g) && !euroleagueGameIsPlayed(g)) {
+    g = await enrichIncrowdGameWithLiveHeader(g);
+  }
+  return incrowdGameToEspnCompetition(g);
+}
+
+async function fetchEuroleagueSeasonGames(seasonCode, competition, opts) {
+  const code = String(seasonCode || "");
+  if (!code) return [];
+  const comp = String(
+    competition || (code && code.charAt(0)) || "E",
+  ).toUpperCase();
+  const maxAgeMs =
+    opts && Number.isFinite(Number(opts.maxAgeMs)) ? Number(opts.maxAgeMs) : 15 * 60 * 1000;
+  const cacheKey = "el:games:" + comp + ":" + code;
+  if (_euroleagueSeasonCache.has(cacheKey)) {
+    const hit = _euroleagueSeasonCache.get(cacheKey);
+    if (hit && Date.now() - (hit.ts || 0) < maxAgeMs) return hit.games || [];
+  }
+  const url = euroleagueGamesUrl(code, comp);
+  const data = await proxyFetch(url, 20000);
+  const games = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+  _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), games });
+  return games;
+}
+
+async function fetchEuroleagueClubs(seasonCode, competition) {
+  const code = String(seasonCode || "");
+  const comp = String(
+    competition || (code && code.charAt(0)) || "E",
+  ).toUpperCase();
+  const cacheKey = "el:clubs:" + comp + ":" + code;
+  if (_euroleagueSeasonCache.has(cacheKey)) {
+    const hit = _euroleagueSeasonCache.get(cacheKey);
+    if (hit && Date.now() - (hit.ts || 0) < 60 * 60 * 1000) return hit.clubs || [];
+  }
+  try {
+    const data = await proxyFetch(euroleagueClubsUrl(code, comp), 15000);
+    const clubs = Array.isArray(data?.data) ? data.data : [];
+    _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), clubs });
+    return clubs;
+  } catch (e) {
+    logDebug("fetchEuroleagueClubs failed", e);
+    return [];
+  }
+}
+
+async function loadEuroleagueGamesForStats(league) {
+  const { primary, previous, competition } = getEuroleagueSeasonCodes(league);
+  const [pri, prev] = await Promise.all([
+    fetchEuroleagueSeasonGames(primary, competition).catch(() => []),
+    fetchEuroleagueSeasonGames(previous, competition).catch(() => []),
+  ]);
+  const seen = new Set();
+  const merged = [];
+  [...(pri || []), ...(prev || [])].forEach((g) => {
+    const id = String(g?.id || g?.identifier || "");
+    if (!id || seen.has(id)) return;
+    seen.add(id);
+    merged.push(g);
+  });
+  return merged;
+}
+
+function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue) {
+  const tCode = String(teamCode || "").toUpperCase();
+  if (!tCode) return null;
+  const played = (allGames || [])
+    .filter((g) => euroleagueGameIsPlayed(g))
+    .filter((g) => {
+      const hc = String(g?.home?.code || "").toUpperCase();
+      const ac = String(g?.away?.code || "").toUpperCase();
+      return hc === tCode || ac === tCode;
+    })
+    .map((g) => {
+      const hc = String(g?.home?.code || "").toUpperCase();
+      const isHome = hc === tCode;
+      const me = isHome ? g.home : g.away;
+      const opp = isHome ? g.away : g.home;
+      const mq = me?.quarters || {};
+      const oq = opp?.quarters || {};
+      const q1 = Number(mq.q1);
+      const q2 = Number(mq.q2);
+      const q3 = Number(mq.q3);
+      const q4 = Number(mq.q4);
+      const oq1 = Number(oq.q1);
+      const oq2 = Number(oq.q2);
+      const oq3 = Number(oq.q3);
+      const oq4 = Number(oq.q4);
+      const ms = Number(me?.score);
+      const os = Number(opp?.score);
+      const venue = isHome ? "home" : "away";
+      return {
+        id: String(g.id || g.identifier || ""),
+        date: g.date || "",
+        venue,
+        ms,
+        os,
+        q1,
+        q2,
+        q3,
+        q4,
+        oq1,
+        oq2,
+        oq3,
+        oq4,
+        h1m: Number.isFinite(q1) && Number.isFinite(q2) ? q1 + q2 : null,
+        h1o: Number.isFinite(oq1) && Number.isFinite(oq2) ? oq1 + oq2 : null,
+        h2m: Number.isFinite(q3) && Number.isFinite(q4) ? q3 + q4 : null,
+        h2o: Number.isFinite(oq3) && Number.isFinite(oq4) ? oq3 + oq4 : null,
+        venueName: g?.venue?.name || null,
+        venueCity: null,
+        venueState: null,
+      };
+    })
+    .filter((g) => Number.isFinite(g.ms) && Number.isFinite(g.os) && g.ms > 0 && g.os > 0)
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+  let unique = played;
+  try {
+    let _asOf =
+      (typeof resolvePredictionAsOf === "function" && resolvePredictionAsOf(null, null)) || "";
+    if (!_asOf && typeof getCurrentFixtureMeta === "function") {
+      const _fm = getCurrentFixtureMeta();
+      _asOf = (_fm && (_fm.eventDate || _fm.predictionDate || _fm.asOf || _fm.date)) || "";
+    }
+    if (_asOf && typeof filterEventsAsOf === "function") {
+      unique = filterEventsAsOf(unique, _asOf);
+    }
+  } catch (_eAsOf) {}
+
+  const strictFiltered = requiredVenue ? unique.filter((g) => g.venue === requiredVenue) : unique;
+  const venueReliable = strictFiltered.length >= 2;
+  const chosen = (requiredVenue ? strictFiltered : unique).slice(0, 10);
+  if (chosen.length < 2) return null;
+
+  const scored = [];
+  const allowed = [];
+  const scoredDates = [];
+  const allowedDates = [];
+  const h1Scored = [];
+  const h1Allowed = [];
+  const h1ScoredDates = [];
+  const h1AllowedDates = [];
+  const h2Scored = [];
+  const h2Allowed = [];
+  const h2ScoredDates = [];
+  const h2AllowedDates = [];
+  const qS = { q1: [], q2: [], q3: [], q4: [] };
+  const qA = { q1: [], q2: [], q3: [], q4: [] };
+  const qDates = { q1: [], q2: [], q3: [], q4: [] };
+  const eventIds = [];
+
+  chosen.forEach((g) => {
+    scored.push(Math.round(g.ms));
+    allowed.push(Math.round(g.os));
+    scoredDates.push(g.date || null);
+    allowedDates.push(g.date || null);
+    eventIds.push(g.id || null);
+    if (g.h1m != null && g.h1o != null && g.h1m > 0 && g.h1o > 0) {
+      h1Scored.push(Math.round(g.h1m));
+      h1Allowed.push(Math.round(g.h1o));
+      h1ScoredDates.push(g.date || null);
+      h1AllowedDates.push(g.date || null);
+    }
+    if (g.h2m != null && g.h2o != null && Number.isFinite(g.h2m) && Number.isFinite(g.h2o)) {
+      h2Scored.push(Math.round(g.h2m));
+      h2Allowed.push(Math.round(g.h2o));
+      h2ScoredDates.push(g.date || null);
+      h2AllowedDates.push(g.date || null);
+    }
+    ["q1", "q2", "q3", "q4"].forEach((qk, qi) => {
+      const m = Number([g.q1, g.q2, g.q3, g.q4][qi]);
+      const o = Number([g.oq1, g.oq2, g.oq3, g.oq4][qi]);
+      if (!Number.isFinite(m) || !Number.isFinite(o)) return;
+      qS[qk].push(m);
+      qA[qk].push(o);
+      qDates[qk].push(g.date || null);
+    });
+  });
+
+  return {
+    scored: scored.slice(0, 10),
+    allowed: allowed.slice(0, 10),
+    scored10: scored.slice(0, 10),
+    allowed10: allowed.slice(0, 10),
+    h1Scored: h1Scored.slice(0, 10),
+    h1Allowed: h1Allowed.slice(0, 10),
+    h2Scored: h2Scored.slice(0, 10),
+    h2Allowed: h2Allowed.slice(0, 10),
+    h2ScoredDates: h2ScoredDates.slice(0, 10),
+    h2AllowedDates: h2AllowedDates.slice(0, 10),
+    eventIds: eventIds.slice(0, 10),
+    q1Scored: qS.q1.slice(0, 10),
+    q2Scored: qS.q2.slice(0, 10),
+    q3Scored: qS.q3.slice(0, 10),
+    q4Scored: qS.q4.slice(0, 10),
+    q1Allowed: qA.q1.slice(0, 10),
+    q2Allowed: qA.q2.slice(0, 10),
+    q3Allowed: qA.q3.slice(0, 10),
+    q4Allowed: qA.q4.slice(0, 10),
+    scoredDates: scoredDates.slice(0, 10),
+    ftScoredDates: scoredDates.slice(0, 10),
+    allowedDates: allowedDates.slice(0, 10),
+    ftAllowedDates: allowedDates.slice(0, 10),
+    h1ScoredDates: h1ScoredDates.slice(0, 10),
+    h1AllowedDates: h1AllowedDates.slice(0, 10),
+    q1ScoredDates: qDates.q1.slice(0, 10),
+    q2ScoredDates: qDates.q2.slice(0, 10),
+    q3ScoredDates: qDates.q3.slice(0, 10),
+    q4ScoredDates: qDates.q4.slice(0, 10),
+    ortg10: [],
+    drtg10: [],
+    pace10: [],
+    ortg10_h1: [],
+    drtg10_h1: [],
+    pace10_h1: [],
+    ortg10_h2: [],
+    drtg10_h2: [],
+    pace10_h2: [],
+    ortg10_q1: [],
+    drtg10_q1: [],
+    pace10_q1: [],
+    ortg10_q2: [],
+    drtg10_q2: [],
+    pace10_q2: [],
+    ortg10_q3: [],
+    drtg10_q3: [],
+    pace10_q3: [],
+    ortg10_q4: [],
+    drtg10_q4: [],
+    pace10_q4: [],
+    paintScored: [],
+    paintAllowed: [],
+    fbScored: [],
+    fbAllowed: [],
+    threePa: [],
+    threePctAllowed: [],
+    lastGameDate: unique[0]?.date || null,
+    lastGameCity: unique[0]?.venueCity || null,
+    lastGameState: unique[0]?.venueState || null,
+    venueReliable,
+    sos: null,
+  };
+}
+
+function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
+  const tA = String(teamACode || "").toUpperCase();
+  const tB = String(teamBCode || "").toUpperCase();
+  if (!tA || !tB) return [];
+  const minTs = new Date(2022, 0, 1).getTime();
+  const games = (allGames || [])
+    .filter((g) => euroleagueGameIsPlayed(g))
+    .filter((g) => {
+      const codes = new Set([
+        String(g?.home?.code || "").toUpperCase(),
+        String(g?.away?.code || "").toUpperCase(),
+      ]);
+      return codes.has(tA) && codes.has(tB);
+    })
+    .map((g) => {
+      const hc = String(g?.home?.code || "").toUpperCase();
+      const homeIsA = hc === tA;
+      const sideA = homeIsA ? g.home : g.away;
+      const sideB = homeIsA ? g.away : g.home;
+      const aq = sideA?.quarters || {};
+      const bq = sideB?.quarters || {};
+      const q1A = Number(aq.q1);
+      const q2A = Number(aq.q2);
+      const q3A = Number(aq.q3);
+      const q4A = Number(aq.q4);
+      const q1B = Number(bq.q1);
+      const q2B = Number(bq.q2);
+      const q3B = Number(bq.q3);
+      const q4B = Number(bq.q4);
+      const scoreA = Number(sideA?.score);
+      const scoreB = Number(sideB?.score);
+      const date = g.date || "";
+      const ts = date ? Date.parse(date) : NaN;
+      if (isFinite(ts) && ts < minTs) return null;
+      if (!Number.isFinite(scoreA) || !Number.isFinite(scoreB) || scoreA <= 0 || scoreB <= 0)
+        return null;
+      return {
+        eventId: String(g.id || g.identifier || ""),
+        teamAId: tA,
+        teamBId: tB,
+        scoreA: Math.round(scoreA),
+        scoreB: Math.round(scoreB),
+        h1A:
+          Number.isFinite(q1A) && Number.isFinite(q2A) ? Math.round(q1A + q2A) : 0,
+        h1B:
+          Number.isFinite(q1B) && Number.isFinite(q2B) ? Math.round(q1B + q2B) : 0,
+        h2A:
+          Number.isFinite(q3A) && Number.isFinite(q4A) ? Math.round(q3A + q4A) : NaN,
+        h2B:
+          Number.isFinite(q3B) && Number.isFinite(q4B) ? Math.round(q3B + q4B) : NaN,
+        q1A: Number.isFinite(q1A) ? q1A : 0,
+        q2A: Number.isFinite(q2A) ? q2A : 0,
+        q3A: Number.isFinite(q3A) ? q3A : 0,
+        q4A: Number.isFinite(q4A) ? q4A : 0,
+        q1B: Number.isFinite(q1B) ? q1B : 0,
+        q2B: Number.isFinite(q2B) ? q2B : 0,
+        q3B: Number.isFinite(q3B) ? q3B : 0,
+        q4B: Number.isFinite(q4B) ? q4B : 0,
+        date,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  return games.slice(0, 10);
+}
+
+function resolveEuroleagueTeamCode(nameOrCode, clubs, allGames) {
+  const raw = String(nameOrCode || "").trim();
+  if (!raw) return null;
+  const upper = raw.toUpperCase();
+  const norm = upper.replace(/[^A-Z0-9]/g, "");
+  /* Exact code match */
+  const fromClubs = (clubs || []).find(
+    (c) =>
+      String(c.code || "").toUpperCase() === upper ||
+      String(c.tvCode || "").toUpperCase() === upper ||
+      String(c.tla || "").toUpperCase() === upper,
+  );
+  if (fromClubs) return String(fromClubs.code).toUpperCase();
+
+  const nameHit = (clubs || []).find((c) => {
+    const names = [
+      c.name,
+      c.abbreviatedName,
+      c.editorialName,
+      c.clubPermanentName,
+      c.clubPermanentAlias,
+      c.sponsor,
+    ]
+      .filter(Boolean)
+      .map((n) => String(n).toUpperCase().replace(/[^A-Z0-9]/g, ""));
+    return names.some((n) => n === norm || n.includes(norm) || norm.includes(n));
+  });
+  if (nameHit) return String(nameHit.code).toUpperCase();
+
+  /* Fallback: scan games for matching home/away name */
+  for (const g of allGames || []) {
+    for (const side of [g.home, g.away]) {
+      if (!side) continue;
+      const code = String(side.code || "").toUpperCase();
+      const names = [side.name, side.abbreviatedName, side.editorialName, side.tla]
+        .filter(Boolean)
+        .map((n) => String(n).toUpperCase().replace(/[^A-Z0-9]/g, ""));
+      if (code === upper || names.some((n) => n === norm || n.includes(norm) || norm.includes(n))) {
+        return code;
+      }
+    }
+  }
+  return null;
+}
+
+async function loadFixturesEuroleague(league, offset, myToken, absoluteDateKey) {
+  const sel = document.getElementById("fixtureSelect");
+  const targetLocalKey = absoluteDateKey || getLocalDateKey(offset);
+  const meta =
+    typeof getIncrowdEuroCompetition === "function"
+      ? getIncrowdEuroCompetition(league)
+      : { competition: "E", source: "euroleague", label: "EuroLeague" };
+  try {
+    if (myToken !== _fixtureLoadToken) return;
+    const { primary, previous, competition } = getEuroleagueSeasonCodes(league);
+    let games = await fetchEuroleagueSeasonGames(primary, competition);
+    if (myToken !== _fixtureLoadToken) return;
+    /* If primary season empty, try previous (rare mid-roll) */
+    if (!games.length) {
+      games = await fetchEuroleagueSeasonGames(previous, competition);
+    }
+    if (myToken !== _fixtureLoadToken) return;
+
+    const events = (games || [])
+      .filter((g) => {
+        if (!g?.date) return false;
+        if (!euroleagueGameIsUpcoming(g)) return false;
+        if (getLocalDateKeyFromISO(g.date) !== targetLocalKey) return false;
+        return !!(g.home && g.away);
+      })
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    if (!events.length) {
+      sel.innerHTML = '<option value="">No upcoming matches</option>';
+      return;
+    }
+
+    sel.innerHTML = '<option value="">— Select match —</option>';
+    events.forEach((g) => {
+      const homeName = g.home?.name || g.home?.abbreviatedName || "Home";
+      const awayName = g.away?.name || g.away?.abbreviatedName || "Away";
+      const homeId = String(g.home?.code || "");
+      const awayId = String(g.away?.code || "");
+      const tipoff = formatFixtureTime(g.date);
+      const opt = document.createElement("option");
+      opt.value = String(g.id || g.identifier || "");
+      opt.textContent = tipoff + " — " + homeName + " vs " + awayName;
+      opt.dataset.home = homeName;
+      opt.dataset.away = awayName;
+      opt.dataset.homeId = homeId;
+      opt.dataset.awayId = awayId;
+      opt.dataset.eventDate = g.date || "";
+      opt.dataset.eventTimestamp = "";
+      opt.dataset.venueCity = "";
+      opt.dataset.venueState = "";
+      opt.dataset.source = meta.source || "euroleague";
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    if (myToken !== _fixtureLoadToken) return;
+    logDebug("loadFixturesEuroleague failed", e);
+    sel.innerHTML = '<option value="">Unable to load matches</option>';
+  }
+}
+
+async function fetchEuroleagueCore(league, teamAName, teamBName) {
+  if (typeof window.__espnCoreFetchGen !== "number") window.__espnCoreFetchGen = 0;
+  const _fetchGen = ++window.__espnCoreFetchGen;
+  const _fetchLeague = String(league || "");
+  const _nameA = String(teamAName || "").trim();
+  const _nameB = String(teamBName || "").trim();
+  const _stillValid = function (idA, idB) {
+    if (window.__espnCoreFetchGen !== _fetchGen) return false;
+    if (window.__abortSignal && window.__abortSignal.aborted) return false;
+    const curLeague =
+      (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) ||
+      _fetchLeague;
+    if (String(curLeague) !== _fetchLeague) return false;
+    const curA = String(
+      (document.getElementById("teamAName") && document.getElementById("teamAName").value) || "",
+    ).trim();
+    const curB = String(
+      (document.getElementById("teamBName") && document.getElementById("teamBName").value) || "",
+    ).trim();
+    if (curA && _nameA && curA !== _nameA) return false;
+    if (curB && _nameB && curB !== _nameB) return false;
+    if (idA != null && selectedTeamIds && selectedTeamIds.A != null && String(selectedTeamIds.A) !== String(idA))
+      return false;
+    if (idB != null && selectedTeamIds && selectedTeamIds.B != null && String(selectedTeamIds.B) !== String(idB))
+      return false;
+    return true;
+  };
+
+  try {
+    if (!_nameA || !_nameB) throw new Error("Enter both team names before fetching.");
+
+    const _euroMeta =
+      typeof getIncrowdEuroCompetition === "function"
+        ? getIncrowdEuroCompetition(league)
+        : { competition: "E", label: "EuroLeague", source: "euroleague" };
+    const _euroLabel = _euroMeta.label || "EuroLeague";
+    setStatusHTML(
+      '<span class="spinner"></span>Loading ' + _euroLabel + " season feeds...",
+      "loading",
+    );
+    const { primary, competition } = getEuroleagueSeasonCodes(league);
+    const [allGames, clubs] = await Promise.all([
+      loadEuroleagueGamesForStats(league),
+      fetchEuroleagueClubs(primary, competition),
+    ]);
+
+    let teamAId = selectedTeamIds.A || resolveEuroleagueTeamCode(_nameA, clubs, allGames);
+    let teamBId = selectedTeamIds.B || resolveEuroleagueTeamCode(_nameB, clubs, allGames);
+    teamAId = teamAId ? String(teamAId).toUpperCase() : null;
+    teamBId = teamBId ? String(teamBId).toUpperCase() : null;
+
+    if (!teamAId) throw new Error('Can\'t find "' + _nameA + '" in ' + _euroLabel + " clubs/games.");
+    if (!teamBId) throw new Error('Can\'t find "' + _nameB + '" in ' + _euroLabel + " clubs/games.");
+    if (String(teamAId) === String(teamBId))
+      throw new Error("Team A and Team B cannot be the same team.");
+
+    selectedTeamIds.A = String(teamAId);
+    selectedTeamIds.B = String(teamBId);
+    setStatusHTML('<span class="spinner"></span>Building last-10 from Incrowd feeds...', "loading");
+
+    const selectedFixture = getSelectedFixtureOption();
+    const teamAVenue =
+      selectedFixture && String(selectedFixture.dataset.homeId || "").toUpperCase() === String(teamAId)
+        ? "home"
+        : selectedFixture && String(selectedFixture.dataset.awayId || "").toUpperCase() === String(teamAId)
+          ? "away"
+          : null;
+    const teamBVenue =
+      selectedFixture && String(selectedFixture.dataset.homeId || "").toUpperCase() === String(teamBId)
+        ? "home"
+        : selectedFixture && String(selectedFixture.dataset.awayId || "").toUpperCase() === String(teamBId)
+          ? "away"
+          : null;
+
+    const aStats = buildEuroleagueTeamStats(teamAId, allGames, null);
+    const bStats = buildEuroleagueTeamStats(teamBId, allGames, null);
+    const aVenueStats = teamAVenue ? buildEuroleagueTeamStats(teamAId, allGames, teamAVenue) : null;
+    const bVenueStats = teamBVenue ? buildEuroleagueTeamStats(teamBId, allGames, teamBVenue) : null;
+
+    if (aStats?.scored?.length) updateLeagueVolCache(league, aStats.scored, aStats.eventIds || null);
+    if (bStats?.scored?.length) updateLeagueVolCache(league, bStats.scored, bStats.eventIds || null);
+    if (aStats?.q1Scored?.length >= 2) {
+      updateTeamQuarterShapeProfile(
+        league,
+        teamAName,
+        aStats.q1Scored,
+        aStats.q2Scored,
+        aStats.q3Scored,
+        aStats.q4Scored,
+        aStats.eventIds,
+      );
+    }
+    if (bStats?.q1Scored?.length >= 2) {
+      updateTeamQuarterShapeProfile(
+        league,
+        teamBName,
+        bStats.q1Scored,
+        bStats.q2Scored,
+        bStats.q3Scored,
+        bStats.q4Scored,
+        bStats.eventIds,
+      );
+    }
+
+    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates);
+    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates);
+    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates);
+    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates);
+    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates);
+    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates);
+    ["q1", "q2", "q3", "q4"].forEach((qk) => {
+      if (aStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("A", qk, aStats[qk + "ScoredDates"]);
+      if (bStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("B", qk, bStats[qk + "ScoredDates"]);
+    });
+
+    if (!aStats && !bStats)
+      throw new Error("No recent " + _euroLabel + " schedule data found for these teams.");
+
+    AppState.injuries.A = defaultInjuryMeta();
+    AppState.injuries.B = defaultInjuryMeta();
+    g_fetchMeta = defaultFetchMeta();
+    hideInjuryBox("A");
+    hideInjuryBox("B");
+    clearSideFields("A");
+    clearSideFields("B");
+    clearH2HFields();
+
+    const messages = [];
+    if (!_stillValid(teamAId, teamBId)) {
+      engineDebug("fetchEuroleagueCore: stale/aborted before DOM write — skipping", {
+        gen: _fetchGen,
+        current: window.__espnCoreFetchGen,
+      });
+      return;
+    }
+
+    function _fillSide(prefix, stats, venueStats, venue, name) {
+      if (!(stats?.scored?.length > 0)) {
+        messages.push(safeText(name) + ": no data ❌");
+        return;
+      }
+      document.getElementById(prefix + "FTScored").value = stats.scored.join(",");
+      if (stats.allowed?.length > 0)
+        document.getElementById(prefix + "FTAllowed").value = stats.allowed.join(",");
+      if (venueStats?.scored?.length > 0 && document.getElementById(prefix + "FTScoredHome")) {
+        const venueSection = document.getElementById(prefix + "VenueSplitSection");
+        if (venueSection) venueSection.style.display = "block";
+        const showHome = venue === "home";
+        const showAway = venue === "away";
+        document.getElementById(prefix + "FTScoredHome").parentElement.style.display = showHome
+          ? "block"
+          : "none";
+        document.getElementById(prefix + "FTAllowedHome").parentElement.style.display = showHome
+          ? "block"
+          : "none";
+        document.getElementById(prefix + "FTScoredAway").parentElement.style.display = showAway
+          ? "block"
+          : "none";
+        document.getElementById(prefix + "FTAllowedAway").parentElement.style.display = showAway
+          ? "block"
+          : "none";
+        if (showHome) {
+          document.getElementById(prefix + "FTScoredHome").value = venueStats.scored.join(",");
+          if (venueStats.allowed?.length > 0)
+            document.getElementById(prefix + "FTAllowedHome").value = venueStats.allowed.join(",");
+        } else if (showAway) {
+          document.getElementById(prefix + "FTScoredAway").value = venueStats.scored.join(",");
+          if (venueStats.allowed?.length > 0)
+            document.getElementById(prefix + "FTAllowedAway").value = venueStats.allowed.join(",");
+        }
+      }
+      if (stats.h1Scored?.length > 0)
+        document.getElementById(prefix + "1HScored").value = stats.h1Scored.join(",");
+      if (stats.h1Allowed?.length > 0)
+        document.getElementById(prefix + "1HAllowed").value = stats.h1Allowed.join(",");
+      if (stats.h2Scored?.length > 0 && document.getElementById(prefix + "2HScored"))
+        document.getElementById(prefix + "2HScored").value = stats.h2Scored.join(",");
+      if (stats.h2Allowed?.length > 0 && document.getElementById(prefix + "2HAllowed"))
+        document.getElementById(prefix + "2HAllowed").value = stats.h2Allowed.join(",");
+      if (stats.q1Scored?.length > 0) {
+        document.getElementById(prefix + "Q1Scored").value = stats.q1Scored.join(",");
+        document.getElementById(prefix + "Q2Scored").value = stats.q2Scored.join(",");
+        document.getElementById(prefix + "Q3Scored").value = stats.q3Scored.join(",");
+        document.getElementById(prefix + "Q4Scored").value = stats.q4Scored.join(",");
+        document.getElementById(prefix + "Q1Allowed").value = stats.q1Allowed.join(",");
+        document.getElementById(prefix + "Q2Allowed").value = stats.q2Allowed.join(",");
+        document.getElementById(prefix + "Q3Allowed").value = stats.q3Allowed.join(",");
+        document.getElementById(prefix + "Q4Allowed").value = stats.q4Allowed.join(",");
+      }
+      const tag = document.getElementById(prefix === "a" ? "aAutoTag" : "bAutoTag");
+      if (tag) tag.style.display = stats.scored.length >= 8 ? "inline" : "none";
+      messages.push(safeText(name) + ": " + stats.scored.length + " games ✅");
+    }
+
+    _fillSide("a", aStats, aVenueStats, teamAVenue, teamAName);
+    _fillSide("b", bStats, bVenueStats, teamBVenue, teamBName);
+
+    g_fetchMeta.A = {
+      ft: { source: _euroMeta.source || "euroleague", venueReliable: !!aVenueStats?.venueReliable },
+      h1: { source: _euroMeta.source || "euroleague", venueReliable: !!aVenueStats?.venueReliable },
+    };
+    g_fetchMeta.B = {
+      ft: { source: _euroMeta.source || "euroleague", venueReliable: !!bVenueStats?.venueReliable },
+      h1: { source: _euroMeta.source || "euroleague", venueReliable: !!bVenueStats?.venueReliable },
+    };
+
+    setStatusHTML('<span class="spinner"></span>Scanning ' + _euroLabel + " H2H...", "loading");
+    let h2hGames = [];
+    try {
+      h2hGames = buildEuroleagueH2H(teamAId, teamBId, allGames);
+    } catch (e) {
+      logDebug(_euroLabel + " H2H failed", e);
+    }
+
+    if (h2hGames.length >= 2) {
+      clearH2HFields();
+      const tA = String(teamAId);
+      const h2hA = [];
+      const h2hB = [];
+      for (const g of h2hGames.slice(0, 5)) {
+        if (normalizeId(g.teamAId) === tA) {
+          h2hA.push(g.scoreA);
+          h2hB.push(g.scoreB);
+        } else {
+          h2hA.push(g.scoreB);
+          h2hB.push(g.scoreA);
+        }
+      }
+      if (!_stillValid(teamAId, teamBId)) return;
+      document.getElementById("aFTH2H").value = h2hA.join(",");
+      document.getElementById("bFTH2H").value = h2hB.join(",");
+      syncH2HCheckbox("ft", false);
+      queueH2HCheckboxSync(false);
+      document.getElementById("h2hAutoTag").style.display = "inline";
+
+      const h2hA1H = h2hGames
+        .slice(0, 5)
+        .map((g) => (normalizeId(g.teamAId) === tA ? g.h1A : g.h1B))
+        .filter((v) => v > 0);
+      const h2hB1H = h2hGames
+        .slice(0, 5)
+        .map((g) => (normalizeId(g.teamAId) === tA ? g.h1B : g.h1A))
+        .filter((v) => v > 0);
+      if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
+        document.getElementById("a1HH2H").value = h2hA1H.join(",");
+        document.getElementById("b1HH2H").value = h2hB1H.join(",");
+        syncH2HCheckbox("h1", false);
+        queueH2HCheckboxSync(false);
+      }
+      for (let q = 1; q <= 4; q++) {
+        const key = "q" + q;
+        const h2hAQ = h2hGames
+          .slice(0, 5)
+          .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "A"] : g[key + "B"]))
+          .filter((v) => v > 0);
+        const h2hBQ = h2hGames
+          .slice(0, 5)
+          .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "B"] : g[key + "A"]))
+          .filter((v) => v > 0);
+        if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
+          document.getElementById("a" + key.toUpperCase() + "H2H").value = h2hAQ.join(",");
+          document.getElementById("b" + key.toUpperCase() + "H2H").value = h2hBQ.join(",");
+          syncH2HCheckbox(key, false);
+        }
+      }
+      queueH2HCheckboxSync(false);
+      messages.push("H2H: " + Math.min(h2hGames.length, 5) + " 2022+ games ✅");
+    } else if (h2hGames.length === 1) {
+      clearH2HFields();
+      const tA = String(teamAId);
+      const g = h2hGames[0];
+      document.getElementById("aFTH2H").value = normalizeId(g.teamAId) === tA ? g.scoreA : g.scoreB;
+      document.getElementById("bFTH2H").value = normalizeId(g.teamAId) === tA ? g.scoreB : g.scoreA;
+      syncAllH2HCheckboxes(false);
+      queueH2HCheckboxSync(false);
+      messages.push("H2H: 1 game found from 2022+ (min 2 to auto-enable)");
+    } else {
+      messages.push("H2H: no 2022+ games found");
+    }
+
+    /* Injuries/roster not available from Incrowd season feed — skip ESPN injury path. */
+    AppState.injuries.A = defaultInjuryMeta();
+    AppState.injuries.B = defaultInjuryMeta();
+    window.__bbInjuryFeedEmptyWarning = false;
+
+    AppState.context.data = {
+      league,
+      eventDate: String(selectedFixture?.dataset?.eventDate || ""),
+      A: {
+        overall: aStats
+          ? {
+              ...aStats,
+              ftScored10: aStats.scored10 || aStats.scored || [],
+              ftAllowed10: aStats.allowed10 || aStats.allowed || [],
+              ftScoredDates10: aStats.scoredDates || aStats.ftScoredDates || [],
+              ftAllowedDates10: aStats.allowedDates || aStats.ftAllowedDates || [],
+            }
+          : null,
+        q1Scored: aStats?.q1Scored || [],
+        q2Scored: aStats?.q2Scored || [],
+        q3Scored: aStats?.q3Scored || [],
+        q4Scored: aStats?.q4Scored || [],
+        q1Allowed: aStats?.q1Allowed || [],
+        q2Allowed: aStats?.q2Allowed || [],
+        q3Allowed: aStats?.q3Allowed || [],
+        q4Allowed: aStats?.q4Allowed || [],
+        quarterSpreads: buildQuarterSpreadDual(aStats, aVenueStats, league),
+        roster: [],
+        venue: aVenueStats
+          ? {
+              ...aVenueStats,
+              ftScored10: aVenueStats.scored10 || [],
+              ftAllowed10: aVenueStats.allowed10 || [],
+              ftScoredDates10: aVenueStats.scoredDates || aVenueStats.ftScoredDates || [],
+              ftAllowedDates10: aVenueStats.allowedDates || aVenueStats.ftAllowedDates || [],
+              venueDataAvailable: !!aVenueStats,
+              venueBlendEligible:
+                !!aVenueStats &&
+                Number(aVenueStats.scored10?.length || aVenueStats.scored?.length || 0) >= 6,
+            }
+          : null,
+        ortg10: [],
+        drtg10: [],
+        pace10: [],
+        lastGameDate: aStats?.lastGameDate || "",
+        lastGameCity: aStats?.lastGameCity || null,
+        lastGameState: aStats?.lastGameState || null,
+        restDays: (() => {
+          const lastMs = Date.parse(aStats?.lastGameDate || "");
+          const eventMs = Date.parse(String(selectedFixture?.dataset?.eventDate || ""));
+          if (!isFinite(lastMs) || !isFinite(eventMs)) return null;
+          const rawDays = Math.max(0, Math.round((eventMs - lastMs) / 86400000) - 1);
+          return rawDays <= 14 ? rawDays : null;
+        })(),
+      },
+      B: {
+        overall: bStats
+          ? {
+              ...bStats,
+              ftScored10: bStats.scored10 || bStats.scored || [],
+              ftAllowed10: bStats.allowed10 || bStats.allowed || [],
+              ftScoredDates10: bStats.scoredDates || bStats.ftScoredDates || [],
+              ftAllowedDates10: bStats.allowedDates || bStats.ftAllowedDates || [],
+            }
+          : null,
+        q1Scored: bStats?.q1Scored || [],
+        q2Scored: bStats?.q2Scored || [],
+        q3Scored: bStats?.q3Scored || [],
+        q4Scored: bStats?.q4Scored || [],
+        q1Allowed: bStats?.q1Allowed || [],
+        q2Allowed: bStats?.q2Allowed || [],
+        q3Allowed: bStats?.q3Allowed || [],
+        q4Allowed: bStats?.q4Allowed || [],
+        quarterSpreads: buildQuarterSpreadDual(bStats, bVenueStats, league),
+        roster: [],
+        venue: bVenueStats
+          ? {
+              ...bVenueStats,
+              ftScored10: bVenueStats.scored10 || [],
+              ftAllowed10: bVenueStats.allowed10 || [],
+              ftScoredDates10: bVenueStats.scoredDates || bVenueStats.ftScoredDates || [],
+              ftAllowedDates10: bVenueStats.allowedDates || bVenueStats.ftAllowedDates || [],
+              venueDataAvailable: !!bVenueStats,
+              venueBlendEligible:
+                !!bVenueStats &&
+                Number(bVenueStats.scored10?.length || bVenueStats.scored?.length || 0) >= 6,
+            }
+          : null,
+        ortg10: [],
+        drtg10: [],
+        pace10: [],
+        lastGameDate: bStats?.lastGameDate || "",
+        lastGameCity: bStats?.lastGameCity || null,
+        lastGameState: bStats?.lastGameState || null,
+        restDays: (() => {
+          const lastMs = Date.parse(bStats?.lastGameDate || "");
+          const eventMs = Date.parse(String(selectedFixture?.dataset?.eventDate || ""));
+          if (!isFinite(lastMs) || !isFinite(eventMs)) return null;
+          const rawDays = Math.max(0, Math.round((eventMs - lastMs) / 86400000) - 1);
+          return rawDays <= 14 ? rawDays : null;
+        })(),
+      },
+      h2hGames: Array.isArray(h2hGames) ? h2hGames.slice(0, 10) : [],
+    };
+
+    if (typeof updateCardExtraLabels === "function") updateCardExtraLabels();
+    if (typeof applyAvailabilityLayer === "function") applyAvailabilityLayer();
+    if (typeof renderQualityPaceCard === "function") renderQualityPaceCard();
+
+    updateIntelligencePack(league, {
+      ftLine: parseMarketLine(document.getElementById("ftMarket")?.value || ""),
+      h1Line: parseMarketLine(document.getElementById("h1Market")?.value || ""),
+      aLine: parseMarketLine(document.getElementById("teamAMarket")?.value || ""),
+      bLine: parseMarketLine(document.getElementById("teamBMarket")?.value || ""),
+    });
+
+    const fetchAuditIssues = buildFetchAuditIssues({
+      league,
+      teamAName,
+      teamBName,
+      aStats,
+      bStats,
+      h2hGames,
+    });
+    setFetchAuditIssues(fetchAuditIssues);
+
+    const aGameCount = Math.min(aStats?.scored?.length || 0, aStats?.allowed?.length || 0);
+    const bGameCount = Math.min(bStats?.scored?.length || 0, bStats?.allowed?.length || 0);
+    const allGood = aGameCount >= 5 && bGameCount >= 5;
+
+    if (allGood) {
+      g_lastFetchedTeams.A = normalizeTeamName(teamAName);
+      g_lastFetchedTeams.B = normalizeTeamName(teamBName);
+      updateSectionLocks();
+    } else {
+      const missingMsg =
+        "⚠️ FETCH INCOMPLETE: " +
+        safeText(teamAName) +
+        " has only " +
+        aGameCount +
+        " games, " +
+        safeText(teamBName) +
+        " has " +
+        bGameCount +
+        " games. Full model requires 5 each. Some markets will be NO PLAY. Click \"Fetch Stats\" again if data looks wrong.";
+      if (!fetchAuditIssues.includes(missingMsg)) fetchAuditIssues.push(missingMsg);
+      setFetchAuditIssues(fetchAuditIssues);
+      if (!messages.includes(missingMsg)) messages.push(missingMsg);
+    }
+
+    const compactFetchStatus = buildCompactFetchStatus(messages, fetchAuditIssues);
+    const statusClass = allGood && !fetchAuditIssues.length ? "ok" : "err";
+    setStatusHTML(
+      compactFetchStatus ? '<div style="font-weight:bold;">' + compactFetchStatus + "</div>" : "",
+      statusClass,
+    );
+    const _last10Issues = applyLast10SeriesAlert();
+    if (_last10Issues.length) {
+      setStatusText("⚠ Last-10 short: " + _last10Issues.length + " field(s) not 10 games.", "err");
+    }
+  } catch (e) {
+    logDebug("fetchEuroleagueCore failed", e);
+    const _failLabel =
+      typeof getIncrowdEuroCompetition === "function"
+        ? getIncrowdEuroCompetition(league).label
+        : "EuroLeague";
+    setStatusText("❌ " + _failLabel + " fetch failed: " + (e?.message || String(e)), "err");
+  }
+}
+
+async function loadFixtures(offsetOrDate = 0) {
   const myToken = ++_fixtureLoadToken;
   const league = document.getElementById("leagueSelect")?.value || "";
   const toolbar = document.getElementById("fixtureToolbar");
   const sel = document.getElementById("fixtureSelect");
   if (!toolbar || !sel) return;
 
+  const isAbs =
+    typeof offsetOrDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(offsetOrDate);
+  const offset = isAbs ? 0 : Number(offsetOrDate) || 0;
+  const absoluteDateKey = isAbs ? dateStringToLocalKey(offsetOrDate) : "";
+
   toolbar.style.display = "flex";
   sel.style.display = "block";
-  setFixtureDay(offset);
+  setFixtureDay(isAbs ? offsetOrDate : offset);
   sel.innerHTML = '<option value="">Loading matches...</option>';
   sel.value = "";
   selectedTeamIds = { A: null, B: null };
@@ -28499,8 +29956,10 @@ async function loadFixtures(offset = 0) {
   _lastCardFixtureKey = "";
   validateFetchSection();
 
-  if (isEspnAutoFetchLeague(league)) {
-    await loadFixturesESPN(league, offset, myToken);
+  if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
+    await loadFixturesEuroleague(league, offset, myToken, absoluteDateKey);
+  } else if (isEspnAutoFetchLeague(league)) {
+    await loadFixturesESPN(league, offset, myToken, absoluteDateKey);
   } else {
     if (myToken !== _fixtureLoadToken) return;
     toolbar.style.display = "none";
@@ -28508,7 +29967,7 @@ async function loadFixtures(offset = 0) {
   }
 }
 
-async function loadFixturesESPN(league, offset, myToken) {
+async function loadFixturesESPN(league, offset, myToken, absoluteDateKey) {
   const sel = document.getElementById("fixtureSelect");
 
   const leagueSlug = getEspnLeagueSlug(league);
@@ -28518,9 +29977,10 @@ async function loadFixturesESPN(league, offset, myToken) {
     return;
   }
   const base = "https://site.api.espn.com/apis/site/v2/sports/basketball/" + leagueSlug;
-  const targetLocalKey = getLocalDateKey(offset);
-  const queryDates =
-    offset === 0
+  const targetLocalKey = absoluteDateKey || getLocalDateKey(offset);
+  const queryDates = absoluteDateKey
+    ? [absoluteDateKey]
+    : offset === 0
       ? [getLocalDateKey(-1), getLocalDateKey(0)]
       : [getLocalDateKey(0), getLocalDateKey(1)];
 
@@ -28728,9 +30188,9 @@ async function fetchESPN() {
     return;
   }
 
-  if (!isEspnAutoFetchLeague(league)) {
+  if (!(typeof isAutoFetchLeague === "function" ? isAutoFetchLeague(league) : isEspnAutoFetchLeague(league))) {
     setStatusText(
-      "⛔ Auto-fetch is not available for this league on ESPN. Use SofaScore / manual entry.",
+      "⛔ Auto-fetch is not available for this league. Use SofaScore / manual entry.",
       "err",
     );
     unlockFetchBtn();
@@ -28749,7 +30209,11 @@ async function fetchESPN() {
   g_activeFetchController = new AbortController();
   window.__abortSignal = g_activeFetchController.signal;
 
-  await fetchESPNCore(league, teamAName, teamBName);
+  if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
+    await fetchEuroleagueCore(league, teamAName, teamBName);
+  } else {
+    await fetchESPNCore(league, teamAName, teamBName);
+  }
 
   const _cooldownBtn = document.getElementById("fetchBtn");
   if (_cooldownBtn) {
@@ -30296,9 +31760,9 @@ function computeFTProjection({
   const aVenueDiag = combineVenueDiag(aScoredBlendFT.diag, aAllowedBlendFT.diag);
   const bVenueDiag = combineVenueDiag(bScoredBlendFT.diag, bAllowedBlendFT.diag);
 
-  const isEspnLeague = typeof isUsEspnLeague === "function"
-    ? isUsEspnLeague(league)
-    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+  const isEspnLeague = typeof isEspnAutoFetchLeague === "function"
+    ? isEspnAutoFetchLeague(league)
+    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl"].includes(
         String(league || "").toLowerCase(),
       );
 
@@ -30796,9 +32260,9 @@ function compute1HProjection({
   if (isFinite(aAllowed)) aAllowed = anchorProjection(aAllowed, sampleSize, leagueBase1H);
   if (isFinite(bAllowed)) bAllowed = anchorProjection(bAllowed, sampleSize, leagueBase1H);
 
-  const isEspnLeague = typeof isUsEspnLeague === "function"
-    ? isUsEspnLeague(league)
-    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+  const isEspnLeague = typeof isEspnAutoFetchLeague === "function"
+    ? isEspnAutoFetchLeague(league)
+    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl"].includes(
         String(league || "").toLowerCase(),
       );
   const leaguePaceBase = LEAGUE_PACE_BASES[league] || LEAGUE_PACE_BASES.default || 74;
@@ -31185,9 +32649,9 @@ function compute2HProjection({
   if (isFinite(aAllowed)) aAllowed = anchorProjection(aAllowed, sampleSize, leagueBase2H);
   if (isFinite(bAllowed)) bAllowed = anchorProjection(bAllowed, sampleSize, leagueBase2H);
 
-  const isEspnLeague = typeof isUsEspnLeague === "function"
-    ? isUsEspnLeague(league)
-    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(
+  const isEspnLeague = typeof isEspnAutoFetchLeague === "function"
+    ? isEspnAutoFetchLeague(league)
+    : ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl"].includes(
         String(league || "").toLowerCase(),
       );
   const leaguePaceBase = LEAGUE_PACE_BASES[league] || LEAGUE_PACE_BASES.default || 74;
@@ -32383,9 +33847,11 @@ function buildTrackedPickPayload({
   ];
   const isExoticNoLine = pickRow && exoticNoLineMarkets.includes(pickRow.marketKey);
 
-  const isManualLeague = typeof isEspnAutoFetchLeague === "function"
-    ? !isEspnAutoFetchLeague(league)
-    : !["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"].includes(league);
+  const isManualLeague = typeof isAutoFetchLeague === "function"
+    ? !isAutoFetchLeague(league)
+    : typeof isEspnAutoFetchLeague === "function"
+      ? !isEspnAutoFetchLeague(league)
+      : !["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl", "euroleague", "eurocup"].includes(league);
 
   if (!fixtureMeta.eventDate) {
     fixtureMeta.eventDate = "";
@@ -37060,7 +38526,11 @@ function onLeagueChange() {
   if (teamMarketSection) {
     teamMarketSection.style.gridTemplateColumns = "1fr 1fr";
   }
-  const _isEspnAuto = typeof isEspnAutoFetchLeague === "function" ? isEspnAutoFetchLeague(league) : (_isBig5 || league === "ausnbl");
+  const _isEspnAuto = typeof isAutoFetchLeague === "function"
+    ? isAutoFetchLeague(league)
+    : (typeof isEspnAutoFetchLeague === "function"
+        ? isEspnAutoFetchLeague(league)
+        : (_isBig5 || league === "ausnbl" || league === "euroleague" || league === "eurocup"));
   const _espnEl = document.getElementById("espnSection");
   if (_espnEl) _espnEl.style.display = _isEspnAuto ? "block" : "none";
   const _sofaEl = document.getElementById("sofascoreManualSection");
@@ -37134,7 +38604,8 @@ function onLeagueChange() {
     if (el) el.style.display = "none";
   });
 
-  if (!isNbaOrNcaa) {
+  /* Manual / Sofa leagues only — ESPN auto leagues (incl. ausnbl) keep auto-tags + H2H checkboxes. */
+  if (!_isEspnAuto) {
     ["aAutoTag", "bAutoTag", "h2hAutoTag"].forEach((id) => {
       const el = document.getElementById(id);
       if (el) el.style.display = "none";
@@ -37363,6 +38834,17 @@ document.addEventListener("DOMContentLoaded", () => {
     fixturesTomorrowBtn.addEventListener(
       "click",
       withErrorBoundary(() => loadFixtures(1), "loadFixtures_tomorrow"),
+    );
+
+  /* TEMP: Diana test button — remove after Euro tips (EL-focused; EuroCup may be empty on 24th). */
+  const fixtures24thBtn = document.getElementById("fixtures24thBtn");
+  if (fixtures24thBtn)
+    fixtures24thBtn.addEventListener(
+      "click",
+      withErrorBoundary(
+        () => loadFixturesForDate(fixtures24thBtn.getAttribute("data-day") || "2026-09-24"),
+        "loadFixtures_24th",
+      ),
     );
 
   const fixtureSelect = document.getElementById("fixtureSelect");
@@ -38309,9 +39791,11 @@ const AFDB = (function () {
     const tA = document.getElementById("teamAName") && document.getElementById("teamAName").value;
     const tB = document.getElementById("teamBName") && document.getElementById("teamBName").value;
 
-    const isEspnLeague = ["nba", "ncaa", "wnba", "wnba_pre", "ncaaw", "nba_gl", "nba_summer"].includes(
-      String(league || "").toLowerCase(),
-    );
+    const isEspnLeague = typeof isEspnAutoFetchLeague === "function"
+      ? isEspnAutoFetchLeague(league)
+      : ["nba", "ncaa", "wnba", "wnba_pre", "ncaaw", "nba_gl", "nba_summer", "ausnbl"].includes(
+          String(league || "").toLowerCase(),
+        );
     if (isEspnLeague && tA && tB) {
       try {
         await fetchESPN();
