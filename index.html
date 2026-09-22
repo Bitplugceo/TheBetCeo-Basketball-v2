@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15667,6 +15668,9 @@ function getDebugSeverity(line) {
     text.includes("normal fallback") ||
     text.includes("worker path unavailable") ||
     text.includes("using direct espn") ||
+    text.includes("direct path miss") ||
+    text.includes("short worker fallback") ||
+    text.includes("direct allowlisted hosts") ||
     text.includes("worker fetch failed, trying direct") ||
     text.includes("trying direct espn")
   ) {
@@ -15781,7 +15785,13 @@ function isIgnoredEngineWatchLine(line = "") {
     text.includes("fallback proxy") ||
     text.includes("http 400") ||
     text.includes("http 403") ||
-    text.includes("nba-g-league")
+    text.includes("nba-g-league") ||
+    text.includes("soft-fail") ||
+    text.includes("fetcheuroleagueclubs soft-fail") ||
+    text.includes("directeuroleague timeout") ||
+    text.includes("directeurocup timeout") ||
+    text.includes("directespn timeout") ||
+    text.includes("directsofa timeout")
   );
   /* ISSUE-026: session badge for ignored hydrate/403 noise */
   if (_ignored && typeof bumpIgnoredTransport === "function") bumpIgnoredTransport("watch-line-ignore");
@@ -16754,13 +16764,32 @@ async function proxyFetch(url, timeoutMs = 12000) {
 
   engineDebug("fetch start", { request: fetchLabel, timeoutMs });
 
-  async function fetchJson(requestUrl, label, extraHeaders) {
+  function proxyFetchDirectLabel(requestUrl) {
+    const u = String(requestUrl || "");
+    if (/site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com/i.test(u)) {
+      return "DirectESPN";
+    }
+    if (/api\.sofascore\.com|api\.sofascore\.app/i.test(u)) {
+      return "DirectSofa";
+    }
+    if (/feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net/i.test(u)) {
+      /* Prefer Eurocup vs Euroleague when competition/season code is detectable */
+      if (/\/competitions\/U(?:\/|$|\?)/i.test(u) || /\/seasons\/U\d+/i.test(u) || /[?&]competition=U\b/i.test(u)) {
+        return "DirectEurocup";
+      }
+      return "DirectEuroleague";
+    }
+    return "Direct";
+  }
+
+  async function fetchJson(requestUrl, label, extraHeaders, callTimeoutMs) {
+    const effectiveTimeout = Number.isFinite(Number(callTimeoutMs)) ? Number(callTimeoutMs) : timeoutMs;
     const ctrl = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       ctrl.abort();
-    }, timeoutMs);
+    }, effectiveTimeout);
     let _proxyAbortHandler = null;
     if (window.__abortSignal && !window.__abortSignal.aborted) {
       _proxyAbortHandler = () => ctrl.abort();
@@ -16783,7 +16812,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       }
     } catch (e) {
       if (e?.name === "AbortError" && timedOut) {
-        const timeoutError = new Error(`${label} Timeout after ${timeoutMs / 1000}s`);
+        const timeoutError = new Error(`${label} Timeout after ${effectiveTimeout / 1000}s`);
         timeoutError.name = "TimeoutError";
         timeoutError.cause = e;
         throw timeoutError;
@@ -16818,55 +16847,66 @@ async function proxyFetch(url, timeoutMs = 12000) {
       engineDebug("proxyFetch blocked non-allowlisted host", { request: fetchLabel, host: _host });
       throw new Error("proxyFetch: target host not allowlisted");
     }
-    const workerData = await fetchJson(WORKER_URL + "?url=" + encodeURIComponent(url), "Worker", {
-      "X-Engine-Secret": (typeof CLIENT_RATE_GATE_TOKEN !== "undefined" ? CLIENT_RATE_GATE_TOKEN : WORKER_SHARED_SECRET),
-    });
-    if (String(url).includes("/summary?event=")) {
-      trackerDebug("summary fetch ok via worker", {
-        event: String(url).split("event=")[1]?.split("&")[0] || "",
-        source: "worker",
-      });
-    }
-    _proxyFetchCache.set(cacheKey, { data: workerData, timestamp: Date.now() });
-    _proxyFetchCacheEvictIfNeeded();
-    return workerData;
-  } catch (workerErr) {
+
+    /* Direct-first for CORS-allowlisted hosts (ESPN / Sofa / Incrowd / api-live / live.euroleague).
+       Worker IPs are often blocked (403) or not allowlisted for Incrowd — do not burn the full
+       caller timeout on Worker before attempting the direct path that browsers can use. */
+    const _directLabel = proxyFetchDirectLabel(url);
     try {
-      if (!window.__BB_WORKER_FALLBACK_NOTED__) {
-        window.__BB_WORKER_FALLBACK_NOTED__ = true;
-        engineDebug(
-          "Worker path unavailable; using direct ESPN for allowlisted hosts (normal fallback)",
-          {
-            sampleRequest: fetchLabel,
-            note: "Further worker misses this session are silent unless direct ESPN also fails",
-          },
-        );
+      const directData = await fetchJson(url, _directLabel);
+      if (String(url).includes("/summary?event=")) {
+        trackerDebug("summary fetch ok via direct", {
+          event: String(url).split("event=")[1]?.split("&")[0] || "",
+          source: "direct",
+        });
       }
-    } catch (_noteErr) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _noteErr); }
-    try {
-      const _uDirect = String(url || "");
-      const _espnDirect =
-        /site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com/i.test(_uDirect);
-      const _sofaDirect = /api\.sofascore\.com|api\.sofascore\.app/i.test(_uDirect);
-      const _euroDirect =
-        /feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net/i.test(_uDirect);
-      if (!_espnDirect && !_sofaDirect && !_euroDirect) {
-        throw workerErr;
-      }
-      const directData = await fetchJson(
-        url,
-        _espnDirect ? "DirectESPN" : _sofaDirect ? "DirectSofa" : "DirectEuroleague",
-      );
       _proxyFetchCache.set(cacheKey, { data: directData, timestamp: Date.now() });
       _proxyFetchCacheEvictIfNeeded();
       return directData;
     } catch (directErr) {
-      engineDebug("Direct allowlisted fetch failed — no unverified public proxy fallback", {
-        request: fetchLabel,
-        error: directErr?.message || String(directErr),
-      });
-      throw directErr || workerErr;
+      const workerTimeoutMs = Math.min(4000, Math.max(1, Number(timeoutMs) || 4000));
+      try {
+        if (!window.__BB_WORKER_FALLBACK_NOTED__) {
+          window.__BB_WORKER_FALLBACK_NOTED__ = true;
+          engineDebug(
+            "Direct path miss; using short Worker fallback for allowlisted hosts (normal fallback)",
+            {
+              sampleRequest: fetchLabel,
+              note: "Further Worker misses this session are silent unless direct allowlisted hosts also fail",
+              workerTimeoutMs,
+            },
+          );
+        }
+      } catch (_noteErr) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _noteErr); }
+      try {
+        const workerData = await fetchJson(
+          WORKER_URL + "?url=" + encodeURIComponent(url),
+          "Worker",
+          {
+            "X-Engine-Secret": (typeof CLIENT_RATE_GATE_TOKEN !== "undefined" ? CLIENT_RATE_GATE_TOKEN : WORKER_SHARED_SECRET),
+          },
+          workerTimeoutMs,
+        );
+        if (String(url).includes("/summary?event=")) {
+          trackerDebug("summary fetch ok via worker", {
+            event: String(url).split("event=")[1]?.split("&")[0] || "",
+            source: "worker",
+          });
+        }
+        _proxyFetchCache.set(cacheKey, { data: workerData, timestamp: Date.now() });
+        _proxyFetchCacheEvictIfNeeded();
+        return workerData;
+      } catch (workerErr) {
+        engineDebug("Direct allowlisted fetch failed — no unverified public proxy fallback", {
+          request: fetchLabel,
+          error: directErr?.message || String(directErr),
+          workerError: workerErr?.message || String(workerErr),
+        });
+        throw directErr || workerErr;
+      }
     }
+  } catch (outerErr) {
+    throw outerErr;
   }
 }
 
@@ -22606,6 +22646,8 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
 }
 function getTrackedLeagueApiBase(league) {
   const l = String(league || "").toLowerCase();
+  /* Soft no-op for Incrowd-only euro leagues — do not hammer ESPN standings/scoreboard */
+  if (l === "euroleague" || l === "eurocup") return "";
   const slug = getEspnLeagueSlug(l);
   return slug ? "https://site.api.espn.com/apis/site/v2/sports/basketball/" + slug : "";
 }
@@ -22614,6 +22656,8 @@ window._espnStandingsCache = window._espnStandingsCache || {};
 
 async function fetchLeagueStandings(league) {
   const lk = String(league || "").toLowerCase();
+  /* EuroLeague / EuroCup are Incrowd-only — ESPN slug eurocup 500s; skip standings noise */
+  if (lk === "euroleague" || lk === "eurocup") return;
   const base = getTrackedLeagueApiBase(lk);
   if (!base) return;
   const existing = window._espnStandingsCache[lk];
@@ -28882,7 +28926,7 @@ async function fetchApiLiveEuroSeasonGames(seasonCode, competition) {
     encodeURIComponent(code) +
     "/games";
   try {
-    const data = await proxyFetch(url, 15000);
+    const data = await proxyFetch(url, 45000);
     const games = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
     return games.map(normalizeApiLiveEuroGame).filter(Boolean);
   } catch (e) {
@@ -29087,7 +29131,7 @@ async function fetchEuroleagueSeasonGames(seasonCode, competition, opts) {
     if (hit && Date.now() - (hit.ts || 0) < maxAgeMs) return hit.games || [];
   }
   const url = euroleagueGamesUrl(code, comp);
-  const data = await proxyFetch(url, 20000);
+  const data = await proxyFetch(url, 45000);
   const games = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
   _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), games });
   return games;
@@ -29104,12 +29148,25 @@ async function fetchEuroleagueClubs(seasonCode, competition) {
     if (hit && Date.now() - (hit.ts || 0) < 60 * 60 * 1000) return hit.clubs || [];
   }
   try {
-    const data = await proxyFetch(euroleagueClubsUrl(code, comp), 15000);
+    const data = await proxyFetch(euroleagueClubsUrl(code, comp), 30000);
     const clubs = Array.isArray(data?.data) ? data.data : [];
     _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), clubs });
     return clubs;
   } catch (e) {
-    logDebug("fetchEuroleagueClubs failed", e);
+    const _msg = e?.message || String(e);
+    const _isSoftTimeout =
+      e?.name === "TimeoutError" ||
+      e?.name === "AbortError" ||
+      /timeout/i.test(_msg) ||
+      /abort/i.test(_msg);
+    if (_isSoftTimeout) {
+      /* Quiet: expected soft empty clubs must not open ENGINE ERROR panel */
+      if (typeof engineDebug === "function") {
+        engineDebug("fetchEuroleagueClubs soft-fail", { error: _msg });
+      }
+    } else {
+      logDebug("fetchEuroleagueClubs failed", e);
+    }
     return [];
   }
 }
@@ -31974,6 +32031,7 @@ function computeFTProjection({
      saved prediction could not be forensically reconstructed to show exactly how much H2H
      changed the projection. This captures the real variables from the calculation below. */
   let _ftH2HContribution = null;
+  let _ftPostH2HVolClamp = null;
   if (ftHasH2H) {
     const _ftH2HProjBefore = { a: projAFT, b: projBFT };
     const massacreH2H = getMassacreH2HSeries(
@@ -32086,8 +32144,23 @@ function computeFTProjection({
     const _bInjAdjBaseline =
       avgOrNaN(bFTS) * injMultB * injuryOpponentBoostMultiplier(injMultA, _injOppBoostFactor);
     const _postH2HVolLimit = volLimit * 1.35;
+    const _prePostH2HVolA = projAFT;
+    const _prePostH2HVolB = projBFT;
     projAFT = applyVolatility(projAFT, aFTS, _postH2HVolLimit, league, _aInjAdjBaseline);
     projBFT = applyVolatility(projBFT, bFTS, _postH2HVolLimit, league, _bInjAdjBaseline);
+    _ftPostH2HVolClamp = {
+      volLimitUsed: _postH2HVolLimit,
+      baselineA: isFinite(_aInjAdjBaseline) ? Number(_aInjAdjBaseline.toFixed(2)) : null,
+      baselineB: isFinite(_bInjAdjBaseline) ? Number(_bInjAdjBaseline.toFixed(2)) : null,
+      projectionBeforeA: isFinite(_prePostH2HVolA) ? Number(_prePostH2HVolA.toFixed(2)) : null,
+      projectionBeforeB: isFinite(_prePostH2HVolB) ? Number(_prePostH2HVolB.toFixed(2)) : null,
+      projectionAfterA: isFinite(projAFT) ? Number(projAFT.toFixed(2)) : null,
+      projectionAfterB: isFinite(projBFT) ? Number(projBFT.toFixed(2)) : null,
+      deltaA: isFinite(projAFT) && isFinite(_prePostH2HVolA) ? Number((projAFT - _prePostH2HVolA).toFixed(2)) : null,
+      deltaB: isFinite(projBFT) && isFinite(_prePostH2HVolB) ? Number((projBFT - _prePostH2HVolB).toFixed(2)) : null,
+      formulaNote:
+        "applyVolatility after H2H blend clamps each side to injury-adjusted baseline ± (volLimit*1.35). This is the usual source of STEP7→final shrink when H2H pulls totals away from recent form.",
+    };
 
     assertInvariant(isFinite(projAFT) && isFinite(projBFT), "ft.postH2H projections not finite", {
       projAFT,
@@ -32178,6 +32251,7 @@ function computeFTProjection({
 
     ftH2HWeight: isFinite(_ftRealH2HWeight) ? _ftRealH2HWeight : 0,
     h2hContribution: _ftH2HContribution,
+    postH2HVolClamp: _ftPostH2HVolClamp,
   };
 }
 
@@ -37628,11 +37702,13 @@ async function runEngine() {
             formulaNote:
               'projA = projA*(1-hw) + avgH2HA*hw  (hw is dynamic via getH2HWeight: sample-size log-scaled, capped at 0.30 by default (getParam("h2hMaxWeight", league)), damped by injury/volatility/blowout/pace-gap — NOT a fixed constant)',
           },
-          STEP8_injuryMultApplication: {
-            multA: g_injA.scoringMult,
-            multB: g_injB.scoringMult,
-            noteA: "Applied inside computeFTProjection via injMultA param",
-            noteB: "Applied inside computeFTProjection via injMultB param",
+          STEP8_postH2HVolatilityClamp: {
+            applied: !!ftCalc.postH2HVolClamp,
+            detail: ftCalc.postH2HVolClamp || null,
+            injuryNote:
+              "Injury multipliers were already applied to team baselines BEFORE the H2H blend (STEP7). STEP8 is the post-H2H applyVolatility clamp (baseline ± volLimit*1.35), which often explains the STEP7→STEP9 shrink.",
+            injuryMultA: g_injA.scoringMult,
+            injuryMultB: g_injB.scoringMult,
           },
           STEP9_finalProjections: {
             teamA: ftCalc.projAFT,
