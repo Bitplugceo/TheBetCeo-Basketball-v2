@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -591,15 +590,6 @@ button:disabled {
   background: #49a443 !important;
   color: #fff !important;
   border-color: #49a443 !important;
-}
-
-/* TEMP: Diana test button — remove after Euro tips */
-.fixture-day-temp {
-  min-width: auto !important;
-  padding: 4px 8px !important;
-  font-size: 11px !important;
-  font-weight: 700;
-  opacity: 0.88;
 }
 
 .autocomplete-wrap {
@@ -3327,9 +3317,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
     <div id="fixtureToolbar" class="fixture-toolbar">
       <button type="button" class="fixture-day active" id="fixturesTodayBtn">Today</button>
       <button type="button" class="fixture-day" id="fixturesTomorrowBtn">Tomorrow</button>
-      <!-- TEMP: Diana test button — remove after Euro tips. EL-focused (EuroCup 1st tip 2026-09-29; 24th may be empty for U). -->
-      <button type="button" class="fixture-day fixture-day-temp" id="fixtures24thBtn" data-day="2026-09-24" title="TEMP: load 2026-09-24 fixtures (Lagos/WAT)">24th</button>
-    </div>
+</div>
 
     <label id="fixtureSelectLabel" style="font-size: 12px">Select match</label>
     <select id="fixtureSelect" class="league-box">
@@ -25818,8 +25806,8 @@ function getConfidenceGrade(params) {
     quarterFormAgreement,
     league = "",
   } = params || {};
-  // Injury availability is excluded from manual confidence.
-  const injuryFetchFailed = false;
+  // Honor real injury-feed failure / empty feed (0.62 winProb cap below).
+  const injuryFetchFailed = !!(params && params.injuryFetchFailed);
 
   if (
     !pick ||
@@ -25920,7 +25908,10 @@ function getConfidenceGrade(params) {
     };
   }
 
-  // No injury-based probability cap in manual prediction mode.
+  // Injury feed failed or empty → cap winProb at 0.62 so Grade A cannot fire blind.
+  if (injuryFetchFailed && Number.isFinite(winProb)) {
+    winProb = Math.min(winProb, 0.62);
+  }
 
   if (!Number.isFinite(winProb)) {
     engineDebug("getConfidenceGrade: non-finite winProb, forcing NaN sentinel", {
@@ -25976,7 +25967,7 @@ function getMarginConfidenceGrade(params) {
     !!trap,
     league,
   );
-  // No injury-based probability cap in manual prediction mode.
+  // injuryFetchFailed honored after distribution blend (0.62 cap).
 
   try {
     const edgePts = isFinite(marginEdgePts)
@@ -26048,6 +26039,19 @@ function getMarginConfidenceGrade(params) {
         : { distributionWeight: _marginDist != null ? 1 : 0, modelWeight: 0 },
       finalWinProbability: Number.isFinite(winProb) ? Number(winProb) : null,
     };
+  }
+
+
+  // Injury feed failed or empty → cap winProb at 0.62 (blocks blind Grade A on handicap/winner).
+  if (injuryFetchFailed && Number.isFinite(winProb)) {
+    winProb = Math.min(winProb, 0.62);
+    if (params && typeof params === "object") {
+      params._injuryWinProbCapped = true;
+      if (params._confidenceTrace && typeof params._confidenceTrace === "object") {
+        params._confidenceTrace.injuryFetchFailed = true;
+        params._confidenceTrace.finalWinProbability = Number(winProb);
+      }
+    }
   }
 
   if (!Number.isFinite(winProb)) {
@@ -27010,14 +27014,10 @@ function getLocalDateKeyFromISO(iso) {
 function setFixtureDay(offsetOrDate) {
   const todayBtn = document.getElementById("fixturesTodayBtn");
   const tomorrowBtn = document.getElementById("fixturesTomorrowBtn");
-  const day24Btn = document.getElementById("fixtures24thBtn");
   if (!todayBtn || !tomorrowBtn) return;
   const isAbs = typeof offsetOrDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(offsetOrDate);
   todayBtn.classList.toggle("active", !isAbs && offsetOrDate === 0);
   tomorrowBtn.classList.toggle("active", !isAbs && offsetOrDate === 1);
-  if (day24Btn) {
-    day24Btn.classList.toggle("active", isAbs && offsetOrDate === "2026-09-24");
-  }
 }
 
 /** Convert YYYY-MM-DD → YYYYMMDD local key used by fixture filters. */
@@ -29821,10 +29821,11 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       messages.push("H2H: no 2022+ games found");
     }
 
-    /* Injuries/roster not available from Incrowd season feed — skip ESPN injury path. */
-    AppState.injuries.A = defaultInjuryMeta();
-    AppState.injuries.B = defaultInjuryMeta();
-    window.__bbInjuryFeedEmptyWarning = false;
+    /* Injuries/roster not available from Incrowd season feed — skip ESPN injury path.
+       Treat as empty/failed feed so handicap/winner winProb is capped at 0.62 (no blind Grade A). */
+    AppState.injuries.A = Object.assign(defaultInjuryMeta(), { emptyFeed: true, fetchFailed: true, highUncertainty: true });
+    AppState.injuries.B = Object.assign(defaultInjuryMeta(), { emptyFeed: true, fetchFailed: true, highUncertainty: true });
+    window.__bbInjuryFeedEmptyWarning = true;
 
     AppState.context.data = {
       league,
@@ -34739,6 +34740,11 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
         else if (_away && (_pred === _away || _pred.includes(_away) || _away.includes(_pred))) _sideLabel = "AWAY";
       }
       tdProj.textContent = _sideLabel;
+    } else if (_isMarginMarket) {
+      // Handicap/winner: signed margin to 1 decimal (whole-number floor hid ~0.5 as "0").
+      tdProj.textContent = Number.isFinite(Number(p.proj))
+        ? ((Number(p.proj) > 0 ? "+" : "") + Number(p.proj).toFixed(1))
+        : "NaN";
     } else {
       tdProj.textContent = formatProjectionWhole(p.proj);
     }
@@ -36325,6 +36331,7 @@ async function runEngine() {
       league,
       marginEdgePts: winnerEdge,
       volLimitPts: getMarketVolLimit(league, "ft"),
+      injuryFetchFailed: !!(typeof window !== "undefined" && window.__bbInjuryFeedEmptyWarning) || !!(typeof AppState !== "undefined" && AppState.injuries && ((AppState.injuries.A && (AppState.injuries.A.emptyFeed || AppState.injuries.A.fetchFailed)) || (AppState.injuries.B && (AppState.injuries.B.emptyFeed || AppState.injuries.B.fetchFailed)))),
     });
 
     const handicapMarginInputs = marketAllowedForLeague("handicap")
@@ -36357,6 +36364,7 @@ async function runEngine() {
       league,
       marginEdgePts: handicapEdge,
       volLimitPts: getMarketVolLimit(league, "ft"),
+      injuryFetchFailed: !!(typeof window !== "undefined" && window.__bbInjuryFeedEmptyWarning) || !!(typeof AppState !== "undefined" && AppState.injuries && ((AppState.injuries.A && (AppState.injuries.A.emptyFeed || AppState.injuries.A.fetchFailed)) || (AppState.injuries.B && (AppState.injuries.B.emptyFeed || AppState.injuries.B.fetchFailed)))),
     }) : "NaN";
 
     const handicapH1MarginInputs = marketAllowedForLeague("handicap_h1")
@@ -36389,7 +36397,7 @@ async function runEngine() {
       league,
       marginEdgePts: handicapH1Edge,
       volLimitPts: _h1VolLimitForMargin,
-    }) : "NaN";
+      injuryFetchFailed: !!(typeof window !== "undefined" && window.__bbInjuryFeedEmptyWarning) || !!(typeof AppState !== "undefined" && AppState.injuries && ((AppState.injuries.A && (AppState.injuries.A.emptyFeed || AppState.injuries.A.fetchFailed)) || (AppState.injuries.B && (AppState.injuries.B.emptyFeed || AppState.injuries.B.fetchFailed))))}) : "NaN";
     const handicapH2MarginInputs = marketAllowedForLeague("handicap_h2")
       ? getMarginConfidenceInputs(
           handicapH2Edge,
@@ -36420,7 +36428,7 @@ async function runEngine() {
       league,
       marginEdgePts: handicapH2Edge,
       volLimitPts: _h2VolLimitForMargin,
-    }) : "NaN";
+      injuryFetchFailed: !!(typeof window !== "undefined" && window.__bbInjuryFeedEmptyWarning) || !!(typeof AppState !== "undefined" && AppState.injuries && ((AppState.injuries.A && (AppState.injuries.A.emptyFeed || AppState.injuries.A.fetchFailed)) || (AppState.injuries.B && (AppState.injuries.B.emptyFeed || AppState.injuries.B.fetchFailed))))}) : "NaN";
 
     const picks = [
       {
@@ -37013,7 +37021,7 @@ async function runEngine() {
           if (Number.isFinite(p.intelProbShift) && Number.isFinite(_lockWinProb)) {
             _lockWinProb = Math.max(0.01, Math.min(0.99, _lockWinProb + p.intelProbShift));
           }
-          // Manual mode: injury-feed failures never cap winProbability.
+          // Injury-feed failures / empty feed cap winProbability at 0.62 before grading.
           p.winProbability = _lockWinProb;
           if (!p.confidenceTrace || typeof p.confidenceTrace !== "object") p.confidenceTrace = {};
           const _modelProv = getConfidenceModelProvenance(p.league || league);
@@ -38911,19 +38919,7 @@ document.addEventListener("DOMContentLoaded", () => {
       "click",
       withErrorBoundary(() => loadFixtures(1), "loadFixtures_tomorrow"),
     );
-
-  /* TEMP: Diana test button — remove after Euro tips (EL-focused; EuroCup may be empty on 24th). */
-  const fixtures24thBtn = document.getElementById("fixtures24thBtn");
-  if (fixtures24thBtn)
-    fixtures24thBtn.addEventListener(
-      "click",
-      withErrorBoundary(
-        () => loadFixturesForDate(fixtures24thBtn.getAttribute("data-day") || "2026-09-24"),
-        "loadFixtures_24th",
-      ),
-    );
-
-  const fixtureSelect = document.getElementById("fixtureSelect");
+const fixtureSelect = document.getElementById("fixtureSelect");
   if (fixtureSelect) fixtureSelect.addEventListener("change", onFixtureSelect);
   if (typeof bindLast10SeriesGuards === "function") bindLast10SeriesGuards();
 
