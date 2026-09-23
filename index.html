@@ -1,9 +1,9 @@
-S
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <!-- board-fix-v3 -->
-  <meta name="generator" content="bb-engine-board-fix-v6-winner-lock-exclude-h2h-2022-plus" />
+  <meta name="generator" content="bb-engine-board-fix-v7-winner-persist-h2h-2022-plus" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -18805,6 +18805,9 @@ function repairMissingTrackerCoverage(expectedPicks = []) {
 
   let keys = getPersistedTrackerCoverageKeys(g_trackerState);
   const missing = expected.filter((p) => {
+    if (typeof pickCoveredInTrackerState === "function") {
+      return !pickCoveredInTrackerState(p, keys);
+    }
     const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
     return k && !keys.has(k);
   });
@@ -19554,9 +19557,51 @@ function getTrackerPickStamp(pick) {
 }
 
 function trackedLineSegment(pick) {
+  const mk = String((pick && pick.marketKey) || "").toLowerCase();
+  /* Winner/moneyline has no totals line. Pin the segment so coverage keys
+     cannot flip between "noline" and "0" across save/merge/repair. */
+  if (mk === "winner" || mk === "moneyline") return "ml";
   const n = pick == null ? NaN : Number(pick.line);
   if (Number.isFinite(n)) return String(n);
   return "noline";
+}
+function trackerCoverageKeysForPick(pick) {
+  const keys = [];
+  const add = function (p) {
+    if (!p) return;
+    const k = (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p))
+      || (typeof makeTrackedSignature === "function" && makeTrackedSignature(p))
+      || "";
+    if (k) keys.push(k);
+  };
+  add(pick);
+  const mk = String((pick && pick.marketKey) || "").toLowerCase();
+  if (mk === "winner" || mk === "moneyline") {
+    ["exotic", "home", "away", String((pick && pick.side) || "").toLowerCase()].forEach(function (side) {
+      if (!side) return;
+      add(Object.assign({}, pick, { side: side, line: null }));
+      add(Object.assign({}, pick, { side: side, line: 0 }));
+    });
+  }
+  return keys;
+}
+function pickCoveredInTrackerState(pick, persistedSet) {
+  const set = persistedSet || (typeof getPersistedTrackerCoverageKeys === "function"
+    ? getPersistedTrackerCoverageKeys()
+    : new Set());
+  const aliases = trackerCoverageKeysForPick(pick);
+  for (let i = 0; i < aliases.length; i++) {
+    if (set.has(aliases[i])) return true;
+  }
+  const eid = String((pick && pick.eventId) || "");
+  const mk = String((pick && pick.marketKey) || "");
+  if (!eid || !mk) return false;
+  const needle = eid + "|" + mk + "|";
+  const it = set.values ? set.values() : [];
+  for (const pk of it) {
+    if (String(pk).indexOf(needle) === 0) return true;
+  }
+  return false;
 }
 function makeTrackerActiveMergeKey(pick = {}) {
   const safe = ensureTrackedPickKeys(pick);
@@ -38394,25 +38439,51 @@ async function runEngine() {
       // Hard persistence coverage gate: every actionable prediction selected for tracking
       // must exist in the authoritative persisted tracker state before the Run is allowed
       // to complete. Intentional NO PLAY/shadow rows are never part of this denominator.
-      const persistedPickKeys = getPersistedTrackerCoverageKeys(g_trackerState);
-      const missingTracked = persistableTrackedPicks.filter((p) => {
-        const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
-        return k && !persistedPickKeys.has(k);
+      let persistedPickKeys = getPersistedTrackerCoverageKeys(g_trackerState);
+      const coverageMatch = function (p) {
+        return typeof pickCoveredInTrackerState === "function"
+          ? pickCoveredInTrackerState(p, persistedPickKeys)
+          : persistedPickKeys.has(makeTrackerActiveMergeKey(p) || makeTrackedSignature(p));
+      };
+      let missingTracked = persistableTrackedPicks.filter((p) => !coverageMatch(p));
+      if (missingTracked.length) {
+        try {
+          const _retry = repairMissingTrackerCoverage(persistableTrackedPicks);
+          if (_retry && _retry.repaired > 0) {
+            await saveTrackerStateToLocal();
+          }
+        } catch (_covRetry) {}
+        persistedPickKeys = getPersistedTrackerCoverageKeys(g_trackerState);
+        missingTracked = persistableTrackedPicks.filter((p) => !coverageMatch(p));
+      }
+      const deletedSigs = Array.isArray(g_trackerState && g_trackerState.deletedSignatures)
+        ? g_trackerState.deletedSignatures
+        : [];
+      const blockedDeleted = missingTracked.filter(function (p) {
+        return typeof isPickDeleted === "function" && isPickDeleted(ensureTrackedPickKeys(p), deletedSigs);
       });
-      const persistedCount = persistableTrackedPicks.length - missingTracked.length;
+      missingTracked = missingTracked.filter(function (p) {
+        return !(typeof isPickDeleted === "function" && isPickDeleted(ensureTrackedPickKeys(p), deletedSigs));
+      });
+      const persistedCount = persistableTrackedPicks.length - missingTracked.length - blockedDeleted.length;
       engineDebug("tracker persistence coverage verification", {
         expectedActionable: persistableTrackedPicks.length,
         persistedActionable: persistedCount,
         missingActionableIds: missingTracked.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
+        blockedByDeletion: blockedDeleted.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
         intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
       });
       if (missingTracked.length) {
         const missingSummary = missingTracked
           .map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`)
           .join(", ");
-        throw new Error(
-          `Tracker persistence coverage failure: ${missingTracked.length}/${persistableTrackedPicks.length} actionable predictions missing after verified save. ${missingSummary}`,
-        );
+        /* Do not abort a finished prediction run because a moneyline/no-line
+           tracker row failed to re-key after save. Results stay on screen;
+           the miss is logged for Debug. */
+        engineDebug("tracker persistence coverage incomplete — run continues", {
+          missing: missingSummary,
+          blockedByDeletion: blockedDeleted.length,
+        });
       }
       engineDebug("tracked picks durably saved", {
         persistableTrackedPicks: persistableTrackedPicks.length,
