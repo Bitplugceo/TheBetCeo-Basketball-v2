@@ -1,4 +1,4 @@
-S
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5036,6 +5036,13 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
   if (_asOf && typeof filterEventsAsOf === "function") {
     completedAll = filterEventsAsOf(completedAll, _asOf);
   }
+  if (typeof isGameOnOrAfter2022 === "function") {
+    completedAll = completedAll.filter(function (ev) {
+      return isGameOnOrAfter2022(
+        ev && (ev.startTimestamp || ev.eventDate || ev.date || null),
+      );
+    });
+  }
 
   engineDebug("ssProcessTeamEvents completed overall count: " + completedAll.length, {
     label,
@@ -6859,6 +6866,13 @@ function extractH2HFromPastedEvents() {
       if (fixtureTid != null) {
         const evTid = ev?.tournament?.uniqueTournament?.id;
         if (evTid == null || String(evTid) !== fixtureTid) return false;
+      }
+
+      if (
+        typeof isGameOnOrAfter2022 === "function" &&
+        !isGameOnOrAfter2022(ev.startTimestamp || ev.eventDate || ev.date || null)
+      ) {
+        return false;
       }
 
       return true;
@@ -13819,13 +13833,15 @@ const LEAGUE_FETCH_RULES = {
     regulationPeriods: 4,
   },
   euroleague: {
-    recentSeasons: 2,
+    /* Document deeper Incrowd lookback (primaryYear…2021); loadEuroleagueGamesForStats is source of truth. */
+    recentSeasons: 6,
     scheduleTypes: ["1", "2", "3"],
     h2hScheduleTypes: ["1", "2", "3"],
     regulationPeriods: 4,
   },
   eurocup: {
-    recentSeasons: 2,
+    /* Document deeper Incrowd lookback (primaryYear…2021); loadEuroleagueGamesForStats is source of truth. */
+    recentSeasons: 6,
     scheduleTypes: ["1", "2", "3"],
     h2hScheduleTypes: ["1", "2", "3"],
     regulationPeriods: 4,
@@ -27898,6 +27914,29 @@ async function fetchNbaSummerGameRefsViaScoreboard(base, teamId) {
   return refs;
 }
 
+/** Hard calendar floor for H2H / series history: on or after 2022-01-01.
+ * Undated / unparseable dates are kept (filter only when a real pre-2022 timestamp exists).
+ */
+const BB_GAME_HISTORY_MIN_TS = new Date(2022, 0, 1).getTime();
+function isGameOnOrAfter2022(dateLike) {
+  if (dateLike == null || dateLike === "") return true;
+  let ts = NaN;
+  if (typeof dateLike === "number" && Number.isFinite(dateLike)) {
+    ts = dateLike < 1e12 ? dateLike * 1000 : dateLike;
+  } else {
+    const s = String(dateLike).trim();
+    if (!s) return true;
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const n = Number(s);
+      ts = n < 1e12 ? n * 1000 : n;
+    } else {
+      ts = Date.parse(s);
+    }
+  }
+  if (!Number.isFinite(ts)) return true;
+  return ts >= BB_GAME_HISTORY_MIN_TS;
+}
+
 async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFallback = true) {
   if (teamId == null || teamId === "" || String(teamId) === "undefined" || String(teamId) === "null") {
     engineDebug("fetchScheduleCore skipped — missing teamId", { teamId, leagueKey });
@@ -27996,6 +28035,9 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
       seen.add(g.id);
       return true;
     })
+    .filter((g) =>
+      typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(g.date) : true,
+    )
     .sort((a, b) => {
       const da = a.date ? new Date(a.date).getTime() : 0;
       const db = b.date ? new Date(b.date).getTime() : 0;
@@ -28408,8 +28450,13 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
   const currentSeason = getCurrentSeasonYear(leagueKey);
 
   const lookbackYears = getParam("h2hLookbackSeasons", leagueKey) ?? 4;
-  const minSeason = currentSeason - lookbackYears;
-  const minDateTs = new Date(minSeason, 0, 1).getTime();
+  /* Hard calendar floor 2022-01-01; season loop always reaches at least ESPN season year 2022. */
+  const HARD_MIN_TS =
+    typeof BB_GAME_HISTORY_MIN_TS === "number"
+      ? BB_GAME_HISTORY_MIN_TS
+      : new Date(2022, 0, 1).getTime();
+  const minSeason = Math.min(currentSeason - lookbackYears, 2022);
+  const minDateTs = HARD_MIN_TS;
 
   const scheduleJobs = [];
 
@@ -28662,10 +28709,17 @@ function getEuroleagueSeasonCodes(league) {
       ? getIncrowdEuroCompetition(league)
       : { competition: "E" };
   const prefix = String(meta.competition || "E").toUpperCase();
+  /* Load through season-code year 2021 so Jan–May 2022 games (2021–22 season) feed the 2022+ filter. */
+  const oldestSeasonYear = 2021;
+  const seasons = [];
+  for (let sy = primaryYear; sy >= oldestSeasonYear; sy--) {
+    seasons.push(prefix + sy);
+  }
   return {
     primary: prefix + primaryYear,
     previous: prefix + (primaryYear - 1),
     competition: prefix,
+    seasons,
   };
 }
 
@@ -29181,18 +29235,24 @@ async function fetchEuroleagueClubs(seasonCode, competition) {
 }
 
 async function loadEuroleagueGamesForStats(league) {
-  const { primary, previous, competition } = getEuroleagueSeasonCodes(league);
-  const [pri, prev] = await Promise.all([
-    fetchEuroleagueSeasonGames(primary, competition).catch(() => []),
-    fetchEuroleagueSeasonGames(previous, competition).catch(() => []),
-  ]);
+  const meta = getEuroleagueSeasonCodes(league);
+  const competition = meta.competition;
+  const codes =
+    Array.isArray(meta.seasons) && meta.seasons.length
+      ? meta.seasons
+      : [meta.primary, meta.previous].filter(Boolean);
+  const batches = await Promise.all(
+    codes.map((code) => fetchEuroleagueSeasonGames(code, competition).catch(() => [])),
+  );
   const seen = new Set();
   const merged = [];
-  [...(pri || []), ...(prev || [])].forEach((g) => {
-    const id = String(g?.id || g?.identifier || "");
-    if (!id || seen.has(id)) return;
-    seen.add(id);
-    merged.push(g);
+  batches.forEach((games) => {
+    (games || []).forEach((g) => {
+      const id = String(g?.id || g?.identifier || "");
+      if (!id || seen.has(id)) return;
+      seen.add(id);
+      merged.push(g);
+    });
   });
   return merged;
 }
@@ -29207,6 +29267,9 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue) {
       const ac = String(g?.away?.code || "").toUpperCase();
       return hc === tCode || ac === tCode;
     })
+    .filter((g) =>
+      typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(g?.date) : true,
+    )
     .map((g) => {
       const hc = String(g?.home?.code || "").toUpperCase();
       const isHome = hc === tCode;
@@ -29383,7 +29446,10 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
   const tA = String(teamACode || "").toUpperCase();
   const tB = String(teamBCode || "").toUpperCase();
   if (!tA || !tB) return [];
-  const minTs = new Date(2022, 0, 1).getTime();
+  const minTs =
+    typeof BB_GAME_HISTORY_MIN_TS === "number"
+      ? BB_GAME_HISTORY_MIN_TS
+      : new Date(2022, 0, 1).getTime();
   const games = (allGames || [])
     .filter((g) => euroleagueGameIsPlayed(g))
     .filter((g) => {
@@ -29411,8 +29477,8 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
       const scoreA = Number(sideA?.score);
       const scoreB = Number(sideB?.score);
       const date = g.date || "";
-      const ts = date ? Date.parse(date) : NaN;
-      if (isFinite(ts) && ts < minTs) return null;
+      if (typeof isGameOnOrAfter2022 === "function" ? !isGameOnOrAfter2022(date) : (date && Date.parse(date) < minTs))
+        return null;
       if (!Number.isFinite(scoreA) || !Number.isFinite(scoreB) || scoreA <= 0 || scoreB <= 0)
         return null;
       return {
