@@ -1,4 +1,3 @@
-S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -4731,8 +4730,8 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v26_godfather_overseer_debug_20260924";
-window.__BB_INTEGRITY_BUILD__ = "v26_godfather_overseer_debug_20260924";
+const APP_BUILD_VERSION = "v28_tracker_report_align_20260924";
+window.__BB_INTEGRITY_BUILD__ = "v28_tracker_report_align_20260924";
 window.__BB_CLEAR_STALE_REPLAY_SNAPSHOTS__ = function __BB_CLEAR_STALE_REPLAY_SNAPSHOTS__() {
   try {
     const want = String(window.__BB_INTEGRITY_BUILD__ || "");
@@ -14312,6 +14311,7 @@ function isTrackedSettledPastVisibleWindow(pick, nowMs = Date.now()) {
 
 const GODFATHER_RAID_REPORT_KEY = "bb_godfather_raid_report_v1";
 let g_godfatherRaidInFlight = false;
+let g_godfatherLightningMode = false;
 let g_godfatherLastReport = null;
 
 function loadGodfatherRaidReport() {
@@ -14547,6 +14547,26 @@ async function runEngineGodfatherRaid(opts = {}) {
   const mark = (id, name, severity, count, status, detail) => {
     bugs.push({ id, name, severity, count: Number(count || 0), status, detail: detail || "" });
   };
+  const race = (promise, ms, fallback) => {
+    const timeoutMs = Math.max(200, Number(ms) || 2000);
+    let timer = null;
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => resolve(fallback), timeoutMs);
+    });
+    return Promise.race([
+      Promise.resolve(promise).then(
+        (v) => {
+          if (timer) clearTimeout(timer);
+          return v;
+        },
+        () => {
+          if (timer) clearTimeout(timer);
+          return fallback;
+        },
+      ),
+      timeout,
+    ]);
+  };
   const ranAt = new Date().toISOString();
   let archivedMoved = 0;
   let settledNow = 0;
@@ -14558,26 +14578,26 @@ async function runEngineGodfatherRaid(opts = {}) {
   let cachesCleared = 0;
   const beforeActive = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks.length : 0;
   const beforeArchived = Array.isArray(g_trackerState?.archivedPicks) ? g_trackerState.archivedPicks.length : 0;
+  const t0 = Date.now();
 
   try {
-    setStatus("🚨 Godfather raid…", "#ff6b6b");
-    try {
-      if (typeof engineDebug === "function") engineDebug("Godfather raid start", { build: APP_BUILD_VERSION });
-    } catch (_e) {}
+    setStatus("⚡ Godfather raid…", "#ff6b6b");
 
-    // A) Clear stale fetch caches
+    /* ═══ PHASE 1 — local lightning (UI must update ASAP) ═══ */
     try {
-      cachesCleared = clearGodfatherStaleCaches();
+      cachesCleared = typeof clearGodfatherStaleCaches === "function" ? clearGodfatherStaleCaches() : 0;
       mark("stale_caches", "Stale fetch caches", "medium", cachesCleared, cachesCleared ? "fixed" : "clean", "Cleared schedule/summary/fixture/proxy caches");
     } catch (e) {
       failed.push("cache_clear");
       mark("stale_caches", "Stale fetch caches", "medium", 0, "failed", String(e?.message || e));
     }
 
-    // B) Tombstone hydrate
     try {
-      if (typeof hydrateDeletedTombstones === "function") await hydrateDeletedTombstones();
-    } catch (e) {
+      if (typeof hydrateDeletedTombstones === "function") {
+        const h = hydrateDeletedTombstones();
+        if (h && typeof h.then === "function") await race(h, 250, null);
+      }
+    } catch (_e) {
       failed.push("tombstone_hydrate");
     }
 
@@ -14590,10 +14610,11 @@ async function runEngineGodfatherRaid(opts = {}) {
       });
     } catch (_e) {}
 
-    // C) Backfill missing settledAt
     try {
       settledAtBackfill =
-        backfillMissingSettledAt(g_trackerState.activePicks) + backfillMissingSettledAt(g_trackerState.archivedPicks);
+        (typeof backfillMissingSettledAt === "function"
+          ? backfillMissingSettledAt(g_trackerState.activePicks) + backfillMissingSettledAt(g_trackerState.archivedPicks)
+          : 0);
       mark(
         "missing_settledAt",
         "Missing settledAt on settled picks",
@@ -14609,16 +14630,19 @@ async function runEngineGodfatherRaid(opts = {}) {
 
     let expiredOnActive = 0;
     try {
-      expiredOnActive = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
+      expiredOnActive = (g_trackerState.activePicks || []).filter((p) =>
+        typeof isTrackedSettledPastVisibleWindow === "function" ? isTrackedSettledPastVisibleWindow(p) : false,
+      ).length;
     } catch (_e) {}
 
-    // D) Dedupe
     try {
-      const dA = dedupeTrackedPickBucket(g_trackerState.activePicks || []);
-      const dR = dedupeTrackedPickBucket(g_trackerState.archivedPicks || []);
-      g_trackerState.activePicks = dA.list;
-      g_trackerState.archivedPicks = dR.list;
-      dupesRemoved = dA.removed + dR.removed;
+      if (typeof dedupeTrackedPickBucket === "function") {
+        const dA = dedupeTrackedPickBucket(g_trackerState.activePicks || []);
+        const dR = dedupeTrackedPickBucket(g_trackerState.archivedPicks || []);
+        g_trackerState.activePicks = dA.list;
+        g_trackerState.archivedPicks = dR.list;
+        dupesRemoved = dA.removed + dR.removed;
+      }
       mark(
         "duplicate_sigs",
         "Duplicate picks / signature collisions",
@@ -14632,12 +14656,11 @@ async function runEngineGodfatherRaid(opts = {}) {
       mark("duplicate_sigs", "Duplicate picks / signature collisions", "high", 0, "failed", String(e?.message || e));
     }
 
-    // E) Archive expired + tombstone purge
     try {
       const preA = (g_trackerState.activePicks || []).length;
       if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
-      const peeled = peelExpiredSettledFromActive();
-      archivedMoved = Math.max(0, preA - (g_trackerState.activePicks || []).length, peeled);
+      const peeled = typeof peelExpiredSettledFromActive === "function" ? peelExpiredSettledFromActive() : 0;
+      archivedMoved = Math.max(0, preA - (g_trackerState.activePicks || []).length, peeled || 0);
       let stillTomb = 0;
       const pools2 = [...(g_trackerState.activePicks || []), ...(g_trackerState.archivedPicks || [])];
       pools2.forEach((p) => {
@@ -14670,67 +14693,16 @@ async function runEngineGodfatherRaid(opts = {}) {
       mark("expired_settled_on_active", "Settled >10h still on Tracked Picks", "critical", expiredOnActive, "failed", String(e?.message || e));
     }
 
-    // F) Settle pending (embedded + feeds)
-    const pendingBefore = (g_trackerState.activePicks || []).filter(
-      (p) => String(p?.resultStatus || "pending").toLowerCase() === "pending",
-    ).length;
     try {
-      embeddedSettled = settlePendingWithEmbeddedScores();
-    } catch (e) {
+      embeddedSettled = typeof settlePendingWithEmbeddedScores === "function" ? settlePendingWithEmbeddedScores() : 0;
+    } catch (_e) {
       failed.push("embedded_settle");
     }
-    try {
-      if (typeof refreshTrackedPickResults === "function") await refreshTrackedPickResults();
-    } catch (e) {
-      failed.push("feed_settle:" + (e?.message || e));
-    }
-    const pendingAfter = (g_trackerState.activePicks || []).filter(
-      (p) => String(p?.resultStatus || "pending").toLowerCase() === "pending",
-    ).length;
-    settledNow = Math.max(0, pendingBefore - pendingAfter);
-    mark(
-      "pending_should_settle",
-      "Pending with final/live scores available",
-      "high",
-      settledNow + embeddedSettled,
-      settledNow + embeddedSettled ? "fixed" : "clean",
-      "refreshTrackedPickResults + embedded actualScore settle",
-    );
 
-    // G) Live badge refresh + scrub
     try {
-      if (typeof pollLiveGameClocks === "function") await pollLiveGameClocks();
-      else if (typeof scheduleLiveClockPoll === "function") scheduleLiveClockPoll(0);
-      liveScrubbed = scrubStaleLiveBadges();
-      mark(
-        "stale_live_badges",
-        "Stale live badges on finished games",
-        "medium",
-        liveScrubbed,
-        liveScrubbed ? "fixed" : "clean",
-        "Polled live clocks; scrubbed non-pending live badges",
-      );
-    } catch (e) {
-      failed.push("live_refresh");
-      mark("stale_live_badges", "Stale live badges on finished games", "medium", 0, "failed", String(e?.message || e));
-    }
-
-    // H) Re-archive after settles
-    try {
-      if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
-      peelExpiredSettledFromActive();
+      liveScrubbed = typeof scrubStaleLiveBadges === "function" ? scrubStaleLiveBadges() : 0;
     } catch (_e) {}
 
-    let stillExpired = 0;
-    try {
-      stillExpired = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
-      if (stillExpired > 0) {
-        archivedMoved += peelExpiredSettledFromActive();
-        stillExpired = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
-      }
-    } catch (_e) {}
-
-    // I) Safe integrity repairs
     try {
       if (typeof repairMisclassifiedNoPlayTrackedPicks === "function") {
         repairMisclassifiedNoPlayTrackedPicks(g_trackerState.activePicks || [], g_trackerState.archivedPicks || [], {
@@ -14751,7 +14723,6 @@ async function runEngineGodfatherRaid(opts = {}) {
       mark("appstate_mirror", "AppState / g_trackerState / derived mirrors", "medium", 0, "failed", String(e?.message || e));
     }
 
-    // J) Empty-state sync / cloud resurrection guard
     try {
       const meaningful =
         (g_trackerState.activePicks || []).length +
@@ -14775,10 +14746,11 @@ async function runEngineGodfatherRaid(opts = {}) {
       mark("empty_state_sync_skip", "Empty-state sync skip / cloud hydrate resurrection", "critical", 0, "failed", String(e?.message || e));
     }
 
-    // K) Render visibility enforce
     try {
       if (typeof renderTrackedPicks === "function") renderTrackedPicks();
-      const leak = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
+      const leak = (g_trackerState.activePicks || []).filter((p) =>
+        typeof isTrackedSettledPastVisibleWindow === "function" ? isTrackedSettledPastVisibleWindow(p) : false,
+      ).length;
       mark(
         "render_archive_on_active",
         "Render showing archive/expired rows on active page",
@@ -14792,25 +14764,104 @@ async function runEngineGodfatherRaid(opts = {}) {
       mark("render_archive_on_active", "Render showing archive/expired rows on active page", "critical", 0, "failed", String(e?.message || e));
     }
 
-    // L) Persist local + cloud
+    /* Local persist NOW — don't wait on cloud */
     try {
-      if (typeof forceTrackerSaveNow === "function") await forceTrackerSaveNow();
-      else if (typeof saveTrackerStateToLocal === "function") await saveTrackerStateToLocal();
-      mark("persist_cloud", "Local + cloud sync push", "high", 1, "fixed", "forceTrackerSaveNow after corrections");
+      if (typeof saveTrackerStateToLocal === "function") {
+        await race(Promise.resolve(saveTrackerStateToLocal()), 800, null);
+      }
+    } catch (_e) {}
+
+    const localMs = Date.now() - t0;
+    setStatus(
+      `⚡ Local done ${localMs}ms · archived ${archivedMoved} · settling feeds…`,
+      "#ffb020",
+    );
+
+    /* ═══ PHASE 2 — network, hard budget ═══ */
+    const pendingBefore = (g_trackerState.activePicks || []).filter(
+      (p) => String(p?.resultStatus || "pending").toLowerCase() === "pending",
+    ).length;
+
+    /* Active-only settle: temporarily ignore archived for the heavy refresher */
+    const archivedBackup = g_trackerState.archivedPicks;
+    g_godfatherLightningMode = true;
+    try {
+      g_trackerState.archivedPicks = [];
+      if (typeof refreshTrackedPickResults === "function" && pendingBefore > 0) {
+        await race(refreshTrackedPickResults(), 4500, null);
+      }
+    } catch (e) {
+      failed.push("feed_settle:" + (e?.message || e));
+    } finally {
+      g_godfatherLightningMode = false;
+      g_trackerState.archivedPicks = archivedBackup;
+    }
+
+    const pendingAfter = (g_trackerState.activePicks || []).filter(
+      (p) => String(p?.resultStatus || "pending").toLowerCase() === "pending",
+    ).length;
+    settledNow = Math.max(0, pendingBefore - pendingAfter);
+    mark(
+      "pending_should_settle",
+      "Pending with final/live scores available",
+      "high",
+      settledNow + embeddedSettled,
+      settledNow + embeddedSettled ? "fixed" : pendingBefore ? "detected" : "clean",
+      "Active-only feed settle · 4.5s budget (lightning)",
+    );
+
+    try {
+      if (typeof pollLiveGameClocks === "function") await race(pollLiveGameClocks(), 2500, null);
+      else if (typeof scheduleLiveClockPoll === "function") scheduleLiveClockPoll(0);
+      const scrub2 = typeof scrubStaleLiveBadges === "function" ? scrubStaleLiveBadges() : 0;
+      liveScrubbed = Math.max(liveScrubbed, scrub2);
+      mark(
+        "stale_live_badges",
+        "Stale live badges on finished games",
+        "medium",
+        liveScrubbed,
+        liveScrubbed ? "fixed" : "clean",
+        "Live poll ≤2.5s · scrubbed non-pending live badges",
+      );
+    } catch (e) {
+      failed.push("live_refresh");
+      mark("stale_live_badges", "Stale live badges on finished games", "medium", 0, "failed", String(e?.message || e));
+    }
+
+    try {
+      if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
+      if (typeof peelExpiredSettledFromActive === "function") {
+        archivedMoved += peelExpiredSettledFromActive() || 0;
+      }
+      if (typeof rebuildTrackerStats === "function") rebuildTrackerStats();
+      if (typeof renderTrackedPicks === "function") renderTrackedPicks();
+    } catch (_e) {}
+
+    /* Cloud push — fire with short wait, never hang the raid */
+    try {
+      if (typeof forceTrackerSaveNow === "function") {
+        await race(forceTrackerSaveNow(), 2000, null);
+      } else if (typeof flushTrackerSave === "function") {
+        await race(flushTrackerSave(), 2000, null);
+      }
+      mark("persist_cloud", "Local + cloud sync push", "high", 1, "fixed", "Local first · cloud ≤2s race");
     } catch (e) {
       failed.push("persist:" + (e?.message || e));
       mark("persist_cloud", "Local + cloud sync push", "high", 0, "failed", String(e?.message || e));
     }
 
     const afterActive = (g_trackerState.activePicks || []).length;
+    const elapsed = Date.now() - t0;
     const summary =
-      `archived ${archivedMoved}, settled ${settledNow + embeddedSettled}, tombstones ${tombstonePurged}, dupes ${dupesRemoved}` +
+      `⚡${elapsed}ms · archived ${archivedMoved}, settled ${settledNow + embeddedSettled}, tombstones ${tombstonePurged}, dupes ${dupesRemoved}` +
       (failed.length ? `, failed: ${failed.join(",")}` : ", ok");
 
     const report = {
       build: typeof APP_BUILD_VERSION !== "undefined" ? APP_BUILD_VERSION : "",
       ranAt,
       ranAtLocal: new Date().toLocaleString([], { hour12: false }),
+      elapsedMs: elapsed,
+      localMs,
       summary,
       archivedMoved,
       settledNow: settledNow + embeddedSettled,
@@ -14824,53 +14875,51 @@ async function runEngineGodfatherRaid(opts = {}) {
       beforeArchived,
       failed,
       bugs,
+      mode: "lightning",
     };
-    persistGodfatherRaidReport(report);
+    if (typeof persistGodfatherRaidReport === "function") persistGodfatherRaidReport(report);
 
     try {
-      if (typeof g_lastRenderedTrackerVersion !== "undefined") g_lastRenderedTrackerVersion = null;
-      if (typeof renderTrackerAnalytics === "function") renderTrackerAnalytics();
-    } catch (_e) {}
-
-    setStatus(`🚨 ${summary}`, failed.length ? "#fbbf24" : "#4ade80");
-    setTimeout(() => {
-      if (statusEl && String(statusEl.textContent || "").startsWith("🚨")) {
-        statusEl.textContent = "";
-        statusEl.style.color = "";
+      if (typeof g_lastRenderedTrackerVersion !== "undefined") g_lastRenderedTrackerVersion = -1;
+      if (typeof renderTrackedPicks === "function") renderTrackedPicks();
+      if (typeof currentView !== "undefined" && currentView === "debug" && typeof renderTrackerDebugView === "function") {
+        renderTrackerDebugView();
+      } else if (typeof renderTrackerAnalytics === "function") {
+        try { renderTrackerAnalytics(); } catch (_eA) {}
       }
-    }, 10000);
+    } catch (_eR) {}
 
+    setStatus(`🚨 ${summary}`, failed.length ? "#ff6b6b" : "#49d45f");
     try {
-      if (typeof engineDebug === "function") engineDebug("Godfather raid complete", report);
-      if (typeof trackerDebug === "function") trackerDebug("Godfather raid complete", summary);
+      if (typeof engineDebug === "function") engineDebug("Godfather raid done", report);
     } catch (_e) {}
 
     return { ok: failed.length === 0, report };
   } catch (err) {
-    failed.push(String(err?.message || err));
+    const elapsed = Date.now() - t0;
+    setStatus("🚨 Godfather raid crashed: " + String(err?.message || err), "#ff6b6b");
     const report = {
       build: typeof APP_BUILD_VERSION !== "undefined" ? APP_BUILD_VERSION : "",
       ranAt,
-      ranAtLocal: new Date().toLocaleString([], { hour12: false }),
-      summary: "Raid crashed: " + (err?.message || err),
-      archivedMoved,
-      settledNow,
-      tombstonePurged,
-      dupesRemoved,
-      failed,
+      elapsedMs: elapsed,
+      summary: "crashed: " + String(err?.message || err),
+      failed: ["crash"],
       bugs,
+      mode: "lightning",
     };
-    persistGodfatherRaidReport(report);
-    setStatus("🚨 Raid failed", "#ff5c61");
+    try {
+      if (typeof persistGodfatherRaidReport === "function") persistGodfatherRaidReport(report);
+    } catch (_e) {}
     return { ok: false, report, error: err };
   } finally {
     g_godfatherRaidInFlight = false;
   }
 }
 
-async function runMilitaryRaidOverseer(opts) {
+function runMilitaryRaidOverseer(opts) {
   return runEngineGodfatherRaid(opts);
 }
+
 
 window.runEngineGodfatherRaid = runEngineGodfatherRaid;
 window.runMilitaryRaidOverseer = runMilitaryRaidOverseer;
@@ -20859,6 +20908,101 @@ function isTrackedPickVisibleOnPage(pick) {
   return now - settledTs < TRACKER_SETTLED_VISIBLE_MS;
 }
 
+/** Single source of truth for Tracked Picks page + report "open book".
+ *  Visible active only: pending + settled still inside the 10h window,
+ *  no tombstones, deduped, league-allowed markets only. Archive excluded. */
+function getVisibleActiveTrackedPicks() {
+  const st =
+    (typeof AppState !== "undefined" && AppState?.tracker?.state) ||
+    (typeof g_trackerState !== "undefined" ? g_trackerState : null) ||
+    {};
+  const deletedList = Array.isArray(st.deletedSignatures) ? st.deletedSignatures : [];
+  const active = (Array.isArray(st.activePicks) ? st.activePicks : []).filter(
+    (p) => !(typeof isPickDeleted === "function" && isPickDeleted(p, deletedList)),
+  );
+
+  const uniquePicksMap = new Map();
+  active.forEach((p) => {
+    const sig =
+      typeof makeTrackedSignature === "function" ? makeTrackedSignature(p) : p?.signature || "";
+    if (!sig) return;
+    const prev = uniquePicksMap.get(sig);
+    if (
+      !prev ||
+      (typeof getTrackedPickTimeMs === "function" &&
+        getTrackedPickTimeMs(p) > getTrackedPickTimeMs(prev))
+    ) {
+      uniquePicksMap.set(sig, p);
+    }
+  });
+
+  return Array.from(uniquePicksMap.values())
+    .filter((p) => !(typeof isPickDeleted === "function" && isPickDeleted(p, deletedList)))
+    .filter((p) => (typeof isTrackedPickVisibleOnPage === "function" ? isTrackedPickVisibleOnPage(p) : true))
+    .filter((p) => {
+      if (typeof getAllowedMarketsForLeague !== "function") return true;
+      try {
+        return getAllowedMarketsForLeague(p && p.league).has(p && p.marketKey);
+      } catch (_e) {
+        return true;
+      }
+    });
+}
+
+function getTrackedPickGameKey(pick) {
+  if (!pick) return "";
+  return String(
+    pick.eventId ||
+      pick.matchupKey ||
+      `${pick.homeTeam || "—"}_${pick.awayTeam || "—"}_${pick.eventDate || ""}`,
+  );
+}
+
+/** Counts for the visible active / open book pool (matches Tracked Picks header). */
+function summarizeVisibleTrackedBook(picks) {
+  const list = Array.isArray(picks)
+    ? picks
+    : typeof getVisibleActiveTrackedPicks === "function"
+      ? getVisibleActiveTrackedPicks()
+      : [];
+  let live = 0,
+    wins = 0,
+    losses = 0,
+    pushes = 0,
+    pending = 0;
+  const gameKeys = new Set();
+  list.forEach((p) => {
+    const status = String(p?.resultStatus || "pending").toLowerCase();
+    const gk = typeof getTrackedPickGameKey === "function" ? getTrackedPickGameKey(p) : "";
+    if (gk) gameKeys.add(gk);
+    if (status === "win") wins++;
+    else if (status === "loss") losses++;
+    else if (status === "push") pushes++;
+    else {
+      pending++;
+      if (typeof isTrackedPickLiveOnPage === "function" ? isTrackedPickLiveOnPage(p) : false) live++;
+    }
+  });
+  return {
+    picks: list.length,
+    games: gameKeys.size,
+    live,
+    wins,
+    losses,
+    pushes,
+    pending,
+    settled: wins + losses + pushes,
+  };
+}
+
+
+try {
+  window.getVisibleActiveTrackedPicks = getVisibleActiveTrackedPicks;
+  window.summarizeVisibleTrackedBook = summarizeVisibleTrackedBook;
+  window.getTrackedPickGameKey = getTrackedPickGameKey;
+} catch (_w) {}
+
+
 function getCurrentFixtureMeta() {
   const fixtureSelect = document.getElementById("fixtureSelect");
   const selectedOpt =
@@ -21019,43 +21163,13 @@ function renderTrackedPicks() {
     archiveExpiredTrackedPicks();
   } catch (_archErr) {}
 
-  const deletedList = Array.isArray(AppState.tracker.state.deletedSignatures)
-    ? AppState.tracker.state.deletedSignatures
-    : [];
-  const active = (Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks
-    : []
-  ).filter((p) => !isPickDeleted(p, deletedList));
-  const archived = Array.isArray(AppState.tracker.state.archivedPicks)
-    ? AppState.tracker.state.archivedPicks
-    : [];
-
-  const allPicks = [...active];
-
-  const uniquePicksMap = new Map();
-  allPicks.forEach((p) => {
-    const sig = makeTrackedSignature(p);
-    if (
-      !uniquePicksMap.has(sig) ||
-      getTrackedPickTimeMs(p) > getTrackedPickTimeMs(uniquePicksMap.get(sig))
-    ) {
-      uniquePicksMap.set(sig, p);
-    }
-  });
-
-  // Tracker UI policy: show settled picks and recent pending picks (pending picks
-  // stay visible for 48h after creation via isTrackedPickVisibleOnPage, whether or
-  // not the live-game feed currently confirms the event as in-progress). Previously
-  // pending picks were additionally required to match g_liveGameStatus, which hid
-  // every freshly-made prediction until its game was detected as live — making new
-  // predictions look like they hadn't saved. Pending records remain stored internally
-  // regardless of what's shown here, so settlement tracking is unaffected.
-  // Settled picks older than TRACKER_SETTLED_VISIBLE_MS (10h from settle) are excluded
-  // here and belong only in archive/Record views.
-  const visiblePicks = Array.from(uniquePicksMap.values())
-    .filter((p) => !isPickDeleted(p, deletedList))
-    .filter(isTrackedPickVisibleOnPage)
-    .filter((p) => getAllowedMarketsForLeague(p && p.league).has(p && p.marketKey));
+  // Tracker UI policy: visible active only via getVisibleActiveTrackedPicks()
+  // (pending + settled inside 10h window, no tombstones, no archive). Same pool
+  // as Engine Report "Open book" so counts/lists stay aligned.
+  const visiblePicks =
+    typeof getVisibleActiveTrackedPicks === "function"
+      ? getVisibleActiveTrackedPicks()
+      : [];
 
   window.__trackerRenderLimit = window.__trackerRenderLimit || 50;
   const displayPicks = visiblePicks
@@ -21104,16 +21218,18 @@ function renderTrackedPicks() {
   renderTrackerAnalytics();
   renderTrackerDebugPanel();
 
-  const stats = g_trackerState.stats || { total: 0, settled: 0, wins: 0, losses: 0, pushes: 0 };
-  const liveCount = displayPicks.filter(
-    (p) =>
-      String(p?.resultStatus || "pending").toLowerCase() === "pending" &&
-      p?.eventId &&
-      g_liveGameStatus.has(p.eventId),
-  ).length;
+  // Header counts MUST match the visible list (not lifetime active+archive stats).
+  const openBook =
+    typeof summarizeVisibleTrackedBook === "function"
+      ? summarizeVisibleTrackedBook(visiblePicks)
+      : {
+          live: 0,
+          wins: 0,
+          losses: 0,
+        };
 
-  // Tracker summary matches classic engine: live / wins / losses only (not saved/settled).
-  summaryEl.innerHTML = `${liveCount} live • ${stats.wins || 0} wins • ${stats.losses || 0} losses`;
+  // Tracker summary = open book only (same scope as the rows below).
+  summaryEl.innerHTML = `${openBook.live || 0} live • ${openBook.wins || 0} wins • ${openBook.losses || 0} losses`;
 
   try {
     const _qfStats = getQuarterFormBacktestStats();
@@ -22173,9 +22289,27 @@ function renderTrackerAnalytics() {
       PHASE2_ACTIVATION_RULES?.trackerFeedback?.minSettled ||
       20,
   );
+  // Raw active bucket size (includes expired-not-yet-archived / tombstoned until purge).
+  // Prefer open-book counts below for anything that claims to match Tracked Picks.
   const activeCount = Array.isArray(g_trackerState?.activePicks)
     ? g_trackerState.activePicks.length
     : 0;
+  const openBookPicks =
+    typeof getVisibleActiveTrackedPicks === "function" ? getVisibleActiveTrackedPicks() : [];
+  const openBook =
+    typeof summarizeVisibleTrackedBook === "function"
+      ? summarizeVisibleTrackedBook(openBookPicks)
+      : {
+          picks: 0,
+          games: 0,
+          live: 0,
+          wins: 0,
+          losses: 0,
+          pushes: 0,
+          pending: 0,
+          settled: 0,
+        };
+  const lifetimeActiveArchived = Array.isArray(allReportPicks) ? allReportPicks.length : 0;
 
   function marketLabel(key) {
     const map = {
@@ -22480,11 +22614,7 @@ function renderTrackerAnalytics() {
   const teamDisplayRows = teamRows.slice(0, 8);
   const marketDisplayRows = marketRows.slice(0, 5);
   const leagueDisplayRows = leagueRows.slice(0, 5);
-  const pendingActiveCount = Array.isArray(g_trackerState?.activePicks)
-    ? g_trackerState.activePicks.filter(
-        (p) => !["win", "loss", "push"].includes(String(p?.resultStatus || "").toLowerCase()),
-      ).length
-    : 0;
+  const pendingActiveCount = Number(openBook.pending || 0);
 
   const importantEngineLines = [];
 
@@ -22502,19 +22632,50 @@ function renderTrackerAnalytics() {
   panel.style.display = currentView === "picks" ? "none" : "block";
 
   const reportBodyHtml = `
+      <div class="tracker-analytics-card" style="margin-bottom:10px;">
+        <div class="tracker-analytics-card-head">
+          <div class="tracker-analytics-card-title">Open book (matches Tracked Picks)</div>
+          <div class="tracker-analytics-card-meta">Visible active only · no archive · no tombstones · settled ≤10h</div>
+        </div>
+        <div class="tracker-analytics-card-body">
+          <div class="tracker-kpi-grid">
+            <div class="tracker-kpi-card featured">
+              <div class="tracker-kpi-label">Open book</div>
+              <div class="tracker-kpi-value">${openBook.live || 0} live</div>
+              <div class="tracker-kpi-sub">${openBook.wins || 0} wins • ${openBook.losses || 0} losses • ${openBook.pushes || 0} pushes</div>
+            </div>
+            <div class="tracker-kpi-card">
+              <div class="tracker-kpi-label">Visible picks</div>
+              <div class="tracker-kpi-value">${openBook.picks || 0}</div>
+              <div class="tracker-kpi-sub">${openBook.games || 0} games · ${openBook.pending || 0} pending</div>
+            </div>
+            <div class="tracker-kpi-card">
+              <div class="tracker-kpi-label">Visible settled</div>
+              <div class="tracker-kpi-value">${openBook.settled || 0}</div>
+              <div class="tracker-kpi-sub">Still inside the 10h Tracked Picks window</div>
+            </div>
+            <div class="tracker-kpi-card">
+              <div class="tracker-kpi-label">Raw active bucket</div>
+              <div class="tracker-kpi-value">${activeCount}</div>
+              <div class="tracker-kpi-sub">Unfiltered activePicks.length (may include expired)</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="tracker-kpi-grid">
         <div class="tracker-kpi-card featured">
-          <div class="tracker-kpi-label">Overall</div>
+          <div class="tracker-kpi-label">Lifetime overall</div>
           <div class="tracker-kpi-value">${overallRecord.wins}W</div>
-          <div class="tracker-kpi-sub">Losses ${overallRecord.losses} • Pushes ${overallRecord.pushes} • Win rate ${formatPct(overallRecord.winPct)}</div>
+          <div class="tracker-kpi-sub">Losses ${overallRecord.losses} • Pushes ${overallRecord.pushes} • Win rate ${formatPct(overallRecord.winPct)} · active+archive</div>
         </div>
         <div class="tracker-kpi-card">
-          <div class="tracker-kpi-label">Active picks</div>
-          <div class="tracker-kpi-value">${activeCount}</div>
-          <div class="tracker-kpi-sub">Current model ${safeText(currentVersion)}</div>
+          <div class="tracker-kpi-label">Lifetime tracked</div>
+          <div class="tracker-kpi-value">${lifetimeActiveArchived}</div>
+          <div class="tracker-kpi-sub">Active+archive rows · model ${safeText(currentVersion)}</div>
         </div>
         <div class="tracker-kpi-card">
-          <div class="tracker-kpi-label">Settled picks</div>
+          <div class="tracker-kpi-label">Lifetime settled</div>
           <div class="tracker-kpi-value">${settled}</div>
           <div class="tracker-kpi-sub">Checkpoint target ${trackerMin}</div>
         </div>
@@ -22584,7 +22745,7 @@ function renderTrackerAnalytics() {
           <div class="tracker-analytics-card-meta">Tracked-pick evidence only</div>
         </div>
         <div class="tracker-analytics-card-body">
-          <div class="tracker-report-subtitle">This layer measures what the engine actually saved to tracker. "Latest-line move" is a proxy built from the most recent line the engine has seen for that exact event/market/side. It is useful, but it is not guaranteed closing-line truth.</div>
+          <div class="tracker-report-subtitle">Lifetime settled evidence (active+archive learning pool) — not the open-book / Tracked Picks window. "Latest-line move" is a proxy from the most recent line seen for that event/market/side, not guaranteed closing-line truth.</div>
           <div class="table-wrap tracker-report-table-wrap">
             <table class="tracker-analytics-table">
               <thead>
@@ -22948,7 +23109,7 @@ function renderTrackerAnalytics() {
       <div class="tracker-analytics-card" style="margin-top: 10px; border-color: #2a2a2a;">
         <div class="tracker-analytics-card-head" style="background: linear-gradient(90deg, #333 0%, #111 100%);">
           <div class="tracker-analytics-card-title" style="color: #ffd700;">👁️ GOD'S EYE: POST-MORTEM LOG</div>
-          <div class="tracker-analytics-card-meta">Game-by-game diagnostic archive</div>
+          <div class="tracker-analytics-card-meta">Lifetime settled archive (active+archive) — not limited to open book</div>
         </div>
         <div class="tracker-analytics-card-body">
           <div class="table-wrap tracker-report-table-wrap">
@@ -24752,7 +24913,9 @@ async function refreshTrackedPickResults() {
           let data = null;
           try {
             const _directCtrl = new AbortController();
-            const _directTimer = setTimeout(() => _directCtrl.abort(), 8000);
+            const _to = (typeof g_godfatherLightningMode !== "undefined" && g_godfatherLightningMode) ? 2200 : 8000;
+            const _proxyTo = (typeof g_godfatherLightningMode !== "undefined" && g_godfatherLightningMode) ? 1800 : 4000;
+            const _directTimer = setTimeout(() => _directCtrl.abort(), _to);
             try {
               const res = await fetch(url, {
                 cache: "no-store",
@@ -24765,7 +24928,8 @@ async function refreshTrackedPickResults() {
               clearTimeout(_directTimer);
             }
           } catch (err) {
-            data = await proxyFetch(url, 4000).catch(() => null);
+            const _proxyTo2 = (typeof g_godfatherLightningMode !== "undefined" && g_godfatherLightningMode) ? 1800 : 4000;
+            data = await proxyFetch(url, _proxyTo2).catch(() => null);
           }
           return [entry.eventId, data];
         }),
@@ -51374,6 +51538,10 @@ function copyTrackerData() {
   const winRate = settled ? ((Number(stats.wins || 0) / settled) * 100).toFixed(1) + "%" : "—";
   const currentVersion = getCurrentModelVersion();
   const derived = g_trackerDerivedState || { teams: {} };
+  const openBook =
+    typeof summarizeVisibleTrackedBook === "function"
+      ? summarizeVisibleTrackedBook()
+      : { live: 0, wins: 0, losses: 0, picks: 0, games: 0, pending: 0, settled: 0 };
 
   const lines = [];
   lines.push("==========================================");
@@ -51381,6 +51549,14 @@ function copyTrackerData() {
   lines.push("==========================================");
   lines.push(`Generated    : ${new Date().toLocaleString()}`);
   lines.push(`Model Version: ${currentVersion}`);
+  lines.push("--- OPEN BOOK (matches Tracked Picks page) ---");
+  lines.push(
+    `Open book   : ${openBook.live || 0} live • ${openBook.wins || 0} wins • ${openBook.losses || 0} losses`,
+  );
+  lines.push(
+    `Visible     : ${openBook.picks || 0} picks / ${openBook.games || 0} games (${openBook.pending || 0} pending, ${openBook.settled || 0} settled in 10h window)`,
+  );
+  lines.push("--- LIFETIME (active + archive) ---");
   lines.push(`Overall Score: ${stats.wins || 0}W - ${stats.losses || 0}L (Win Rate: ${winRate})`);
   lines.push(`Settled Picks: ${settled}`);
   try {
