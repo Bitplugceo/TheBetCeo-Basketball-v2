@@ -1,4 +1,3 @@
-S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -24863,7 +24862,16 @@ async function addTrackedPicks(newPicks) {
     if (!p.signature) p.signature = makeTrackedSignature(p);
 
     // No-play / no-eventId picks are not tracked (shadow-list storage removed).
-    if (p.isShadow) return;
+    if (p.isShadow) {
+      /* ISSUE-RAID-07: was a completely silent drop — a pick could vanish
+         with zero trace, indistinguishable from a real save failure. */
+      engineDebug("addTrackedPicks: shadow pick not saved (no-play or unmatched event)", {
+        market: p.marketKey,
+        eventId: p.eventId || null,
+        pick: p.pick || null,
+      });
+      return;
+    }
 
     const prisonKey = makeTrackerActiveMergeKey(p);
     const exactIdx = current.findIndex((x) => makeTrackerActiveMergeKey(x) === prisonKey);
@@ -24886,7 +24894,22 @@ async function addTrackedPicks(newPicks) {
     }
 
     const archivedIdx = archived.findIndex((x) => makeTrackerActiveMergeKey(x) === prisonKey);
-    if (archivedIdx !== -1) return;
+    if (archivedIdx !== -1) {
+      /* ISSUE-RAID-07: was a completely silent drop. The persistence
+         coverage gate at the end of a run treats "this key exists
+         somewhere in activePicks+archivedPicks" as success, so a pick
+         that collides with an old archived entry never throws an error
+         either — it just never appears on the Tracked Picks page, with
+         nothing telling you why. */
+      engineDebug("addTrackedPicks: new pick matches an already-archived pick, save blocked to avoid duplicate", {
+        market: p.marketKey,
+        eventId: p.eventId,
+        line: p.line,
+        archivedResult: archived[archivedIdx]?.resultStatus || null,
+        archivedSettledAt: archived[archivedIdx]?.settledAt || null,
+      });
+      return;
+    }
 
     current.unshift(p);
     changed = true;
@@ -40078,6 +40101,22 @@ async function runEngine() {
         const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
         return k && !persistedPickKeys.has(k);
       });
+      /* ISSUE-RAID-07: "covered" is not the same as "actually saved as a new
+         pending pick". A key can exist only because it matches an old
+         ARCHIVED entry (addTrackedPicks blocks re-adding those to avoid
+         duplicates) — the coverage gate above would call that success and
+         never throw, even though nothing new showed up on the Tracked
+         Picks page. Catch that case explicitly instead of letting it pass
+         silently. */
+      const activePickKeys = new Set(
+        (Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : []).map(
+          (p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p),
+        ),
+      );
+      const archivedOnlyBlocked = persistableTrackedPicks.filter((p) => {
+        const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+        return k && persistedPickKeys.has(k) && !activePickKeys.has(k);
+      });
       const persistedCount = persistableTrackedPicks.length - missingTracked.length;
       engineDebug("tracker persistence coverage verification", {
         expectedActionable: persistableTrackedPicks.length,
@@ -40085,6 +40124,14 @@ async function runEngine() {
         missingActionableIds: missingTracked.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
         intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
       });
+      if (archivedOnlyBlocked.length) {
+        const blockedSummary = archivedOnlyBlocked
+          .map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`)
+          .join(", ");
+        engineDebug(
+          `tracker save failed: ${archivedOnlyBlocked.length} predicted pick(s) did not appear on the Tracked Picks page because an already-archived pick shares the exact same event/market/line: ${blockedSummary}`,
+        );
+      }
       if (missingTracked.length) {
         const missingSummary = missingTracked
           .map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`)
