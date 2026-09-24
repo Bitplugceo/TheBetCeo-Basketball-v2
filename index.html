@@ -1,3 +1,4 @@
+S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -4241,7 +4242,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
           type="button"
           id="trackerMilitaryRaidBtn"
           class="tracker-insights-btn"
-          title="Single-click: Military Raid · Double-click: Toggle debug view"
+          title="Godfather Overseer (one-tap) · Double-click: Toggle debug view"
           onclick="triggerTrackerMilitaryRaid()"
         >
           🚨
@@ -4730,8 +4731,8 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v25_integrity_harden_20260924_tombstone_tracker_v7";
-window.__BB_INTEGRITY_BUILD__ = "v25_integrity_harden_20260924_tombstone_tracker_v7";
+const APP_BUILD_VERSION = "v26_godfather_overseer_debug_20260924";
+window.__BB_INTEGRITY_BUILD__ = "v26_godfather_overseer_debug_20260924";
 window.__BB_CLEAR_STALE_REPLAY_SNAPSHOTS__ = function __BB_CLEAR_STALE_REPLAY_SNAPSHOTS__() {
   try {
     const want = String(window.__BB_INTEGRITY_BUILD__ || "");
@@ -14290,6 +14291,594 @@ let g_massacreFetchContext = defaultMassacreFetchContext();
 const TRACKED_PICKS_LIMIT = BB_CONFIG.limits.activePicks;
 const TRACKER_ARCHIVED_LIMIT = 400;
 const TRACKER_SETTLED_VISIBLE_MS = 10 * 60 * 60 * 1000;
+
+/** Earlier of settle vs tip-off so a late/wrong settledAt cannot keep old games on Tracked Picks. */
+function getTrackedSettledExpiryRefMs(pick) {
+  if (!pick) return 0;
+  const settledTs = safeParseDate(pick.settledAt) || safeParseDate(pick.manualSettledAt) || 0;
+  const gameTs = safeParseDate(pick.eventDate) || safeParseDate(pick.createdAt) || 0;
+  if (settledTs > 0 && gameTs > 0) return Math.min(settledTs, gameTs);
+  return settledTs || gameTs || 0;
+}
+
+function isTrackedSettledPastVisibleWindow(pick, nowMs = Date.now()) {
+  if (!pick) return false;
+  const status = String(pick.resultStatus || "pending").toLowerCase();
+  if (!["win", "loss", "push"].includes(status)) return false;
+  const ref = typeof getTrackedSettledExpiryRefMs === "function" ? getTrackedSettledExpiryRefMs(pick) : 0;
+  if (!ref) return true;
+  return nowMs - ref >= TRACKER_SETTLED_VISIBLE_MS;
+}
+
+const GODFATHER_RAID_REPORT_KEY = "bb_godfather_raid_report_v1";
+let g_godfatherRaidInFlight = false;
+let g_godfatherLastReport = null;
+
+function loadGodfatherRaidReport() {
+  try {
+    if (g_godfatherLastReport) return g_godfatherLastReport;
+    const raw = localStorage.getItem(GODFATHER_RAID_REPORT_KEY);
+    if (!raw) return null;
+    g_godfatherLastReport = JSON.parse(raw);
+    return g_godfatherLastReport;
+  } catch (_e) {
+    return null;
+  }
+}
+
+function persistGodfatherRaidReport(report) {
+  g_godfatherLastReport = report;
+  try {
+    localStorage.setItem(GODFATHER_RAID_REPORT_KEY, JSON.stringify(report));
+  } catch (_e) {}
+  try {
+    if (typeof g_trackerState !== "undefined" && g_trackerState) g_trackerState.godfatherRaidReport = report;
+  } catch (_e2) {}
+}
+
+function renderGodfatherRaidReportHtml(report) {
+  const r = report || loadGodfatherRaidReport();
+  const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (!r) {
+    return `<div class="tracker-analytics-card" id="godfatherRaidReportCard">
+      <div class="tracker-analytics-card-head"><div class="tracker-analytics-card-title">🚨 Godfather Overseer</div></div>
+      <div class="tracker-analytics-card-body"><div class="note">No raid report yet. Tap the red siren (🚨) to run the engine-wide overseer.</div></div>
+    </div>`;
+  }
+  const bugs = Array.isArray(r.bugs) ? r.bugs : [];
+  const rows = bugs
+    .map((b) => {
+      const sev = String(b.severity || "info").toLowerCase();
+      const sevColor = sev === "critical" ? "#ff5c61" : sev === "high" ? "#fb923c" : sev === "medium" ? "#fbbf24" : "#4ade80";
+      const st = String(b.status || "clean");
+      const stColor = st === "fixed" ? "#4ade80" : st === "detected" ? "#fb923c" : st === "failed" ? "#ff5c61" : "#94a3b8";
+      return `<tr>
+        <td style="padding:6px 8px;border-bottom:1px solid #222;"><strong>${esc(b.name)}</strong><div style="font-size:10px;opacity:.7;margin-top:2px;">${esc(b.detail || "")}</div></td>
+        <td style="padding:6px 8px;border-bottom:1px solid #222;color:${sevColor};font-weight:800;text-transform:uppercase;font-size:11px;">${esc(sev)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #222;color:${stColor};font-weight:800;font-size:11px;">${esc(st)}</td>
+        <td style="padding:6px 8px;border-bottom:1px solid #222;text-align:right;font-weight:900;">${Number(b.count || 0)}</td>
+      </tr>`;
+    })
+    .join("");
+  const failed = Array.isArray(r.failed) ? r.failed : [];
+  return `<div class="tracker-analytics-card" id="godfatherRaidReportCard">
+    <div class="tracker-analytics-card-head"><div class="tracker-analytics-card-title">🚨 Godfather Overseer — last raid</div></div>
+    <div class="tracker-analytics-card-body">
+      <div style="font-size:12px;margin-bottom:8px;line-height:1.45;">
+        <strong>Build:</strong> ${esc(r.build)}<br>
+        <strong>Ran:</strong> ${esc(r.ranAtLocal || r.ranAt || "—")}<br>
+        <strong>Summary:</strong> ${esc(r.summary || "")}<br>
+        <strong>Archived:</strong> ${Number(r.archivedMoved || 0)} ·
+        <strong>Settled:</strong> ${Number(r.settledNow || 0)} ·
+        <strong>Tombstones purged:</strong> ${Number(r.tombstonePurged || 0)} ·
+        <strong>Dupes removed:</strong> ${Number(r.dupesRemoved || 0)}
+        ${failed.length ? `<br><span style="color:#ff5c61;">Failed: ${esc(failed.join(", "))}</span>` : ""}
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead><tr style="text-align:left;opacity:.7;">
+          <th style="padding:4px 8px;">Bug class</th><th style="padding:4px 8px;">Severity</th>
+          <th style="padding:4px 8px;">Status</th><th style="padding:4px 8px;text-align:right;">Count</th>
+        </tr></thead>
+        <tbody>${rows || '<tr><td colspan="4" class="note">All clear — no integrity issues arrested.</td></tr>'}</tbody>
+      </table>
+      <div style="margin-top:10px;">
+        <button type="button" onclick="runEngineGodfatherRaid()" style="background:#2a0608;border:1px solid #d91f26;color:#fff;padding:8px 14px;font-size:12px;font-weight:900;cursor:pointer;border-radius:4px;">🚨 Run Godfather Raid again</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function clearGodfatherStaleCaches() {
+  let n = 0;
+  const tryClear = (c) => {
+    try {
+      if (c && typeof c.clear === "function") {
+        c.clear();
+        n++;
+      }
+    } catch (_e) {}
+  };
+  try { if (typeof _schedCache !== "undefined") tryClear(_schedCache); } catch (_e) {}
+  try { if (typeof _summaryCache !== "undefined") tryClear(_summaryCache); } catch (_e) {}
+  try { if (typeof _fixtureCache !== "undefined") tryClear(_fixtureCache); } catch (_e) {}
+  try { if (typeof _teamCatalogCache !== "undefined") tryClear(_teamCatalogCache); } catch (_e) {}
+  try { if (typeof _proxyFetchCache !== "undefined") tryClear(_proxyFetchCache); } catch (_e) {}
+  try { if (typeof _euroleagueSeasonCache !== "undefined") tryClear(_euroleagueSeasonCache); } catch (_e) {}
+  try { if (typeof _kblCache !== "undefined") tryClear(_kblCache); } catch (_e) {}
+  return n;
+}
+
+function dedupeTrackedPickBucket(list) {
+  if (!Array.isArray(list) || !list.length) return { list: Array.isArray(list) ? list : [], removed: 0 };
+  const map = new Map();
+  let removed = 0;
+  list.forEach((raw) => {
+    const p = typeof ensureTrackedPickKeys === "function" ? ensureTrackedPickKeys(raw || {}) : raw || {};
+    const key =
+      (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) ||
+      (typeof makeTrackedSignature === "function" && makeTrackedSignature(p)) ||
+      p.signature ||
+      p.pickId ||
+      "";
+    if (!key) {
+      map.set(Symbol("anon"), p);
+      return;
+    }
+    if (!map.has(key)) {
+      map.set(key, p);
+      return;
+    }
+    removed++;
+    const prev = map.get(key);
+    const prefer =
+      typeof resolveTrackedPick === "function"
+        ? resolveTrackedPick(prev, p)
+        : (typeof getTrackerPickStamp === "function" ? getTrackerPickStamp(p) : 0) >=
+            (typeof getTrackerPickStamp === "function" ? getTrackerPickStamp(prev) : 0)
+          ? p
+          : prev;
+    map.set(key, prefer);
+  });
+  return { list: [...map.values()], removed };
+}
+
+function backfillMissingSettledAt(list) {
+  let n = 0;
+  (list || []).forEach((p) => {
+    if (!p) return;
+    const st = String(p.resultStatus || "").toLowerCase();
+    if (!["win", "loss", "push"].includes(st)) return;
+    if (p.settledAt) return;
+    p.settledAt = p.manualSettledAt || p.createdAt || p.eventDate || new Date().toISOString();
+    n++;
+  });
+  return n;
+}
+
+function peelExpiredSettledFromActive() {
+  const st = typeof g_trackerState !== "undefined" ? g_trackerState : AppState?.tracker?.state;
+  if (!st) return 0;
+  const active = Array.isArray(st.activePicks) ? st.activePicks : [];
+  const archived = Array.isArray(st.archivedPicks) ? st.archivedPicks : [];
+  const keep = [];
+  const peel = [];
+  active.forEach((p) => {
+    if (isTrackedSettledPastVisibleWindow(p)) peel.push(p);
+    else keep.push(p);
+  });
+  if (!peel.length) return 0;
+  const seen = new Set(
+    archived.map((p) => (typeof makeTrackedSignature === "function" ? makeTrackedSignature(p) : p?.signature) || ""),
+  );
+  peel.forEach((p) => {
+    const sig = (typeof makeTrackedSignature === "function" ? makeTrackedSignature(p) : p?.signature) || "";
+    if (sig && seen.has(sig)) return;
+    if (sig) seen.add(sig);
+    archived.unshift(p);
+  });
+  st.activePicks = keep;
+  const lim = typeof TRACKER_ARCHIVED_LIMIT === "number" ? TRACKER_ARCHIVED_LIMIT : 400;
+  st.archivedPicks = archived.slice(0, lim);
+  return peel.length;
+}
+
+function scrubStaleLiveBadges() {
+  let scrubbed = 0;
+  try {
+    if (typeof g_liveGameStatus === "undefined" || !g_liveGameStatus) return 0;
+    const st = typeof g_trackerState !== "undefined" ? g_trackerState : AppState?.tracker?.state;
+    const active = Array.isArray(st?.activePicks) ? st.activePicks : [];
+    const pendingEids = new Set(
+      active
+        .filter((p) => p && String(p.resultStatus || "pending").toLowerCase() === "pending" && p.eventId)
+        .map((p) => String(p.eventId)),
+    );
+    [...g_liveGameStatus.keys()].forEach((eid) => {
+      if (!pendingEids.has(String(eid))) {
+        g_liveGameStatus.delete(eid);
+        scrubbed++;
+      }
+    });
+  } catch (_e) {}
+  return scrubbed;
+}
+
+function settlePendingWithEmbeddedScores() {
+  let settled = 0;
+  const st = typeof g_trackerState !== "undefined" ? g_trackerState : AppState?.tracker?.state;
+  const active = Array.isArray(st?.activePicks) ? st.activePicks : [];
+  active.forEach((pick) => {
+    if (!pick) return;
+    if (String(pick.resultStatus || "pending").toLowerCase() !== "pending") return;
+    const score = pick.actualScore != null && pick.actualScore !== "" ? pick.actualScore : pick.finalScore;
+    if (score == null || score === "") return;
+    try {
+      if (typeof settleTrackedPickFromCompetition === "function" && pick._lastCompetition) {
+        const r = settleTrackedPickFromCompetition(pick, pick._lastCompetition, true);
+        if (r && r !== "pending") {
+          pick.resultStatus = r;
+          pick.settledAt = pick.settledAt || new Date().toISOString();
+          pick.settlementSource = pick.settlementSource || "embedded_score";
+          settled++;
+        }
+      }
+    } catch (_e) {}
+  });
+  return settled;
+}
+
+/**
+ * Engine-wide Godfather / Military Raid overseer.
+ * Detect → fix permanently → report on debug page → persist + cloud sync → toast.
+ */
+async function runEngineGodfatherRaid(opts = {}) {
+  if (g_godfatherRaidInFlight) {
+    return { ok: false, reason: "in_flight", report: loadGodfatherRaidReport() };
+  }
+  g_godfatherRaidInFlight = true;
+  const statusEl = document.getElementById("trackerStatusLabel");
+  const setStatus = (msg, color) => {
+    if (!statusEl) return;
+    statusEl.textContent = msg;
+    statusEl.style.color = color || "#ff6b6b";
+  };
+  const bugs = [];
+  const failed = [];
+  const mark = (id, name, severity, count, status, detail) => {
+    bugs.push({ id, name, severity, count: Number(count || 0), status, detail: detail || "" });
+  };
+  const ranAt = new Date().toISOString();
+  let archivedMoved = 0;
+  let settledNow = 0;
+  let embeddedSettled = 0;
+  let tombstonePurged = 0;
+  let dupesRemoved = 0;
+  let settledAtBackfill = 0;
+  let liveScrubbed = 0;
+  let cachesCleared = 0;
+  const beforeActive = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks.length : 0;
+  const beforeArchived = Array.isArray(g_trackerState?.archivedPicks) ? g_trackerState.archivedPicks.length : 0;
+
+  try {
+    setStatus("🚨 Godfather raid…", "#ff6b6b");
+    try {
+      if (typeof engineDebug === "function") engineDebug("Godfather raid start", { build: APP_BUILD_VERSION });
+    } catch (_e) {}
+
+    // A) Clear stale fetch caches
+    try {
+      cachesCleared = clearGodfatherStaleCaches();
+      mark("stale_caches", "Stale fetch caches", "medium", cachesCleared, cachesCleared ? "fixed" : "clean", "Cleared schedule/summary/fixture/proxy caches");
+    } catch (e) {
+      failed.push("cache_clear");
+      mark("stale_caches", "Stale fetch caches", "medium", 0, "failed", String(e?.message || e));
+    }
+
+    // B) Tombstone hydrate
+    try {
+      if (typeof hydrateDeletedTombstones === "function") await hydrateDeletedTombstones();
+    } catch (e) {
+      failed.push("tombstone_hydrate");
+    }
+
+    const deletedList = Array.isArray(g_trackerState?.deletedSignatures) ? g_trackerState.deletedSignatures : [];
+    let tombstoneHits = 0;
+    try {
+      const pools = [...(g_trackerState.activePicks || []), ...(g_trackerState.archivedPicks || [])];
+      pools.forEach((p) => {
+        if (typeof isPickDeleted === "function" && isPickDeleted(p, deletedList)) tombstoneHits++;
+      });
+    } catch (_e) {}
+
+    // C) Backfill missing settledAt
+    try {
+      settledAtBackfill =
+        backfillMissingSettledAt(g_trackerState.activePicks) + backfillMissingSettledAt(g_trackerState.archivedPicks);
+      mark(
+        "missing_settledAt",
+        "Missing settledAt on settled picks",
+        "high",
+        settledAtBackfill,
+        settledAtBackfill ? "fixed" : "clean",
+        "Backfilled from manualSettledAt/createdAt/eventDate",
+      );
+    } catch (e) {
+      failed.push("settledAt_backfill");
+      mark("missing_settledAt", "Missing settledAt on settled picks", "high", 0, "failed", String(e?.message || e));
+    }
+
+    let expiredOnActive = 0;
+    try {
+      expiredOnActive = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
+    } catch (_e) {}
+
+    // D) Dedupe
+    try {
+      const dA = dedupeTrackedPickBucket(g_trackerState.activePicks || []);
+      const dR = dedupeTrackedPickBucket(g_trackerState.archivedPicks || []);
+      g_trackerState.activePicks = dA.list;
+      g_trackerState.archivedPicks = dR.list;
+      dupesRemoved = dA.removed + dR.removed;
+      mark(
+        "duplicate_sigs",
+        "Duplicate picks / signature collisions",
+        "high",
+        dupesRemoved,
+        dupesRemoved ? "fixed" : "clean",
+        "Collapsed by merge key / signature",
+      );
+    } catch (e) {
+      failed.push("dedupe");
+      mark("duplicate_sigs", "Duplicate picks / signature collisions", "high", 0, "failed", String(e?.message || e));
+    }
+
+    // E) Archive expired + tombstone purge
+    try {
+      const preA = (g_trackerState.activePicks || []).length;
+      if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
+      const peeled = peelExpiredSettledFromActive();
+      archivedMoved = Math.max(0, preA - (g_trackerState.activePicks || []).length, peeled);
+      let stillTomb = 0;
+      const pools2 = [...(g_trackerState.activePicks || []), ...(g_trackerState.archivedPicks || [])];
+      pools2.forEach((p) => {
+        if (typeof isPickDeleted === "function" && isPickDeleted(p, deletedList)) stillTomb++;
+      });
+      tombstonePurged = Math.max(0, tombstoneHits - stillTomb);
+      if (stillTomb > 0) {
+        g_trackerState.activePicks = (g_trackerState.activePicks || []).filter((p) => !isPickDeleted(p, deletedList));
+        g_trackerState.archivedPicks = (g_trackerState.archivedPicks || []).filter((p) => !isPickDeleted(p, deletedList));
+        tombstonePurged += stillTomb;
+      }
+      mark(
+        "expired_settled_on_active",
+        "Settled >10h still on Tracked Picks",
+        "critical",
+        expiredOnActive || archivedMoved,
+        archivedMoved || expiredOnActive === 0 ? (archivedMoved ? "fixed" : "clean") : "detected",
+        "Moved expired settled off active into archive",
+      );
+      mark(
+        "tombstone_resurrection",
+        "Deleted picks resurrecting (tombstones)",
+        "critical",
+        tombstoneHits,
+        tombstonePurged || tombstoneHits === 0 ? (tombstonePurged ? "fixed" : "clean") : "detected",
+        "Purged tombstoned rows from active+archive",
+      );
+    } catch (e) {
+      failed.push("archive_purge");
+      mark("expired_settled_on_active", "Settled >10h still on Tracked Picks", "critical", expiredOnActive, "failed", String(e?.message || e));
+    }
+
+    // F) Settle pending (embedded + feeds)
+    const pendingBefore = (g_trackerState.activePicks || []).filter(
+      (p) => String(p?.resultStatus || "pending").toLowerCase() === "pending",
+    ).length;
+    try {
+      embeddedSettled = settlePendingWithEmbeddedScores();
+    } catch (e) {
+      failed.push("embedded_settle");
+    }
+    try {
+      if (typeof refreshTrackedPickResults === "function") await refreshTrackedPickResults();
+    } catch (e) {
+      failed.push("feed_settle:" + (e?.message || e));
+    }
+    const pendingAfter = (g_trackerState.activePicks || []).filter(
+      (p) => String(p?.resultStatus || "pending").toLowerCase() === "pending",
+    ).length;
+    settledNow = Math.max(0, pendingBefore - pendingAfter);
+    mark(
+      "pending_should_settle",
+      "Pending with final/live scores available",
+      "high",
+      settledNow + embeddedSettled,
+      settledNow + embeddedSettled ? "fixed" : "clean",
+      "refreshTrackedPickResults + embedded actualScore settle",
+    );
+
+    // G) Live badge refresh + scrub
+    try {
+      if (typeof pollLiveGameClocks === "function") await pollLiveGameClocks();
+      else if (typeof scheduleLiveClockPoll === "function") scheduleLiveClockPoll(0);
+      liveScrubbed = scrubStaleLiveBadges();
+      mark(
+        "stale_live_badges",
+        "Stale live badges on finished games",
+        "medium",
+        liveScrubbed,
+        liveScrubbed ? "fixed" : "clean",
+        "Polled live clocks; scrubbed non-pending live badges",
+      );
+    } catch (e) {
+      failed.push("live_refresh");
+      mark("stale_live_badges", "Stale live badges on finished games", "medium", 0, "failed", String(e?.message || e));
+    }
+
+    // H) Re-archive after settles
+    try {
+      if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
+      peelExpiredSettledFromActive();
+    } catch (_e) {}
+
+    let stillExpired = 0;
+    try {
+      stillExpired = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
+      if (stillExpired > 0) {
+        archivedMoved += peelExpiredSettledFromActive();
+        stillExpired = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
+      }
+    } catch (_e) {}
+
+    // I) Safe integrity repairs
+    try {
+      if (typeof repairMisclassifiedNoPlayTrackedPicks === "function") {
+        repairMisclassifiedNoPlayTrackedPicks(g_trackerState.activePicks || [], g_trackerState.archivedPicks || [], {
+          mutateLive: true,
+        });
+      }
+      mark("misclassified_noplay", "Misclassified NO PLAY / grade integrity", "low", 0, "fixed", "Ran repairMisclassifiedNoPlayTrackedPicks");
+    } catch (e) {
+      mark("misclassified_noplay", "Misclassified NO PLAY / grade integrity", "low", 0, "failed", String(e?.message || e));
+    }
+
+    try {
+      if (typeof rebuildTrackerStats === "function") rebuildTrackerStats();
+      if (typeof rebuildTrackerDerivedState === "function") rebuildTrackerDerivedState();
+      mark("appstate_mirror", "AppState / g_trackerState / derived mirrors", "medium", 0, "fixed", "Rebuilt stats + derived");
+    } catch (e) {
+      failed.push("mirror");
+      mark("appstate_mirror", "AppState / g_trackerState / derived mirrors", "medium", 0, "failed", String(e?.message || e));
+    }
+
+    // J) Empty-state sync / cloud resurrection guard
+    try {
+      const meaningful =
+        (g_trackerState.activePicks || []).length +
+          (g_trackerState.archivedPicks || []).length +
+          (g_trackerState.deletedSignatures || []).length >
+        0;
+      if (meaningful) {
+        g_trackerState.updatedAt = new Date().toISOString();
+        g_trackerState.vId = Math.max(Number(g_trackerState.vId || 1), 1) + 1;
+      }
+      mark(
+        "empty_state_sync_skip",
+        "Empty-state sync skip / cloud hydrate resurrection",
+        "critical",
+        0,
+        "fixed",
+        "Bumped updatedAt/vId; tombstones keep state meaningful for cloud",
+      );
+    } catch (e) {
+      failed.push("sync_guard");
+      mark("empty_state_sync_skip", "Empty-state sync skip / cloud hydrate resurrection", "critical", 0, "failed", String(e?.message || e));
+    }
+
+    // K) Render visibility enforce
+    try {
+      if (typeof renderTrackedPicks === "function") renderTrackedPicks();
+      const leak = (g_trackerState.activePicks || []).filter((p) => isTrackedSettledPastVisibleWindow(p)).length;
+      mark(
+        "render_archive_on_active",
+        "Render showing archive/expired rows on active page",
+        "critical",
+        leak,
+        leak ? "detected" : "clean",
+        leak ? "Expired settled still in active after peel" : "Active clean; render uses isTrackedPickVisibleOnPage",
+      );
+    } catch (e) {
+      failed.push("render");
+      mark("render_archive_on_active", "Render showing archive/expired rows on active page", "critical", 0, "failed", String(e?.message || e));
+    }
+
+    // L) Persist local + cloud
+    try {
+      if (typeof forceTrackerSaveNow === "function") await forceTrackerSaveNow();
+      else if (typeof saveTrackerStateToLocal === "function") await saveTrackerStateToLocal();
+      mark("persist_cloud", "Local + cloud sync push", "high", 1, "fixed", "forceTrackerSaveNow after corrections");
+    } catch (e) {
+      failed.push("persist:" + (e?.message || e));
+      mark("persist_cloud", "Local + cloud sync push", "high", 0, "failed", String(e?.message || e));
+    }
+
+    const afterActive = (g_trackerState.activePicks || []).length;
+    const summary =
+      `archived ${archivedMoved}, settled ${settledNow + embeddedSettled}, tombstones ${tombstonePurged}, dupes ${dupesRemoved}` +
+      (failed.length ? `, failed: ${failed.join(",")}` : ", ok");
+
+    const report = {
+      build: typeof APP_BUILD_VERSION !== "undefined" ? APP_BUILD_VERSION : "",
+      ranAt,
+      ranAtLocal: new Date().toLocaleString([], { hour12: false }),
+      summary,
+      archivedMoved,
+      settledNow: settledNow + embeddedSettled,
+      tombstonePurged,
+      dupesRemoved,
+      settledAtBackfill,
+      liveScrubbed,
+      cachesCleared,
+      beforeActive,
+      afterActive,
+      beforeArchived,
+      failed,
+      bugs,
+    };
+    persistGodfatherRaidReport(report);
+
+    try {
+      if (typeof g_lastRenderedTrackerVersion !== "undefined") g_lastRenderedTrackerVersion = null;
+      if (typeof renderTrackerAnalytics === "function") renderTrackerAnalytics();
+    } catch (_e) {}
+
+    setStatus(`🚨 ${summary}`, failed.length ? "#fbbf24" : "#4ade80");
+    setTimeout(() => {
+      if (statusEl && String(statusEl.textContent || "").startsWith("🚨")) {
+        statusEl.textContent = "";
+        statusEl.style.color = "";
+      }
+    }, 10000);
+
+    try {
+      if (typeof engineDebug === "function") engineDebug("Godfather raid complete", report);
+      if (typeof trackerDebug === "function") trackerDebug("Godfather raid complete", summary);
+    } catch (_e) {}
+
+    return { ok: failed.length === 0, report };
+  } catch (err) {
+    failed.push(String(err?.message || err));
+    const report = {
+      build: typeof APP_BUILD_VERSION !== "undefined" ? APP_BUILD_VERSION : "",
+      ranAt,
+      ranAtLocal: new Date().toLocaleString([], { hour12: false }),
+      summary: "Raid crashed: " + (err?.message || err),
+      archivedMoved,
+      settledNow,
+      tombstonePurged,
+      dupesRemoved,
+      failed,
+      bugs,
+    };
+    persistGodfatherRaidReport(report);
+    setStatus("🚨 Raid failed", "#ff5c61");
+    return { ok: false, report, error: err };
+  } finally {
+    g_godfatherRaidInFlight = false;
+  }
+}
+
+async function runMilitaryRaidOverseer(opts) {
+  return runEngineGodfatherRaid(opts);
+}
+
+window.runEngineGodfatherRaid = runEngineGodfatherRaid;
+window.runMilitaryRaidOverseer = runMilitaryRaidOverseer;
+window.loadGodfatherRaidReport = loadGodfatherRaidReport;
+window.renderGodfatherRaidReportHtml = renderGodfatherRaidReportHtml;
+window.isTrackedSettledPastVisibleWindow = isTrackedSettledPastVisibleWindow;
+window.getTrackedSettledExpiryRefMs = getTrackedSettledExpiryRefMs;
+
 const TRACKER_API_URL = WORKER_BASE_URL + "/cloud-sync";
 
 const BB_DB_NAME = "BBEngineData";
@@ -15776,22 +16365,17 @@ function acknowledgeGlobalEngineAlert() {
 }
 
 function triggerTrackerMilitaryRaid() {
+  if (typeof runEngineGodfatherRaid === "function") {
+    runEngineGodfatherRaid().catch((err) => {
+      try {
+        if (typeof engineDebug === "function")
+          engineDebug("Godfather raid invoke failed", { error: String(err?.message || err) });
+      } catch (_e) {}
+    });
+    return;
+  }
   const statusEl = document.getElementById("trackerStatusLabel");
-  if (statusEl) {
-    statusEl.textContent = "Triggered ⚡️";
-    statusEl.style.color = "#ff6b6b";
-    setTimeout(() => {
-      statusEl.textContent = "Completed ⚡️";
-      statusEl.style.color = "#4ade80";
-    }, 500);
-    setTimeout(() => {
-      statusEl.textContent = "";
-      statusEl.style.color = "";
-    }, 1000);
-  }
-  if (typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function") {
-    AFDB.runTestFetch();
-  }
+  if (statusEl) statusEl.textContent = "Godfather raid unavailable";
 }
 
 function getDebugSeverity(line) {
@@ -18735,6 +19319,9 @@ function normalizeTrackerState(raw) {
   AppState.tracker.state.archivedPicks = (AppState.tracker.state.archivedPicks || []).filter(
     (p) => !_isGone(p),
   );
+  try {
+    if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
+  } catch (_archNorm) {}
   rebuildTrackerStats();
   return AppState.tracker.state;
 }
@@ -19864,20 +20451,34 @@ function mergeTrackerStates(localState, serverState) {
     ].filter(Boolean)),
   ];
 
+  const mergedActive = mergeTrackerActivePicks(
+    local.activePicks,
+    server.activePicks,
+    local.archivedPicks,
+    mergedDeleted,
+  );
+  // Capture settle-expired rows active-merge dropped so they still land in archive
+  // (server often still parks old settled in activePicks).
+  const expiredPeel = [];
+  const consider = []
+    .concat(Array.isArray(local.activePicks) ? local.activePicks : [])
+    .concat(Array.isArray(server.activePicks) ? server.activePicks : []);
+  consider.forEach((raw) => {
+    const p = typeof ensureTrackedPickKeys === "function" ? ensureTrackedPickKeys(raw || {}) : raw || {};
+    if (typeof isTrackedSettledPastVisibleWindow === "function" && isTrackedSettledPastVisibleWindow(p)) {
+      expiredPeel.push(p);
+    }
+  });
+  const mergedArchived = mergeTrackerArchivedPicks(
+    [].concat(Array.isArray(local.archivedPicks) ? local.archivedPicks : []).concat(expiredPeel),
+    server.archivedPicks,
+    mergedDeleted,
+  );
   return {
     vId: Math.max(local.vId || 1, server.vId || 1) + 1,
     sId: server.sId || local.sId,
-    activePicks: mergeTrackerActivePicks(
-      local.activePicks,
-      server.activePicks,
-      local.archivedPicks,
-      mergedDeleted,
-    ),
-    archivedPicks: mergeTrackerArchivedPicks(
-      local.archivedPicks,
-      server.archivedPicks,
-      mergedDeleted,
-    ),
+    activePicks: mergedActive,
+    archivedPicks: mergedArchived,
     deletedSignatures: mergedDeleted,
     stats: useServerStats ? server.stats || local.stats : local.stats || server.stats,
     updatedAt: new Date().toISOString(),
@@ -19925,6 +20526,12 @@ function mergeTrackerActivePicks(
   });
 
   return [...merged.values()]
+    .filter((p) => {
+      if (typeof isTrackedSettledPastVisibleWindow === "function" && isTrackedSettledPastVisibleWindow(p)) {
+        return false;
+      }
+      return true;
+    })
     .sort((a, b) => getTrackerPickStamp(b) - getTrackerPickStamp(a))
     .slice(0, TRACKED_PICKS_LIMIT);
 }
@@ -20118,9 +20725,15 @@ function archiveExpiredTrackedPicks() {
     const isSettled = ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase());
     const gameTs = safeParseDate(p.eventDate) || safeParseDate(p.createdAt) || 0;
     const settledTs = safeParseDate(p.settledAt) || safeParseDate(p.manualSettledAt) || 0;
-    // Settle-age clock: prefer settle time; fall back to tip-off/created — NEVER `now`
-    // (using now made settled picks without settledAt immortal on the active page).
-    const refTs = isSettled ? (settledTs || gameTs || 0) : gameTs;
+    // Settle-age clock: EARLIER of settle vs tip-off/created — NEVER `now`.
+    // Late/wrong settledAt must not keep multi-day-old settled games on Tracked Picks.
+    const refTs = isSettled
+      ? (typeof getTrackedSettledExpiryRefMs === "function"
+          ? getTrackedSettledExpiryRefMs(p)
+          : settledTs && gameTs
+            ? Math.min(settledTs, gameTs)
+            : settledTs || gameTs || 0)
+      : gameTs;
     const isExpired = refTs > 0 && now - refTs >= cutoffMs;
     const isTimestamplessSettled = isSettled && settledTs === 0 && gameTs === 0;
     const isGhost = isSettled && gameTs > 0 && (now - gameTs) / (1000 * 60 * 60 * 24) > 7;
@@ -20237,9 +20850,12 @@ function isTrackedPickVisibleOnPage(pick) {
     return (now - gameTs) / (1000 * 60 * 60) < 48;
   }
   const settledTs =
-    safeParseDate(pick.settledAt) ||
-    safeParseDate(pick.manualSettledAt) ||
-    gameTs;
+    typeof getTrackedSettledExpiryRefMs === "function"
+      ? getTrackedSettledExpiryRefMs(pick)
+      : safeParseDate(pick.settledAt) ||
+        safeParseDate(pick.manualSettledAt) ||
+        gameTs;
+  if (!settledTs) return false;
   return now - settledTs < TRACKER_SETTLED_VISIBLE_MS;
 }
 
@@ -22442,6 +23058,7 @@ function renderTrackerAnalytics() {
             <div class="tracker-analytics-subtitle">Live engine execution data and network sync events.</div>
           </div>
         </div>
+        ${typeof renderGodfatherRaidReportHtml === "function" ? renderGodfatherRaidReportHtml() : ""}
         <div class="tracker-analytics-card">
           <div class="tracker-analytics-card-head"><div class="tracker-analytics-card-title">⚙️ Engine Activity</div></div>
           <div class="tracker-analytics-card-body">
@@ -41302,7 +41919,7 @@ const AFDB = (function () {
       .join("");
 
     const headerBtns =
-      '<button onclick="AFDB.copy(this)" style="background:#111;border:1px solid #333;color:#49d45f;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📋 Copy Log</button><button onclick="AFDB.clear()" style="background:#111;border:1px solid #333;color:#ff5c61;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">🗑️ Clear</button><button onclick="AFDB.runTestFetch()" style="background:#2a0608;border:1px solid #d91f26;color:#fff;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(217,31,38,0.4);">🚨 MILITARY RAID</button><button onclick="window.openVisualReportFromDebug()" style="background:#111;border:1px solid #333;color:#d4af37;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📊 Tracker Report</button><button onclick="window.EngineAuditor ? EngineAuditor.open() : alert(`Full Audit did not open: the EngineAuditor script was not found on this page. The auditor module may be missing from this deploy.`)" style="background:#0a1f0a;border:1px solid #2f8f4a;color:#49ff7a;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(47,143,74,0.4);">🩺 Full Audit</button><button onclick="AFDB.close()" style="background:#111;border:1px solid #555;color:#ccc;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">✕ Close</button>';
+      '<button onclick="AFDB.copy(this)" style="background:#111;border:1px solid #333;color:#49d45f;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📋 Copy Log</button><button onclick="AFDB.clear()" style="background:#111;border:1px solid #333;color:#ff5c61;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">🗑️ Clear</button><button onclick="runEngineGodfatherRaid()" style="background:#2a0608;border:1px solid #d91f26;color:#fff;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(217,31,38,0.4);">🚨 MILITARY RAID</button><button onclick="window.openVisualReportFromDebug()" style="background:#111;border:1px solid #333;color:#d4af37;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📊 Tracker Report</button><button onclick="window.EngineAuditor ? EngineAuditor.open() : alert(`Full Audit did not open: the EngineAuditor script was not found on this page. The auditor module may be missing from this deploy.`)" style="background:#0a1f0a;border:1px solid #2f8f4a;color:#49ff7a;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(47,143,74,0.4);">🩺 Full Audit</button><button onclick="AFDB.close()" style="background:#111;border:1px solid #555;color:#ccc;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">✕ Close</button>';
 
     const emptyMsg = _showOnlyErrors
       ? "No suspects arrested. The code is clean."
