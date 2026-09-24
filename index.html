@@ -1,3 +1,4 @@
+S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -4730,8 +4731,8 @@ const ENGINE_INTEGRITY_SHIELD = {
   },
 };
 
-const APP_BUILD_VERSION = "v29_military_raid_restore_20260924";
-window.__BB_INTEGRITY_BUILD__ = "v29_military_raid_restore_20260924";
+const APP_BUILD_VERSION = "v30_tracker_clean_20260924";
+window.__BB_INTEGRITY_BUILD__ = "v30_tracker_clean_20260924";
 window.__BB_CLEAR_STALE_REPLAY_SNAPSHOTS__ = function __BB_CLEAR_STALE_REPLAY_SNAPSHOTS__() {
   try {
     const want = String(window.__BB_INTEGRITY_BUILD__ || "");
@@ -14537,23 +14538,57 @@ function scrubStaleLiveBadges() {
 function settlePendingWithEmbeddedScores() {
   let settled = 0;
   const st = typeof g_trackerState !== "undefined" ? g_trackerState : AppState?.tracker?.state;
-  const active = Array.isArray(st?.activePicks) ? st.activePicks : [];
-  active.forEach((pick) => {
+  const pools = [
+    ...(Array.isArray(st?.activePicks) ? st.activePicks : []),
+    ...(Array.isArray(st?.archivedPicks) ? st.archivedPicks : []),
+  ];
+  const settleOuFromScore = (pick, score) => {
+    const actual =
+      typeof actualForMarket === "function"
+        ? actualForMarket({ ...pick, actualScore: score })
+        : NaN;
+    const line = parseFloat(pick.lineAtPick != null ? pick.lineAtPick : pick.line);
+    let side = String(pick.side != null ? pick.side : "").toLowerCase();
+    if (side.indexOf("over") < 0 && side.indexOf("under") < 0) {
+      const fromText =
+        typeof getPickSideFromText === "function"
+          ? getPickSideFromText(pick.predictionText || pick.pick || "")
+          : "";
+      if (fromText) side = String(fromText).toLowerCase();
+    }
+    if (!Number.isFinite(actual) || !Number.isFinite(line)) return null;
+    if (side.indexOf("over") >= 0) return actual > line ? "win" : actual < line ? "loss" : "push";
+    if (side.indexOf("under") >= 0) return actual < line ? "win" : actual > line ? "loss" : "push";
+    return null;
+  };
+  pools.forEach((pick) => {
     if (!pick) return;
     if (String(pick.resultStatus || "pending").toLowerCase() !== "pending") return;
-    const score = pick.actualScore != null && pick.actualScore !== "" ? pick.actualScore : pick.finalScore;
-    if (score == null || score === "") return;
     try {
       if (typeof settleTrackedPickFromCompetition === "function" && pick._lastCompetition) {
         const r = settleTrackedPickFromCompetition(pick, pick._lastCompetition, true);
         if (r && r !== "pending") {
           pick.resultStatus = r;
+          pick.engineResultStatus = pick.engineResultStatus || r;
           pick.settledAt = pick.settledAt || new Date().toISOString();
           pick.settlementSource = pick.settlementSource || "embedded_score";
           settled++;
+          return;
         }
       }
     } catch (_e) {}
+    const score = pick.actualScore != null && pick.actualScore !== "" ? pick.actualScore : pick.finalScore;
+    if (score == null || score === "") return;
+    try {
+      const r = settleOuFromScore(pick, score);
+      if (!r) return;
+      pick.actualScore = pick.actualScore != null && pick.actualScore !== "" ? pick.actualScore : score;
+      pick.resultStatus = r;
+      pick.engineResultStatus = r;
+      pick.settledAt = pick.settledAt || new Date().toISOString();
+      pick.settlementSource = pick.settlementSource || "embedded_score";
+      settled++;
+    } catch (_e2) {}
   });
   return settled;
 }
@@ -14612,7 +14647,7 @@ async function runEngineGodfatherRaid(opts = {}) {
   const t0 = Date.now();
 
   try {
-    setStatus("⚡ Military raid…", "#ff6b6b");
+    /* Tracked Picks header: no mid-raid progress notes — final status only. */
 
     /* ═══ PHASE 1 — local lightning (UI must update ASAP) ═══ */
     try {
@@ -14807,10 +14842,6 @@ async function runEngineGodfatherRaid(opts = {}) {
     } catch (_e) {}
 
     const localMs = Date.now() - t0;
-    setStatus(
-      `⚡ Local done ${localMs}ms · archived ${archivedMoved} · settling feeds…`,
-      "#ffb020",
-    );
 
     /* ═══ PHASE 2 — network, hard budget ═══ */
     const pendingBefore = (g_trackerState.activePicks || []).filter(
@@ -14925,20 +14956,8 @@ async function runEngineGodfatherRaid(opts = {}) {
     } catch (_eR) {}
 
     try {
-      const openN =
-        typeof getVisibleActiveTrackedPicks === "function" ? getVisibleActiveTrackedPicks().length : afterActive;
-      const archN = (g_trackerState.archivedPicks || []).length;
-      const actN = (g_trackerState.activePicks || []).length;
-      if (!failed.length && openN === 0 && actN + archN > 0 && archN > 0) {
-        setStatus(`Military raid complete · ${archN} in archive — open Archive`, "#49d45f");
-      } else if (!failed.length) {
-        setStatus("Military raid complete", "#49d45f");
-      } else {
-        setStatus(`Military raid complete · ${summary}`, "#ff6b6b");
-      }
-    } catch (_eS) {
-      setStatus(failed.length ? `Military raid complete · ${summary}` : "Military raid complete", failed.length ? "#ff6b6b" : "#49d45f");
-    }
+      setStatus("Military raid complete", failed.length ? "#ff6b6b" : "#49d45f");
+    } catch (_eS) {}
     try {
       if (typeof engineDebug === "function") engineDebug("Military raid done", report);
     } catch (_e) {}
@@ -20965,7 +20984,7 @@ function isTrackedPickVisibleOnPage(pick) {
   return now - settledTs < TRACKER_SETTLED_VISIBLE_MS;
 }
 
-/** Single source of truth for Tracked Picks page + report "open book".
+/** Single source of truth for Tracked Picks page visible rows.
  *  Visible active only: pending + settled still inside the 10h window,
  *  no tombstones, deduped, league-allowed markets only. Archive excluded. */
 function getVisibleActiveTrackedPicks() {
@@ -21015,7 +21034,7 @@ function getTrackedPickGameKey(pick) {
   );
 }
 
-/** Counts for the visible active / open book pool (matches Tracked Picks header). */
+/** Counts for the visible active pool (matches Tracked Picks header). */
 function summarizeVisibleTrackedBook(picks) {
   const list = Array.isArray(picks)
     ? picks
@@ -21220,9 +21239,13 @@ function renderTrackedPicks() {
     archiveExpiredTrackedPicks();
   } catch (_archErr) {}
 
+  // Settle pending/STALE rows that already carry scores before counting/rendering.
+  try {
+    if (typeof settlePendingWithEmbeddedScores === "function") settlePendingWithEmbeddedScores();
+  } catch (_settleErr) {}
+
   // Tracker UI policy: visible active only via getVisibleActiveTrackedPicks()
-  // (pending + settled inside 10h window, no tombstones, no archive). Same pool
-  // as Engine Report "Open book" so counts/lists stay aligned.
+  // (pending + settled inside 10h window, no tombstones, no archive).
   const visiblePicks =
     typeof getVisibleActiveTrackedPicks === "function"
       ? getVisibleActiveTrackedPicks()
@@ -21275,17 +21298,17 @@ function renderTrackedPicks() {
   renderTrackerAnalytics();
   renderTrackerDebugPanel();
 
-  // Header counts MUST match the visible list (not lifetime active+archive stats).
+  // Header counts MUST match the rows actually shown (not lifetime active+archive stats).
   const openBook =
     typeof summarizeVisibleTrackedBook === "function"
-      ? summarizeVisibleTrackedBook(visiblePicks)
+      ? summarizeVisibleTrackedBook(displayPicks)
       : {
           live: 0,
           wins: 0,
           losses: 0,
         };
 
-  // Tracker summary = open book only (same scope as the rows below).
+  // Tracker summary must match the visible list below (not lifetime stats).
   summaryEl.innerHTML = `${openBook.live || 0} live • ${openBook.wins || 0} wins • ${openBook.losses || 0} losses`;
 
   try {
@@ -21320,11 +21343,11 @@ function renderTrackedPicks() {
     if (!savedCount && !archivedCount) {
       emptyEl.textContent = "No tracked picks saved yet.";
     } else if (!savedCount && archivedCount > 0) {
-      emptyEl.textContent = `${archivedCount} in archive — open Archive`;
+      emptyEl.textContent = `${archivedCount} in archive`;
     } else {
       emptyEl.textContent =
         archivedCount > 0
-          ? `No open-book picks in this window. ${archivedCount} in archive — open Archive`
+          ? `No picks in this window. ${archivedCount} in archive`
           : "No live/recent picks in this window. Older picks are still saved — check Record / wait for game window.";
     }
     wrapEl.style.display = isTrackerPicksView() ? "none" : "block";
@@ -22357,7 +22380,7 @@ function renderTrackerAnalytics() {
       20,
   );
   // Raw active bucket size (includes expired-not-yet-archived / tombstoned until purge).
-  // Prefer open-book counts below for anything that claims to match Tracked Picks.
+  // Prefer visible Tracked Picks counts below for anything that claims to match the list.
   const activeCount = Array.isArray(g_trackerState?.activePicks)
     ? g_trackerState.activePicks.length
     : 0;
@@ -22701,13 +22724,13 @@ function renderTrackerAnalytics() {
   const reportBodyHtml = `
       <div class="tracker-analytics-card" style="margin-bottom:10px;">
         <div class="tracker-analytics-card-head">
-          <div class="tracker-analytics-card-title">Open book (matches Tracked Picks)</div>
+          <div class="tracker-analytics-card-title">Tracked Picks window</div>
           <div class="tracker-analytics-card-meta">Visible active only · no archive · no tombstones · settled ≤10h</div>
         </div>
         <div class="tracker-analytics-card-body">
           <div class="tracker-kpi-grid">
             <div class="tracker-kpi-card featured">
-              <div class="tracker-kpi-label">Open book</div>
+              <div class="tracker-kpi-label">Visible now</div>
               <div class="tracker-kpi-value">${openBook.live || 0} live</div>
               <div class="tracker-kpi-sub">${openBook.wins || 0} wins • ${openBook.losses || 0} losses • ${openBook.pushes || 0} pushes</div>
             </div>
@@ -22812,7 +22835,7 @@ function renderTrackerAnalytics() {
           <div class="tracker-analytics-card-meta">Tracked-pick evidence only</div>
         </div>
         <div class="tracker-analytics-card-body">
-          <div class="tracker-report-subtitle">Lifetime settled evidence (active+archive learning pool) — not the open-book / Tracked Picks window. "Latest-line move" is a proxy from the most recent line seen for that event/market/side, not guaranteed closing-line truth.</div>
+          <div class="tracker-report-subtitle">Lifetime settled evidence (active+archive learning pool) — not limited to the Tracked Picks window. "Latest-line move" is a proxy from the most recent line seen for that event/market/side, not guaranteed closing-line truth.</div>
           <div class="table-wrap tracker-report-table-wrap">
             <table class="tracker-analytics-table">
               <thead>
@@ -23176,7 +23199,7 @@ function renderTrackerAnalytics() {
       <div class="tracker-analytics-card" style="margin-top: 10px; border-color: #2a2a2a;">
         <div class="tracker-analytics-card-head" style="background: linear-gradient(90deg, #333 0%, #111 100%);">
           <div class="tracker-analytics-card-title" style="color: #ffd700;">👁️ GOD'S EYE: POST-MORTEM LOG</div>
-          <div class="tracker-analytics-card-meta">Lifetime settled archive (active+archive) — not limited to open book</div>
+          <div class="tracker-analytics-card-meta">Lifetime settled archive (active+archive) — not limited to Tracked Picks window</div>
         </div>
         <div class="tracker-analytics-card-body">
           <div class="table-wrap tracker-report-table-wrap">
@@ -51616,12 +51639,12 @@ function copyTrackerData() {
   lines.push("==========================================");
   lines.push(`Generated    : ${new Date().toLocaleString()}`);
   lines.push(`Model Version: ${currentVersion}`);
-  lines.push("--- OPEN BOOK (matches Tracked Picks page) ---");
+  lines.push("--- TRACKED PICKS WINDOW ---");
   lines.push(
-    `Open book   : ${openBook.live || 0} live • ${openBook.wins || 0} wins • ${openBook.losses || 0} losses`,
+    `Visible     : ${openBook.live || 0} live • ${openBook.wins || 0} wins • ${openBook.losses || 0} losses`,
   );
   lines.push(
-    `Visible     : ${openBook.picks || 0} picks / ${openBook.games || 0} games (${openBook.pending || 0} pending, ${openBook.settled || 0} settled in 10h window)`,
+    `Window      : ${openBook.picks || 0} picks / ${openBook.games || 0} games (${openBook.pending || 0} pending, ${openBook.settled || 0} settled in 10h window)`,
   );
   lines.push("--- LIFETIME (active + archive) ---");
   lines.push(`Overall Score: ${stats.wins || 0}W - ${stats.losses || 0}L (Win Rate: ${winRate})`);
