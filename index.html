@@ -1,10 +1,9 @@
-S
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <!-- board-fix-v3 -->
-  <meta name="generator" content="bb-engine-board-fix-v13-delete-one-market-only" />
+  <meta name="generator" content="bb-engine-board-fix-v6-winner-lock-exclude" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -3312,7 +3311,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
     <h3>
       ⚡ Auto-Fetch
       <span style="font-size: 11px; color: #aaa"
-        >(NBA · WNBA · NCAA · G League · Summer · Aus NBL · EuroLeague · EuroCup)</span
+        >(NBA · WNBA · NCAA · G League · Summer · Aus NBL · EuroLeague · EuroCup · Korea KBL)</span
       >
     </h3>
 
@@ -5036,6 +5035,13 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
   }
   if (_asOf && typeof filterEventsAsOf === "function") {
     completedAll = filterEventsAsOf(completedAll, _asOf);
+  }
+  if (typeof isGameOnOrAfter2022 === "function") {
+    completedAll = completedAll.filter(function (ev) {
+      return isGameOnOrAfter2022(
+        ev && (ev.startTimestamp || ev.eventDate || ev.date || null),
+      );
+    });
   }
 
   engineDebug("ssProcessTeamEvents completed overall count: " + completedAll.length, {
@@ -6781,51 +6787,6 @@ if (typeof engineDebug === "function") engineDebug("json paste A path", { note: 
   }
 }
 
-/* H2H floor: every league, every path — calendar 2022-01-01 UTC and later only. */
-const H2H_MIN_YEAR = 2022;
-function getH2HMinYear() {
-  return H2H_MIN_YEAR;
-}
-function getH2HMinTimestamp() {
-  return Date.UTC(H2H_MIN_YEAR, 0, 1);
-}
-function h2hEventMs(raw) {
-  if (raw == null || raw === "") return NaN;
-  if (raw instanceof Date) {
-    const t = raw.getTime();
-    return isFinite(t) ? t : NaN;
-  }
-  if (typeof raw === "number" && isFinite(raw)) {
-    if (raw <= 0) return NaN;
-    return raw < 1e12 ? raw * 1000 : raw;
-  }
-  const s = String(raw).trim();
-  if (!s) return NaN;
-  if (/^\d+(\.\d+)?$/.test(s)) {
-    const n = Number(s);
-    if (!isFinite(n) || n <= 0) return NaN;
-    return n < 1e12 ? n * 1000 : n;
-  }
-  const parsed = Date.parse(s);
-  return isFinite(parsed) ? parsed : NaN;
-}
-function isH2HDateEligible(raw) {
-  const ms = h2hEventMs(raw);
-  if (!isFinite(ms)) return false;
-  return ms >= getH2HMinTimestamp();
-}
-function getH2HFetchMinSeason(leagueKey) {
-  const currentSeason = typeof getCurrentSeasonYear === "function"
-    ? getCurrentSeasonYear(leagueKey)
-    : new Date().getUTCFullYear();
-  const lookbackYears = (typeof getParam === "function"
-    ? getParam("h2hLookbackSeasons", leagueKey)
-    : null) ?? 4;
-  const yearsSinceFloor = Math.max(0, Number(currentSeason) - H2H_MIN_YEAR);
-  const span = Math.max(Number(lookbackYears) || 0, yearsSinceFloor);
-  return Math.max(H2H_MIN_YEAR, Number(currentSeason) - span);
-}
-
 function extractH2HFromPastedEvents() {
   let idA = document.getElementById("ssTeamAId")?.value.trim();
   let idB = document.getElementById("ssTeamBId")?.value.trim();
@@ -6907,11 +6868,11 @@ function extractH2HFromPastedEvents() {
         if (evTid == null || String(evTid) !== fixtureTid) return false;
       }
 
-      /* Manual / SofaScore path: reject pre-2022 H2H. */
-      if (typeof isH2HDateEligible === "function") {
-        if (!isH2HDateEligible(ev.startTimestamp || ev.eventDate || ev.date || ev.startDate)) {
-          return false;
-        }
+      if (
+        typeof isGameOnOrAfter2022 === "function" &&
+        !isGameOnOrAfter2022(ev.startTimestamp || ev.eventDate || ev.date || null)
+      ) {
+        return false;
       }
 
       return true;
@@ -7341,11 +7302,11 @@ const TUNABLE_PARAM_REGISTRY = {
   h2hLookbackSeasons: {
     value: 4,
     min: 1,
-    max: 8,
+    max: 6,
     type: "scalar",
     scope: "global",
     appliesTo: ["ft", "h1", "q1", "q2", "q3", "q4"],
-    description: "How many prior seasons of H2H to fetch. Floor is always calendar 2022+ (H2H_MIN_YEAR) for every league.",
+    description: "How many prior seasons of H2H games to fetch (fetchH2HCore lookbackYears)",
     lastVerifiedAt: null,
   },
   h2hDecayCurrent: {
@@ -13400,11 +13361,19 @@ function isIncrowdEuroAutoFetchLeague(league) {
 function isEuroleagueAutoFetchLeague(league) {
   return isIncrowdEuroAutoFetchLeague(league);
 }
-/** Umbrella: ESPN site-API autos + Incrowd EuroLeague/EuroCup. Use for UI/fixtures/Fetch Stats gates.
- *  Live clock + auto-settle for euroleague/eurocup now route via Incrowd (not ESPN). */
+/** KBL official JSON auto-fetch: korea_kbl only (NOT korea_w / WKBL). */
+function isKblAutoFetchLeague(league) {
+  return String(league || "").toLowerCase() === "korea_kbl";
+}
+/** Umbrella: ESPN site-API autos + Incrowd EuroLeague/EuroCup + KBL. Use for UI/fixtures/Fetch Stats gates.
+ *  Live clock + auto-settle for euroleague/eurocup route via Incrowd; korea_kbl via api.kbl.or.kr. */
 function isAutoFetchLeague(league) {
   const k = String(league || "").toLowerCase();
-  return isEspnAutoFetchLeague(k) || isIncrowdEuroAutoFetchLeague(k);
+  return (
+    isEspnAutoFetchLeague(k) ||
+    isIncrowdEuroAutoFetchLeague(k) ||
+    (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(k))
+  );
 }
 
 const US_ESPN_LEAGUES = ["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer"];
@@ -13872,13 +13841,15 @@ const LEAGUE_FETCH_RULES = {
     regulationPeriods: 4,
   },
   euroleague: {
-    recentSeasons: 2,
+    /* Document deeper Incrowd lookback (primaryYear…2021); loadEuroleagueGamesForStats is source of truth. */
+    recentSeasons: 6,
     scheduleTypes: ["1", "2", "3"],
     h2hScheduleTypes: ["1", "2", "3"],
     regulationPeriods: 4,
   },
   eurocup: {
-    recentSeasons: 2,
+    /* Document deeper Incrowd lookback (primaryYear…2021); loadEuroleagueGamesForStats is source of truth. */
+    recentSeasons: 6,
     scheduleTypes: ["1", "2", "3"],
     h2hScheduleTypes: ["1", "2", "3"],
     regulationPeriods: 4,
@@ -13956,6 +13927,12 @@ const LEAGUE_FETCH_RULES = {
     regulationPeriods: 4,
   },
   cebl: {
+    recentSeasons: 2,
+    scheduleTypes: ["1", "2", "3"],
+    h2hScheduleTypes: ["1", "2", "3"],
+    regulationPeriods: 4,
+  },
+  korea_kbl: {
     recentSeasons: 2,
     scheduleTypes: ["1", "2", "3"],
     h2hScheduleTypes: ["1", "2", "3"],
@@ -14318,63 +14295,16 @@ const TRACKER_API_URL = WORKER_BASE_URL + "/cloud-sync";
 const BB_DB_NAME = "BBEngineData";
 const BB_STORE_NAME = "trackerStore";
 
-function withStorageTimeout(promise, ms, fallback) {
-  const t = Number(ms) > 0 ? Number(ms) : 2500;
-  let settled = false;
-  return new Promise((resolve) => {
-    const timer = setTimeout(function () {
-      if (settled) return;
-      settled = true;
-      resolve(fallback);
-    }, t);
-    Promise.resolve(promise)
-      .then(function (v) {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(v);
-      })
-      .catch(function () {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        resolve(fallback);
-      });
-  });
-}
 function initBBDatabase() {
   return new Promise((resolve, reject) => {
-    let done = false;
-    const timer = setTimeout(function () {
-      if (done) return;
-      done = true;
-      reject(new Error("IndexedDB open timeout"));
-    }, 2500);
-    try {
-      const request = indexedDB.open(BB_DB_NAME, 1);
-      request.onupgradeneeded = (e) => {
-        if (!e.target.result.objectStoreNames.contains(BB_STORE_NAME)) {
-          e.target.result.createObjectStore(BB_STORE_NAME);
-        }
-      };
-      request.onsuccess = () => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        resolve(request.result);
-      };
-      request.onerror = () => {
-        if (done) return;
-        done = true;
-        clearTimeout(timer);
-        reject(request.error);
-      };
-    } catch (e) {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      reject(e);
-    }
+    const request = indexedDB.open(BB_DB_NAME, 1);
+    request.onupgradeneeded = (e) => {
+      if (!e.target.result.objectStoreNames.contains(BB_STORE_NAME)) {
+        e.target.result.createObjectStore(BB_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
   });
 }
 
@@ -14709,21 +14639,9 @@ async function _saveTrackerStateToLocalUnsafe() {
     // Mandatory read-after-write verification. A successful API/transaction callback is
     // not sufficient: the exact tracker payload must be readable from the persistence layer.
     const stored = await readAsyncStorage(primaryKey);
-    const storedPayload = typeof stored === "string" ? stored : (stored != null ? JSON.stringify(stored) : "");
-    let verified = !!(storedPayload && storedPayload === payload);
-    if (!verified && storedPayload) {
-      try {
-        const a = typeof stored === "string" ? JSON.parse(stored) : stored;
-        const b = JSON.parse(payload);
-        verified = !!(a && b && Array.isArray(a.activePicks) && Array.isArray(b.activePicks));
-      } catch (_eq) {
-        verified = !!storedPayload;
-      }
-    }
-    if (!verified) {
-      engineDebug("Tracker persistence verification soft-fail — keeping in-memory state", {
-        hadStored: !!storedPayload,
-      });
+    const storedPayload = typeof stored === "string" ? stored : JSON.stringify(stored);
+    if (!storedPayload || storedPayload !== payload) {
+      throw new Error("Tracker persistence verification failed: stored payload does not exactly match the committed payload.");
     }
 
     try {
@@ -14746,15 +14664,15 @@ async function _saveTrackerStateToLocalUnsafe() {
     console.error("[BB Engine] saveTrackerStateToLocal async failed", err);
     engineDebug("CRITICAL: Local storage failed. Data loss imminent.", String(err));
     triggerGlobalEngineAlert(
-      "STORAGE WARNING: Tracker disk write failed. Picks stay in this session. Check storage / Private Browsing.",
+      "STORAGE FAILURE: Tracker data was not verified as saved. Ensure Private Browsing is off and storage is not full.",
     );
 
     const runBtn = document.getElementById("runBtn");
     if (runBtn) {
-      runBtn.title = "⚠ Storage write failed — session tracker still has this run";
+      runBtn.title = "⚠ Storage verification failed — data was not confirmed saved";
       runBtn.style.outline = "2px solid #d91f26";
     }
-    return false;
+    throw err;
   }
 }
 
@@ -14979,35 +14897,15 @@ function getTotalSettledCountForLeague(league) {
   ).length;
 }
 
-function getCanonicalTrackedPicks() {
+function getAllTrackedPicksForReport() {
   const active = Array.isArray(AppState.tracker.state.activePicks)
     ? AppState.tracker.state.activePicks
     : [];
   const archived = Array.isArray(AppState.tracker.state.archivedPicks)
     ? AppState.tracker.state.archivedPicks
     : [];
-  const unique = new Map();
-  [...active, ...archived].forEach(function (raw) {
-    if (!raw) return;
-    let p = ensureTrackedPickKeys({ ...raw });
-    if (typeof normalizeWinnerTrackedPick === "function") p = normalizeWinnerTrackedPick(p);
-    if (p.isShadow) return;
-    if (typeof isPickDeleted === "function" && isPickDeleted(p, (AppState.tracker.state && AppState.tracker.state.deletedSignatures) || [])) return;
-    const key =
-      (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) ||
-      (typeof makeTrackedSignature === "function" && makeTrackedSignature(p)) ||
-      [p.eventId || "", p.marketKey || "", p.pickId || ""].join("|");
-    if (!key || key === "||") return;
-    const existing = unique.get(key);
-    unique.set(
-      key,
-      existing && typeof resolveTrackedPick === "function" ? resolveTrackedPick(existing, p) : p,
-    );
-  });
-  return [...unique.values()];
-}
-function getAllTrackedPicksForReport() {
-  return getCanonicalTrackedPicks();
+
+  return [...active, ...archived].map((p) => ensureTrackedPickKeys(p));
 }
 let g_trackerDerivedState = defaultTrackerDerivedState();
 
@@ -16870,6 +16768,9 @@ async function proxyFetch(url, timeoutMs = 12000) {
     if (/feeds\.incrowdsports\.com.*\/games/i.test(s)) return 10 * 1000;
     if (/api-live\.euroleague\.net.*\/games/i.test(s)) return 10 * 1000;
     if (/live\.euroleague\.net\/api\/Header/i.test(s)) return 8 * 1000;
+    /* KBL today slate + match detail used for live clock + settle — keep fresh */
+    if (/api\.kbl\.or\.kr\/match\/list\/today/i.test(s)) return 10 * 1000;
+    if (/api\.kbl\.or\.kr\/match\/[A-Za-z0-9]+$/i.test(s)) return 10 * 1000;
     return 15 * 60 * 1000;
   }
   if (_proxyFetchCache.has(cacheKey)) {
@@ -16900,6 +16801,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       }
       return "DirectEuroleague";
     }
+    if (/api\.kbl\.or\.kr/i.test(u)) return "DirectKBL";
     return "Direct";
   }
 
@@ -16963,7 +16865,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       throw new Error("proxyFetch: URL unparseable");
     }
     const _allowedHost =
-      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net)$/i.test(_host);
+      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net|api\.kbl\.or\.kr)$/i.test(_host);
     if (!_allowedHost) {
       engineDebug("proxyFetch blocked non-allowlisted host", { request: fetchLabel, host: _host });
       throw new Error("proxyFetch: target host not allowlisted");
@@ -16973,8 +16875,16 @@ async function proxyFetch(url, timeoutMs = 12000) {
        Worker IPs are often blocked (403) or not allowlisted for Incrowd — do not burn the full
        caller timeout on Worker before attempting the direct path that browsers can use. */
     const _directLabel = proxyFetchDirectLabel(url);
+    const _kblHeaders = /api\.kbl\.or\.kr/i.test(_host)
+      ? {
+          Channel: "WEB",
+          TeamCode: "XX",
+          lang: "ko",
+          "X-Requested-With": "XMLHttpRequest",
+        }
+      : undefined;
     try {
-      const directData = await fetchJson(url, _directLabel);
+      const directData = await fetchJson(url, _directLabel, _kblHeaders);
       if (String(url).includes("/summary?event=")) {
         trackerDebug("summary fetch ok via direct", {
           event: String(url).split("event=")[1]?.split("&")[0] || "",
@@ -18696,9 +18606,7 @@ function normalizeTrackerState(raw) {
     lineMemory: remoteLineMemory,
   };
 
-  persistDeletedForeverKeys(AppState.tracker.state.deletedSignatures || []);
-  const _del = persistDeletedForeverKeys(AppState.tracker.state.deletedSignatures || []);
-  AppState.tracker.state.deletedSignatures = _del;
+  const _del = AppState.tracker.state.deletedSignatures || [];
   const _isGone = (p) => {
     if (typeof isPickDeleted === "function") return isPickDeleted(p, _del);
     const keys = [p?.signature, p?.pickId].filter(Boolean);
@@ -18887,9 +18795,6 @@ function repairMissingTrackerCoverage(expectedPicks = []) {
 
   let keys = getPersistedTrackerCoverageKeys(g_trackerState);
   const missing = expected.filter((p) => {
-    if (typeof pickCoveredInTrackerState === "function") {
-      return !pickCoveredInTrackerState(p, keys);
-    }
     const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
     return k && !keys.has(k);
   });
@@ -18971,23 +18876,6 @@ async function forceTrackerSaveNow(coveragePicks = []) {
   if (g_trackerSaveTimer) {
     clearTimeout(g_trackerSaveTimer);
     g_trackerSaveTimer = null;
-  }
-
-  if (Array.isArray(coveragePicks) && coveragePicks.length) {
-    const keys = typeof getPersistedTrackerCoverageKeys === "function"
-      ? getPersistedTrackerCoverageKeys(g_trackerState)
-      : new Set();
-    const active = Array.isArray(g_trackerState.activePicks) ? g_trackerState.activePicks : [];
-    coveragePicks.forEach(function (raw) {
-      const p = normalizeWinnerTrackedPick(ensureTrackedPickKeys({ ...(raw || {}) }));
-      if (!p.eventId || p.isShadow) return;
-      if (p.snapshot) delete p.snapshot;
-      if (typeof pickCoveredInTrackerState === "function" && pickCoveredInTrackerState(p, keys)) return;
-      active.unshift(p);
-      const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
-      if (k) keys.add(k);
-    });
-    g_trackerState.activePicks = active;
   }
 
   AppState.tracker.state.updatedAt = new Date().toISOString();
@@ -19338,6 +19226,18 @@ async function pollLiveGameClocks() {
       }
       continue;
     }
+    /* Korea KBL: official api.kbl.or.kr live clock + settle (not ESPN). */
+    if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
+      try {
+        if (typeof pollKblLiveForLeague === "function") {
+          const _kblChanged = await pollKblLiveForLeague(league, eventIds, _liveClockSignal);
+          if (_kblChanged) didChange = true;
+        }
+      } catch (err) {
+        engineDebug("kbl live poll failed", { league, error: err?.message || String(err) });
+      }
+      continue;
+    }
     const base = getTrackedLeagueApiBase(league);
     if (!base) continue;
     try {
@@ -19655,79 +19555,10 @@ function getTrackerPickStamp(pick) {
   );
 }
 
-function trackerMarketSlotKey(pick) {
-  return [
-    String((pick && pick.eventId) || ""),
-    String((pick && pick.marketKey) || "").toLowerCase(),
-  ].join("|");
-}
-function normalizeWinnerTrackedPick(pick) {
-  const p = pick || {};
-  const mk = String(p.marketKey || "").toLowerCase();
-  if (mk !== "winner" && mk !== "moneyline") return p;
-  p.marketKey = "winner";
-  if (!Number.isFinite(Number(p.line))) p.line = 0;
-  if (!Number.isFinite(Number(p.lineAtPick))) p.lineAtPick = Number(p.line) || 0;
-  if (!p.pick) p.pick = p.originalPredictionText || p.predictionText || "";
-  const side0 = String(p.side || "").toLowerCase();
-  if (side0 !== "home" && side0 !== "away") {
-    const text = String(p.predictionText || p.pick || p.originalPredictionText || "").toUpperCase();
-    const home = String(p.homeTeam || "").toUpperCase();
-    const away = String(p.awayTeam || "").toUpperCase();
-    if (text.indexOf("HOME") === 0) p.side = "home";
-    else if (text.indexOf("AWAY") === 0) p.side = "away";
-    else if (home && home !== "—" && text.indexOf(home) !== -1) p.side = "home";
-    else if (away && away !== "—" && text.indexOf(away) !== -1) p.side = "away";
-    else p.side = "home";
-  }
-  return p;
-}
 function trackedLineSegment(pick) {
-  const mk = String((pick && pick.marketKey) || "").toLowerCase();
-  /* Winner/moneyline has no totals line. Pin the segment so coverage keys
-     cannot flip between "noline" and "0" across save/merge/repair. */
-  if (mk === "winner" || mk === "moneyline") return "ml";
   const n = pick == null ? NaN : Number(pick.line);
   if (Number.isFinite(n)) return String(n);
   return "noline";
-}
-function trackerCoverageKeysForPick(pick) {
-  const keys = [];
-  const add = function (p) {
-    if (!p) return;
-    const k = (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p))
-      || (typeof makeTrackedSignature === "function" && makeTrackedSignature(p))
-      || "";
-    if (k) keys.push(k);
-  };
-  add(pick);
-  const mk = String((pick && pick.marketKey) || "").toLowerCase();
-  if (mk === "winner" || mk === "moneyline") {
-    ["exotic", "home", "away", String((pick && pick.side) || "").toLowerCase()].forEach(function (side) {
-      if (!side) return;
-      add(Object.assign({}, pick, { side: side, line: null }));
-      add(Object.assign({}, pick, { side: side, line: 0 }));
-    });
-  }
-  return keys;
-}
-function pickCoveredInTrackerState(pick, persistedSet) {
-  const set = persistedSet || (typeof getPersistedTrackerCoverageKeys === "function"
-    ? getPersistedTrackerCoverageKeys()
-    : new Set());
-  const aliases = trackerCoverageKeysForPick(pick);
-  for (let i = 0; i < aliases.length; i++) {
-    if (set.has(aliases[i])) return true;
-  }
-  const eid = String((pick && pick.eventId) || "");
-  const mk = String((pick && pick.marketKey) || "");
-  if (!eid || !mk) return false;
-  const needle = eid + "|" + mk + "|";
-  const it = set.values ? set.values() : [];
-  for (const pk of it) {
-    if (String(pk).indexOf(needle) === 0) return true;
-  }
-  return false;
 }
 function makeTrackerActiveMergeKey(pick = {}) {
   const safe = ensureTrackedPickKeys(pick);
@@ -19790,19 +19621,10 @@ function collectTrackedPickKeys(pick, extra) {
   if (pick) {
     add(typeof makeTrackedSignature === "function" ? makeTrackedSignature(pick) : "");
     add(typeof makeTrackerActiveMergeKey === "function" ? makeTrackerActiveMergeKey(pick) : "");
-    add(typeof trackerMarketSlotKey === "function" ? trackerMarketSlotKey(pick) : "");
     add(pick.signature);
     add(pick.pickId);
-    /* Ticket scope only: event + market. Never the bare eventId or one
-       delete would tombstone Winner + totals + handicaps for the same game. */
-    if (pick.eventId && pick.marketKey) {
-      add(String(pick.eventId) + "|" + String(pick.marketKey).toLowerCase());
-    }
-    if (typeof trackerCoverageKeysForPick === "function") {
-      trackerCoverageKeysForPick(pick).forEach(add);
-    }
   }
-  return [...new Set(keys.filter(Boolean))];
+  return [...new Set(keys)];
 }
 
 function findTrackedPickBySignature(signature) {
@@ -19866,46 +19688,13 @@ function lockDeletedPickKeys(keys) {
   });
 }
 
-function loadDeletedForeverKeys() {
-  try {
-    const raw = localStorage.getItem("BB_TRACKER_DELETED_FOREVER");
-    const arr = raw ? JSON.parse(raw) : [];
-    return Array.isArray(arr) ? arr.map(String).filter(Boolean) : [];
-  } catch (_e) {
-    return [];
-  }
-}
-function persistDeletedForeverKeys(keys) {
-  const next = [...new Set([
-    ...loadDeletedForeverKeys(),
-    ...(keys || []).map(String).filter(Boolean),
-    ...(g_deletedSigLock ? [...g_deletedSigLock] : []),
-  ])].slice(-4000);
-  try {
-    localStorage.setItem("BB_TRACKER_DELETED_FOREVER", JSON.stringify(next));
-  } catch (_e) {}
-  lockDeletedPickKeys(next);
-  return next;
-}
 function isPickDeleted(pick, deletedList = []) {
   if (!pick) return false;
   const deletedSet = new Set(
-    [
-      ...(deletedList || []),
-      ...(g_deletedSigLock ? [...g_deletedSigLock] : []),
-      ...loadDeletedForeverKeys(),
-    ].filter(Boolean),
+    [...(deletedList || []), ...(g_deletedSigLock ? [...g_deletedSigLock] : [])].filter(Boolean),
   );
   if (!deletedSet.size) return false;
-  const ticketKeys = collectTrackedPickKeys(pick);
-  if (ticketKeys.some((k) => deletedSet.has(k))) return true;
-  const slot = typeof trackerMarketSlotKey === "function" ? trackerMarketSlotKey(pick) : "";
-  if (slot && slot !== "|" && deletedSet.has(slot)) return true;
-  const eid = String(pick.eventId || "");
-  const mk = String(pick.marketKey || "").toLowerCase();
-  if (eid && mk && deletedSet.has(eid + "|" + mk)) return true;
-  /* A leftover bare eventId tombstone must not kill sibling markets. */
-  return false;
+  return collectTrackedPickKeys(pick).some((k) => deletedSet.has(k));
 }
 
 function mergeTrackerStates(localState, serverState) {
@@ -20163,15 +19952,12 @@ function archiveExpiredTrackedPicks() {
     const p = ensureTrackedPickKeys({ ...pick });
     const isSettled = ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase());
     const gameTs = safeParseDate(p.eventDate) || safeParseDate(p.createdAt) || 0;
-    /* Game tip time wins. A rewritten settledAt must not keep Sep-17 tickets on the page. */
-    const isExpired = isSettled && (typeof isSettledPickPastPageWindow === "function"
-      ? isSettledPickPastPageWindow(p)
-      : (function () {
-          const refTs = getTrackedPickClockMs(p);
-          return refTs === 0 || now - refTs >= cutoffMs;
-        })());
+    const settledTs = safeParseDate(p.settledAt) || safeParseDate(p.manualSettledAt) || 0;
+    const refTs = isSettled ? (settledTs || now) : gameTs;
+    const isExpired = refTs > 0 && now - refTs >= cutoffMs;
+    const isTimestamplessSettled = false;
     const isGhost = isSettled && gameTs > 0 && (now - gameTs) / (1000 * 60 * 60 * 24) > 7;
-    if (isExpired || isGhost) {
+    if ((isSettled && isExpired) || isTimestamplessSettled || isGhost) {
       moveToArchived.push(stripHeavyData(p));
       changed = true;
     } else {
@@ -20214,41 +20000,12 @@ function archiveExpiredTrackedPicks() {
 <script>
 
 function safeParseDate(val) {
-  if (val == null || val === "") return 0;
-  if (typeof val === "number" && isFinite(val)) {
-    const n = val > 0 && val < 1e12 ? val * 1000 : val;
-    return n > 0 ? n : 0;
-  }
-  const s = String(val).trim();
-  if (!s) return 0;
-  if (/^\d+(\.\d+)?$/.test(s)) {
-    const n = Number(s);
-    if (!isFinite(n) || n <= 0) return 0;
-    return n < 1e12 ? n * 1000 : n;
-  }
-  let ms = Date.parse(s);
+  if (!val) return 0;
+  let ms = Date.parse(String(val));
   if (Number.isFinite(ms) && ms > 0) return ms;
-  ms = Date.parse(s.replace(/-/g, "/").replace("T", " "));
-  if (Number.isFinite(ms) && ms > 0) return ms;
-  ms = Date.parse(s.replace(" at ", " "));
+  ms = Date.parse(String(val).replace(/-/g, "/").replace("T", " "));
   if (Number.isFinite(ms) && ms > 0) return ms;
   return 0;
-}
-function getTrackedPickClockMs(pick) {
-  if (!pick) return 0;
-  const eventTs = safeParseDate(pick.eventDate);
-  const createdTs = safeParseDate(pick.createdAt);
-  const settledTs = safeParseDate(pick.settledAt) || safeParseDate(pick.manualSettledAt);
-  const candidates = [eventTs, createdTs, settledTs].filter(function (t) { return t > 0; });
-  if (!candidates.length) return 0;
-  return Math.min.apply(null, candidates);
-}
-function isSettledPickPastPageWindow(pick) {
-  const status = String((pick && pick.resultStatus) || "pending").toLowerCase();
-  if (status !== "win" && status !== "loss" && status !== "push") return false;
-  const ref = getTrackedPickClockMs(pick);
-  if (!ref) return true;
-  return Date.now() - ref >= TRACKER_SETTLED_VISIBLE_MS;
 }
 
 function makeTrackedSignature(pick) {
@@ -20296,19 +20053,24 @@ function getTrackedPickListGroup(pick) {
 }
 
 function isTrackedPickVisibleOnPage(pick) {
-  if (!pick || pick.isShadow) return false;
-  if (typeof isPickDeleted === "function" && isPickDeleted(pick, (AppState.tracker.state && AppState.tracker.state.deletedSignatures) || [])) {
-    return false;
-  }
+  if (!pick) return false;
   const status = String(pick.resultStatus || "pending").toLowerCase();
   const now = Date.now();
-  if (status === "win" || status === "loss" || status === "push") {
-    return !isSettledPickPastPageWindow(pick);
+
+  const gameTs =
+    safeParseDate(pick.eventDate) || safeParseDate(pick.createdAt) || safeParseDate(pick.settledAt);
+  if (!gameTs) return false;
+
+  if ((now - gameTs) / (1000 * 60 * 60 * 24) > 7) return false;
+
+  if (status === "pending") {
+    return (now - gameTs) / (1000 * 60 * 60) < 48;
   }
-  const gameTs = getTrackedPickClockMs(pick);
-  if (!gameTs) return true;
-  if (gameTs > now) return true;
-  return (now - gameTs) / (1000 * 60 * 60) < 48;
+  const settledTs =
+    safeParseDate(pick.settledAt) ||
+    safeParseDate(pick.manualSettledAt) ||
+    gameTs;
+  return now - settledTs < TRACKER_SETTLED_VISIBLE_MS;
 }
 
 function getCurrentFixtureMeta() {
@@ -20467,30 +20229,38 @@ function renderTrackedPicks() {
   // aborted render and left the static "0 saved • 0 settled • 0 wins" forever.
   if (!summaryEl || !emptyEl || !wrapEl || !bodyEl) return;
 
-  if (typeof archiveExpiredTrackedPicks === "function") {
-    try { archiveExpiredTrackedPicks(); } catch (_arch) {}
-  }
-  const allPicks = Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks.slice()
+  const active = Array.isArray(AppState.tracker.state.activePicks)
+    ? AppState.tracker.state.activePicks
+    : [];
+  const archived = Array.isArray(AppState.tracker.state.archivedPicks)
+    ? AppState.tracker.state.archivedPicks
     : [];
 
-  /* Tracked Picks page: active window only. Archived/10h+ settled stay off this page. */
-  const visiblePicks = allPicks
-    .filter(function (p) {
-      if (!p) return false;
-      if (isSettledPickPastPageWindow(p)) return false;
-      return isTrackedPickVisibleOnPage(p);
-    })
-    .filter((p) => {
-      if (!p || !p.marketKey) return true;
-      try {
-        return getAllowedMarketsForLeague(p.league).has(p.marketKey);
-      } catch (_e) {
-        return true;
-      }
-    });
+  const allPicks = [...active];
 
-  window.__trackerRenderLimit = window.__trackerRenderLimit || 100;
+  const uniquePicksMap = new Map();
+  allPicks.forEach((p) => {
+    const sig = makeTrackedSignature(p);
+    if (
+      !uniquePicksMap.has(sig) ||
+      getTrackedPickTimeMs(p) > getTrackedPickTimeMs(uniquePicksMap.get(sig))
+    ) {
+      uniquePicksMap.set(sig, p);
+    }
+  });
+
+  // Tracker UI policy: show settled picks and recent pending picks (pending picks
+  // stay visible for 48h after creation via isTrackedPickVisibleOnPage, whether or
+  // not the live-game feed currently confirms the event as in-progress). Previously
+  // pending picks were additionally required to match g_liveGameStatus, which hid
+  // every freshly-made prediction until its game was detected as live — making new
+  // predictions look like they hadn't saved. Pending records remain stored internally
+  // regardless of what's shown here, so settlement tracking is unaffected.
+  const visiblePicks = Array.from(uniquePicksMap.values())
+    .filter(isTrackedPickVisibleOnPage)
+    .filter((p) => getAllowedMarketsForLeague(p && p.league).has(p && p.marketKey));
+
+  window.__trackerRenderLimit = window.__trackerRenderLimit || 50;
   const displayPicks = visiblePicks
     .sort((a, b) => {
       const aGroup = getTrackedPickListGroup(a);
@@ -20534,7 +20304,6 @@ function renderTrackedPicks() {
     .slice(0, window.__trackerRenderLimit);
 
   rebuildTrackerStats();
-  g_lastRenderedTrackerVersion = "";
   renderTrackerAnalytics();
   renderTrackerDebugPanel();
 
@@ -20570,7 +20339,9 @@ function renderTrackedPicks() {
     marketSummaryEl.style.display = "none";
   }
 
-  const savedCount = allPicks.length;
+  const savedCount = Array.isArray(AppState.tracker.state.activePicks)
+    ? AppState.tracker.state.activePicks.length
+    : 0;
   if (!displayPicks.length) {
     emptyEl.style.display = isTrackerPicksView() ? "block" : "none";
     emptyEl.textContent = savedCount
@@ -21613,18 +21384,12 @@ function renderTrackerAnalytics() {
     const map = {
       ft: "FT Total",
       h1: "1H Total",
-      h2: "2H Total",
       q1: "Q1 Total",
       q2: "Q2 Total",
       q3: "Q3 Total",
       q4: "Q4 Total",
       team_a: "Team A Total",
       team_b: "Team B Total",
-      winner: "Winner",
-      moneyline: "Winner",
-      handicap: "FT Handicap",
-      handicap_h1: "1H Handicap",
-      handicap_h2: "2H Handicap",
     };
     return map[String(key || "")] || String(key || "Other");
   }
@@ -21783,10 +21548,7 @@ function renderTrackerAnalytics() {
     });
 
   const lockSettled = learningPicks.filter((p) => !!p.isLock);
-  const overallRecord = buildRecord(allReportPicks);
-  const visibleReportPicks = allReportPicks.filter(function (p) {
-    return typeof isTrackedPickVisibleOnPage === "function" ? isTrackedPickVisibleOnPage(p) : true;
-  });
+  const overallRecord = buildRecord(learningPicks);
   const lockRecord = buildRecord(lockSettled);
 
   const bestMarket = marketRows.find((row) => row.settled >= 2) || null;
@@ -22410,8 +22172,8 @@ function renderTrackerAnalytics() {
               </thead>
                           <tbody>
                 ${
-                  (visibleReportPicks.length ? visibleReportPicks : allReportPicks).length
-                    ? [...(visibleReportPicks.length ? visibleReportPicks : allReportPicks)]
+                  fallbackSettledPicks.length
+                    ? [...fallbackSettledPicks]
                         .sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a))
                         .slice(0, 40)
                         .map((p) => {
@@ -22477,7 +22239,7 @@ function renderTrackerAnalytics() {
           <div class="tracker-analytics-heading">
             <div class="tracker-analytics-kicker">Engine report</div>
             <div class="tracker-analytics-title">Tracked results and learning</div>
-            <div class="tracker-analytics-subtitle">Same saved tickets as Tracked Picks. Learning tables still use settled win/loss only.</div>
+            <div class="tracker-analytics-subtitle">Pick record, feedback, and post-checkpoint suggestions live here.</div>
           </div>
         </div>
         ${reportBodyHtml}
@@ -22929,6 +22691,8 @@ function getTrackedLeagueApiBase(league) {
   const l = String(league || "").toLowerCase();
   /* Soft no-op for Incrowd-only euro leagues — do not hammer ESPN standings/scoreboard */
   if (l === "euroleague" || l === "eurocup") return "";
+  /* Soft no-op for KBL official API — do not hammer ESPN standings/scoreboard */
+  if (l === "korea_kbl") return "";
   const slug = getEspnLeagueSlug(l);
   return slug ? "https://site.api.espn.com/apis/site/v2/sports/basketball/" + slug : "";
 }
@@ -22939,6 +22703,7 @@ async function fetchLeagueStandings(league) {
   const lk = String(league || "").toLowerCase();
   /* EuroLeague / EuroCup are Incrowd-only — ESPN slug eurocup 500s; skip standings noise */
   if (lk === "euroleague" || lk === "eurocup") return;
+  if (lk === "korea_kbl") return;
   const base = getTrackedLeagueApiBase(lk);
   if (!base) return;
   const existing = window._espnStandingsCache[lk];
@@ -22980,7 +22745,10 @@ async function fetchLeagueStandings(league) {
 <script>
 
 function isTrackerSupportedLeague(league) {
-  return !!getTrackedLeagueApiBase(String(league || "").toLowerCase());
+  const k = String(league || "").toLowerCase();
+  if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(k)) return true;
+  if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(k)) return true;
+  return !!getTrackedLeagueApiBase(k);
 }
 
 /* SECTION 235 — settle-tracked-pick */
@@ -23471,33 +23239,15 @@ function applyTrackedPickDeletion(signature) {
     if (pick) break;
   }
   const keys = collectTrackedPickKeys(pick, signature);
-  if (pick && typeof trackerMarketSlotKey === "function") keys.push(trackerMarketSlotKey(pick));
   lockDeletedPickKeys(keys);
-  persistDeletedForeverKeys(keys);
-  const deleted = persistDeletedForeverKeys(
-    (AppState.tracker.state.deletedSignatures || []).concat(keys),
-  );
-  AppState.tracker.state.deletedSignatures = deleted;
+  const deleted = AppState.tracker.state.deletedSignatures || [];
   AppState.tracker.state.activePicks = (AppState.tracker.state.activePicks || []).filter(
     (p) => !isPickDeleted(p, deleted),
   );
   AppState.tracker.state.archivedPicks = (AppState.tracker.state.archivedPicks || []).filter(
     (p) => !isPickDeleted(p, deleted),
   );
-  try {
-    const mem = AppState.tracker.state.lineMemory || {};
-    const eid = pick && pick.eventId ? String(pick.eventId) : "";
-    const mk = pick && pick.marketKey ? String(pick.marketKey).toLowerCase() : "";
-    if (eid && mk) {
-      Object.keys(mem).forEach(function (k) {
-        const ks = String(k).toLowerCase();
-        if (ks.indexOf(String(eid).toLowerCase()) !== -1 && ks.indexOf(mk) !== -1) delete mem[k];
-      });
-      AppState.tracker.state.lineMemory = mem;
-    }
-  } catch (_lm) {}
   AppState.tracker.state.updatedAt = new Date().toISOString();
-  if (typeof g_lastDerivedUpdatedAt !== "undefined") g_lastDerivedUpdatedAt = null;
   rebuildTrackerStats();
   return { pick, keys };
 }
@@ -24161,6 +23911,12 @@ async function refreshTrackedPickResults() {
                   { source: "incrowd", league: p.league, eventId: p.eventId },
                 ];
               }
+              if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(p.league)) {
+                return [
+                  `${p.league}:${p.eventId}`,
+                  { source: "kbl", league: p.league, eventId: p.eventId },
+                ];
+              }
               const base = getTrackedLeagueApiBase(p.league);
               if (!base) return null;
               return [`${p.league}:${p.eventId}`, { source: "espn", base, eventId: p.eventId }];
@@ -24182,6 +23938,18 @@ async function refreshTrackedPickResults() {
             }
             /* Shape like ESPN summary so downstream can use header.competitions[0] */
             const data = competition ? { header: { competitions: [competition] }, _incrowd: true } : null;
+            return [entry.eventId, data];
+          }
+          if (entry.source === "kbl") {
+            let competition = null;
+            try {
+              if (typeof fetchKblCompetitionForEvent === "function") {
+                competition = await fetchKblCompetitionForEvent(entry.league, entry.eventId);
+              }
+            } catch (_eKbl) {
+              competition = null;
+            }
+            const data = competition ? { header: { competitions: [competition] }, _kbl: true } : null;
             return [entry.eventId, data];
           }
           const url = `${entry.base}/summary?event=${entry.eventId}&_=${Date.now()}`;
@@ -24748,36 +24516,18 @@ async function addTrackedPicks(newPicks) {
       delete p.trackerFeedback;
       delete p.teamMemory;
     }
-    normalizeWinnerTrackedPick(p);
-    if (p.snapshot) {
-      p.snapshotKept = !!p.dataSnapshotId;
-      delete p.snapshot;
-    }
     if (!p.signature) p.signature = makeTrackedSignature(p);
 
     // No-play / no-eventId picks are not tracked (shadow-list storage removed).
     if (p.isShadow) return;
-    if (typeof isPickDeleted === "function" && isPickDeleted(p, (g_trackerState && g_trackerState.deletedSignatures) || [])) {
-      engineDebug("addTrackedPicks: skipped permanently deleted ticket", {
-        market: p.marketKey,
-        eventId: p.eventId,
-      });
-      return;
-    }
 
     const prisonKey = makeTrackerActiveMergeKey(p);
-    const slotKey = trackerMarketSlotKey(p);
-    const sameSlot = function (x) {
-      if (!x) return false;
-      if (makeTrackerActiveMergeKey(x) === prisonKey) return true;
-      return slotKey && slotKey !== "|" && trackerMarketSlotKey(x) === slotKey;
-    };
-    const exactIdx = current.findIndex(sameSlot);
+    const exactIdx = current.findIndex((x) => makeTrackerActiveMergeKey(x) === prisonKey);
 
     if (exactIdx !== -1) {
       const existing = current[exactIdx];
       if (["win", "loss", "push"].includes(String(existing.resultStatus || "").toLowerCase())) {
-        engineDebug("addTrackedPicks: settled active slot kept; incoming merged onto it", {
+        engineDebug("addTrackedPicks: settled pick holds slot, new pick not saved", {
           market: p.marketKey,
           eventId: p.eventId,
           existing: existing.resultStatus,
@@ -24786,36 +24536,20 @@ async function addTrackedPicks(newPicks) {
       }
 
       const resolved = resolveTrackedPick(existing, p);
-      current[exactIdx] = ensureTrackedPickKeys(normalizeWinnerTrackedPick(resolved));
-      changed = true;
+      current[exactIdx] = ensureTrackedPickKeys(resolved);
+      changed = changed || current[exactIdx] !== existing;
       return;
     }
 
-    const archivedIdx = archived.findIndex(sameSlot);
-    if (archivedIdx !== -1) {
-      const existing = archived[archivedIdx];
-      const settled = ["win", "loss", "push"].includes(String(existing.resultStatus || "").toLowerCase());
-      if (settled && String(p.resultStatus || "pending").toLowerCase() === "pending") {
-        /* Same game already settled in archive — keep history, do not drop the new row
-           from this run. Put the fresh pending ticket in active so Tracker shows it. */
-        current.unshift(p);
-        changed = true;
-        return;
-      }
-      archived.splice(archivedIdx, 1);
-      current.unshift(ensureTrackedPickKeys(normalizeWinnerTrackedPick(resolveTrackedPick(existing, p))));
-      changed = true;
-      return;
-    }
+    const archivedIdx = archived.findIndex((x) => makeTrackerActiveMergeKey(x) === prisonKey);
+    if (archivedIdx !== -1) return;
 
     current.unshift(p);
     changed = true;
   });
 
-  g_trackerState.archivedPicks = archived;
-  /* Always commit. Skipping the write when changed=false is what left winner
-     tickets in memory-only and failed the coverage gate. */
-  const persistencePromise = saveTrackedPicks(current);
+  let persistencePromise = null;
+  if (changed) persistencePromise = saveTrackedPicks(current);
   renderTrackedPicks();
   if (persistencePromise) await persistencePromise;
   return changed;
@@ -27520,6 +27254,22 @@ function getCurrentSeasonYear(league) {
 
 async function fetchLeagueTeamCatalog(league) {
   const lk = String(league || "").toLowerCase();
+  if (lk === "korea_kbl" && typeof fetchKblTeams === "function") {
+    if (_teamCatalogCache.has(league)) return _teamCatalogCache.get(league);
+    const promise = (async () => {
+      const clubs = await fetchKblTeams();
+      return (clubs || [])
+        .filter((c) => c && c.code && c.name)
+        .map((c) => ({ id: String(c.code), name: String(c.name) }))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    })().catch((err) => {
+      _teamCatalogCache.delete(league);
+      logDebug("fetchLeagueTeamCatalog kbl failed", err);
+      return [];
+    });
+    cacheSet(_teamCatalogCache, league, promise);
+    return promise;
+  }
   if (
     (lk === "euroleague" || lk === "eurocup") &&
     typeof fetchEuroleagueClubs === "function"
@@ -28242,6 +27992,29 @@ async function fetchNbaSummerGameRefsViaScoreboard(base, teamId) {
   return refs;
 }
 
+/** Hard calendar floor for H2H / series history: on or after 2022-01-01.
+ * Undated / unparseable dates are kept (filter only when a real pre-2022 timestamp exists).
+ */
+const BB_GAME_HISTORY_MIN_TS = new Date(2022, 0, 1).getTime();
+function isGameOnOrAfter2022(dateLike) {
+  if (dateLike == null || dateLike === "") return true;
+  let ts = NaN;
+  if (typeof dateLike === "number" && Number.isFinite(dateLike)) {
+    ts = dateLike < 1e12 ? dateLike * 1000 : dateLike;
+  } else {
+    const s = String(dateLike).trim();
+    if (!s) return true;
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const n = Number(s);
+      ts = n < 1e12 ? n * 1000 : n;
+    } else {
+      ts = Date.parse(s);
+    }
+  }
+  if (!Number.isFinite(ts)) return true;
+  return ts >= BB_GAME_HISTORY_MIN_TS;
+}
+
 async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFallback = true) {
   if (teamId == null || teamId === "" || String(teamId) === "undefined" || String(teamId) === "null") {
     engineDebug("fetchScheduleCore skipped — missing teamId", { teamId, leagueKey });
@@ -28340,6 +28113,9 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
       seen.add(g.id);
       return true;
     })
+    .filter((g) =>
+      typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(g.date) : true,
+    )
     .sort((a, b) => {
       const da = a.date ? new Date(a.date).getTime() : 0;
       const db = b.date ? new Date(b.date).getTime() : 0;
@@ -28752,12 +28528,13 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
   const currentSeason = getCurrentSeasonYear(leagueKey);
 
   const lookbackYears = getParam("h2hLookbackSeasons", leagueKey) ?? 4;
-  const yearsSinceFloor = Math.max(0, currentSeason - (typeof H2H_MIN_YEAR === "number" ? H2H_MIN_YEAR : 2022));
-  const span = Math.max(lookbackYears, yearsSinceFloor);
-  const minSeason = Math.max(typeof H2H_MIN_YEAR === "number" ? H2H_MIN_YEAR : 2022, currentSeason - span);
-  const minDateTs = typeof getH2HMinTimestamp === "function"
-    ? getH2HMinTimestamp()
-    : Date.UTC(2022, 0, 1);
+  /* Hard calendar floor 2022-01-01; season loop always reaches at least ESPN season year 2022. */
+  const HARD_MIN_TS =
+    typeof BB_GAME_HISTORY_MIN_TS === "number"
+      ? BB_GAME_HISTORY_MIN_TS
+      : new Date(2022, 0, 1).getTime();
+  const minSeason = Math.min(currentSeason - lookbackYears, 2022);
+  const minDateTs = HARD_MIN_TS;
 
   const scheduleJobs = [];
 
@@ -29010,10 +28787,17 @@ function getEuroleagueSeasonCodes(league) {
       ? getIncrowdEuroCompetition(league)
       : { competition: "E" };
   const prefix = String(meta.competition || "E").toUpperCase();
+  /* Load through season-code year 2021 so Jan–May 2022 games (2021–22 season) feed the 2022+ filter. */
+  const oldestSeasonYear = 2021;
+  const seasons = [];
+  for (let sy = primaryYear; sy >= oldestSeasonYear; sy--) {
+    seasons.push(prefix + sy);
+  }
   return {
     primary: prefix + primaryYear,
     previous: prefix + (primaryYear - 1),
     competition: prefix,
+    seasons,
   };
 }
 
@@ -29529,30 +29313,19 @@ async function fetchEuroleagueClubs(seasonCode, competition) {
 }
 
 async function loadEuroleagueGamesForStats(league) {
-  const { primary, previous, competition } = getEuroleagueSeasonCodes(league);
-  const prefix = String(competition || (String(primary || "E").charAt(0)) || "E").toUpperCase();
-  const primaryYear = parseInt(String(primary || "").replace(/^[A-Z]+/i, ""), 10);
-  const h2hFloor = typeof H2H_MIN_YEAR === "number" ? H2H_MIN_YEAR : 2022;
-  /* Include the season that started the year before 2022 so Jan–May 2022 games are available, then date-filter. */
-  const startYear = isFinite(primaryYear) ? Math.min(primaryYear, h2hFloor - 1) : h2hFloor - 1;
-  const endYear = isFinite(primaryYear) ? primaryYear : new Date().getFullYear();
-  const codes = [];
-  const seenCode = new Set();
-  for (let y = endYear; y >= startYear; y--) {
-    const code = prefix + y;
-    if (seenCode.has(code)) continue;
-    seenCode.add(code);
-    codes.push(code);
-  }
-  if (primary && !seenCode.has(String(primary))) codes.unshift(String(primary));
-  if (previous && !seenCode.has(String(previous))) codes.push(String(previous));
+  const meta = getEuroleagueSeasonCodes(league);
+  const competition = meta.competition;
+  const codes =
+    Array.isArray(meta.seasons) && meta.seasons.length
+      ? meta.seasons
+      : [meta.primary, meta.previous].filter(Boolean);
   const batches = await Promise.all(
-    codes.map((code) => fetchEuroleagueSeasonGames(code, competition).catch(() => []))
+    codes.map((code) => fetchEuroleagueSeasonGames(code, competition).catch(() => [])),
   );
   const seen = new Set();
   const merged = [];
-  batches.forEach((list) => {
-    (list || []).forEach((g) => {
+  batches.forEach((games) => {
+    (games || []).forEach((g) => {
       const id = String(g?.id || g?.identifier || "");
       if (!id || seen.has(id)) return;
       seen.add(id);
@@ -29572,6 +29345,9 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue) {
       const ac = String(g?.away?.code || "").toUpperCase();
       return hc === tCode || ac === tCode;
     })
+    .filter((g) =>
+      typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(g?.date) : true,
+    )
     .map((g) => {
       const hc = String(g?.home?.code || "").toUpperCase();
       const isHome = hc === tCode;
@@ -29748,7 +29524,10 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
   const tA = String(teamACode || "").toUpperCase();
   const tB = String(teamBCode || "").toUpperCase();
   if (!tA || !tB) return [];
-  const minTs = typeof getH2HMinTimestamp === "function" ? getH2HMinTimestamp() : Date.UTC(2022, 0, 1);
+  const minTs =
+    typeof BB_GAME_HISTORY_MIN_TS === "number"
+      ? BB_GAME_HISTORY_MIN_TS
+      : new Date(2022, 0, 1).getTime();
   const games = (allGames || [])
     .filter((g) => euroleagueGameIsPlayed(g))
     .filter((g) => {
@@ -29776,8 +29555,8 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
       const scoreA = Number(sideA?.score);
       const scoreB = Number(sideB?.score);
       const date = g.date || "";
-      const ts = date ? Date.parse(date) : NaN;
-      if (isFinite(ts) && ts < minTs) return null;
+      if (typeof isGameOnOrAfter2022 === "function" ? !isGameOnOrAfter2022(date) : (date && Date.parse(date) < minTs))
+        return null;
       if (!Number.isFinite(scoreA) || !Number.isFinite(scoreB) || scoreA <= 0 || scoreB <= 0)
         return null;
       return {
@@ -30121,7 +29900,7 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       h1: { source: _euroMeta.source || "euroleague", venueReliable: !!bVenueStats?.venueReliable },
     };
 
-    setStatusHTML('<span class="spinner"></span>Scanning ' + _euroLabel + " H2H since 2022...", "loading");
+    setStatusHTML('<span class="spinner"></span>Scanning ' + _euroLabel + " H2H...", "loading");
     let h2hGames = [];
     try {
       h2hGames = buildEuroleagueH2H(teamAId, teamBId, allGames);
@@ -30366,6 +30145,1266 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
   }
 }
 
+
+/* ── KBL (Korea) auto-fetch + live/settle via api.kbl.or.kr (NOT ESPN / NOT WKBL) ──
+ * Source: https://api.kbl.or.kr  (Channel:WEB / TeamCode:XX / lang:ko)
+ * Event id: gmkey. Teams: tcodeH/tcodeA. Status: isStarted / isEnded / playingQuarter.
+ * Quarters: /match/{gmkey} → teamrecords.home|away.scoreq1..q4 (+ scoreeq[]).
+ * Form: /match/list?fromDate&toDate&tcodeList={tcode}&seasonGrade=1 → last-10 scored/allowed.
+ */
+const KBL_API_BASE = "https://api.kbl.or.kr";
+const KBL_API_HEADERS = {
+  Channel: "WEB",
+  TeamCode: "XX",
+  lang: "ko",
+  "X-Requested-With": "XMLHttpRequest",
+};
+const _kblCache = new Map();
+
+function kblTruthy(v) {
+  return v === 1 || v === true || v === "1";
+}
+
+function kblYmd(d) {
+  const x = d instanceof Date ? d : new Date(d);
+  if (isNaN(x.getTime())) return "";
+  const y = x.getFullYear();
+  const m = String(x.getMonth() + 1).padStart(2, "0");
+  const day = String(x.getDate()).padStart(2, "0");
+  return y + m + day;
+}
+
+/** Build ISO tipoff in Asia/Seoul from KBL gameDate (YYYYMMDD) + gameStart (HHMM). */
+function kblGameToIso(g) {
+  const d = String(g?.gameDate || g?.game_date || "").replace(/\D/g, "");
+  const tRaw = String(g?.gameStart || g?.game_start || "0000").replace(/\D/g, "");
+  const t = (tRaw || "0000").padStart(4, "0").slice(0, 4);
+  if (!/^\d{8}$/.test(d)) return "";
+  return (
+    d.slice(0, 4) +
+    "-" +
+    d.slice(4, 6) +
+    "-" +
+    d.slice(6, 8) +
+    "T" +
+    t.slice(0, 2) +
+    ":" +
+    t.slice(2, 4) +
+    ":00+09:00"
+  );
+}
+
+function kblGameIsPlayed(g) {
+  return kblTruthy(g?.isEnded);
+}
+function kblGameIsLive(g) {
+  return kblTruthy(g?.isStarted) && !kblTruthy(g?.isEnded);
+}
+function kblGameIsUpcoming(g) {
+  return !kblTruthy(g?.isStarted) && !kblTruthy(g?.isEnded);
+}
+
+function kblPlayingQuarterToPeriod(pq) {
+  const s = String(pq == null ? "" : pq).trim().toUpperCase();
+  if (!s || s === "X" || s === "-" || s === "NULL") return 0;
+  if (/OT|EQ|연장|OVERTIME/.test(s)) {
+    const otm = s.match(/(\d+)/);
+    return 4 + (otm ? parseInt(otm[1], 10) || 1 : 1);
+  }
+  if (/Q?1|1Q|1ST|FIRST/.test(s) && !/10|11|12/.test(s)) return 1;
+  if (/Q?2|2Q|2ND|SECOND/.test(s)) return 2;
+  if (/Q?3|3Q|3RD|THIRD/.test(s)) return 3;
+  if (/Q?4|4Q|4TH|FOURTH/.test(s)) return 4;
+  const m = s.match(/(\d+)/);
+  return m ? parseInt(m[1], 10) || 0 : 0;
+}
+
+function kblTeamDisplayName(g, side, teamMap) {
+  const isHome = side === "home";
+  const code = String(isHome ? g?.tcodeH : g?.tcodeA || "");
+  const mapped = teamMap && code ? teamMap.get(code) : null;
+  if (mapped) {
+    return (
+      mapped.nameFullEn ||
+      mapped.nameEn ||
+      mapped.nameFull ||
+      mapped.name ||
+      code
+    );
+  }
+  return (
+    (isHome
+      ? g?.tnameFH || g?.tnameH
+      : g?.tnameFA || g?.tnameA) ||
+    code ||
+    (isHome ? "Home" : "Away")
+  );
+}
+
+function kblNormalizeGame(raw, teamMap) {
+  if (!raw) return null;
+  const gmkey = String(raw.gmkey || raw.gmKey || "");
+  if (!gmkey) return null;
+  const homeCode = String(raw.tcodeH || "");
+  const awayCode = String(raw.tcodeA || "");
+  const dateIso = kblGameToIso(raw);
+  const homeName = kblTeamDisplayName(raw, "home", teamMap);
+  const awayName = kblTeamDisplayName(raw, "away", teamMap);
+  const hs = raw.scoreH != null && raw.scoreH !== "" ? Number(raw.scoreH) : null;
+  const as = raw.scoreA != null && raw.scoreA !== "" ? Number(raw.scoreA) : null;
+  return {
+    id: gmkey,
+    gmkey,
+    date: dateIso,
+    gameDate: String(raw.gameDate || ""),
+    seasonCategory: String(raw.seasonCategory || ""),
+    seasonGrade: raw.seasonGrade,
+    status: kblGameIsPlayed(raw) ? "result" : kblGameIsLive(raw) ? "playing" : "confirmed",
+    isStarted: kblTruthy(raw.isStarted),
+    isEnded: kblTruthy(raw.isEnded),
+    playingQuarter: raw.playingQuarter,
+    home: {
+      code: homeCode,
+      name: homeName,
+      score: Number.isFinite(hs) ? hs : null,
+      quarters: null,
+    },
+    away: {
+      code: awayCode,
+      name: awayName,
+      score: Number.isFinite(as) ? as : null,
+      quarters: null,
+    },
+    venue: {
+      name: raw.stadiumnameEn || raw.stadiumnameF || raw.stadiumname || "",
+    },
+    _raw: raw,
+  };
+}
+
+function kblApplyDetailQuarters(norm, detail) {
+  if (!norm || !detail) return norm;
+  const tr = detail.teamrecords || detail.teamRecords || {};
+  const homeTr = tr.home || {};
+  const awayTr = tr.away || {};
+  function sideQs(trSide) {
+    const q1 = Number(trSide.scoreq1);
+    const q2 = Number(trSide.scoreq2);
+    const q3 = Number(trSide.scoreq3);
+    const q4 = Number(trSide.scoreq4);
+    const out = {};
+    if (Number.isFinite(q1)) out.q1 = q1;
+    if (Number.isFinite(q2)) out.q2 = q2;
+    if (Number.isFinite(q3)) out.q3 = q3;
+    if (Number.isFinite(q4)) out.q4 = q4;
+    const eqs = Array.isArray(trSide.scoreeq) ? trSide.scoreeq : [];
+    eqs.forEach((v, i) => {
+      const n = Number(v);
+      if (Number.isFinite(n)) out["ot" + (i + 1)] = n;
+    });
+    return Object.keys(out).length ? out : null;
+  }
+  const hq = sideQs(homeTr);
+  const aq = sideQs(awayTr);
+  if (hq) norm.home.quarters = hq;
+  if (aq) norm.away.quarters = aq;
+  const g = detail.game || {};
+  if (g.playingQuarter != null) norm.playingQuarter = g.playingQuarter;
+  if (g.isStarted != null) norm.isStarted = kblTruthy(g.isStarted);
+  if (g.isEnded != null) norm.isEnded = kblTruthy(g.isEnded);
+  if (norm.isEnded) norm.status = "result";
+  else if (norm.isStarted) norm.status = "playing";
+  /* Prefer list scores; if missing, sum regulation quarters */
+  if (norm.home.score == null && hq && Number.isFinite(hq.q1)) {
+    norm.home.score = (hq.q1 || 0) + (hq.q2 || 0) + (hq.q3 || 0) + (hq.q4 || 0);
+    for (let i = 1; i <= 5; i++) {
+      if (hq["ot" + i] != null) norm.home.score += Number(hq["ot" + i]) || 0;
+    }
+  }
+  if (norm.away.score == null && aq && Number.isFinite(aq.q1)) {
+    norm.away.score = (aq.q1 || 0) + (aq.q2 || 0) + (aq.q3 || 0) + (aq.q4 || 0);
+    for (let i = 1; i <= 5; i++) {
+      if (aq["ot" + i] != null) norm.away.score += Number(aq["ot" + i]) || 0;
+    }
+  }
+  return norm;
+}
+
+function kblQuartersToLinescores(side) {
+  const q = side?.quarters || {};
+  const vals = [q.q1, q.q2, q.q3, q.q4];
+  const out = [];
+  for (let i = 0; i < vals.length; i++) {
+    const n = Number(vals[i]);
+    if (!Number.isFinite(n)) break;
+    out.push({ value: n });
+  }
+  for (let i = 1; i <= 5; i++) {
+    const ot = q["ot" + i];
+    if (ot == null) break;
+    const n = Number(ot);
+    if (!Number.isFinite(n)) break;
+    out.push({ value: n });
+  }
+  return out;
+}
+
+/** Map normalized KBL game → ESPN competition shape for settle/live. */
+function kblGameToEspnCompetition(g) {
+  if (!g) return null;
+  const played = kblGameIsPlayed(g) || String(g.status || "").toLowerCase() === "result";
+  const live = !played && (kblGameIsLive(g) || String(g.status || "").toLowerCase() === "playing");
+  const period = kblPlayingQuarterToPeriod(g.playingQuarter);
+  const clock = live ? String(g.playingQuarter || "").toUpperCase() || "LIVE" : "";
+  const half =
+    live &&
+    (period === 2 || period === 3) &&
+    (clock === "HALF" || /HALF|HT/i.test(String(g.playingQuarter || "")));
+  const home = g.home || {};
+  const away = g.away || {};
+  const homeScore = home.score;
+  const awayScore = away.score;
+  const homeLs = kblQuartersToLinescores(home);
+  const awayLs = kblQuartersToLinescores(away);
+  return {
+    id: String(g.id || g.gmkey || ""),
+    status: {
+      displayClock: half ? "HALF" : clock,
+      period: period || (played ? 4 : 0),
+      type: {
+        completed: !!played,
+        state: played ? "post" : live ? "in" : "pre",
+        name: played
+          ? "STATUS_FINAL"
+          : live
+            ? half
+              ? "STATUS_HALFTIME"
+              : "STATUS_IN_PROGRESS"
+            : "STATUS_SCHEDULED",
+        description: played ? "Final" : live ? (half ? "Halftime" : "In Progress") : "Scheduled",
+        shortDetail: played ? "FINAL" : live ? (half ? "HALF" : clock) : "Sched",
+      },
+    },
+    competitors: [
+      {
+        homeAway: "home",
+        id: String(home.code || ""),
+        score: homeScore != null ? String(homeScore) : "0",
+        team: {
+          id: String(home.code || ""),
+          displayName: home.name || "Home",
+          shortDisplayName: home.name || "",
+        },
+        linescores: homeLs,
+      },
+      {
+        homeAway: "away",
+        id: String(away.code || ""),
+        score: awayScore != null ? String(awayScore) : "0",
+        team: {
+          id: String(away.code || ""),
+          displayName: away.name || "Away",
+          shortDisplayName: away.name || "",
+        },
+        linescores: awayLs,
+      },
+    ],
+  };
+}
+
+async function kblProxyGet(pathAndQuery, timeoutMs) {
+  const url =
+    KBL_API_BASE.replace(/\/+$/, "") +
+    (String(pathAndQuery || "").startsWith("/") ? pathAndQuery : "/" + pathAndQuery);
+  return proxyFetch(url, timeoutMs || 20000);
+}
+
+async function fetchKblTeams() {
+  const cacheKey = "kbl:teams";
+  if (_kblCache.has(cacheKey)) {
+    const hit = _kblCache.get(cacheKey);
+    if (hit && Date.now() - (hit.ts || 0) < 6 * 60 * 60 * 1000) return hit.teams || [];
+  }
+  try {
+    const data = await kblProxyGet("/common/teamList", 20000);
+    const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
+    const teams = rows
+      .map((t) => {
+        const code = String(t.teamCode || t.tcode || t.code || "");
+        if (!code) return null;
+        const nameEn = String(t.teamNameFullEn || t.teamNameEn || "").trim();
+        const nameKo = String(t.teamNameFull || t.teamName || "").trim();
+        return {
+          code,
+          name: nameEn || nameKo || code,
+          nameEn: String(t.teamNameEn || "").trim(),
+          nameFullEn: String(t.teamNameFullEn || "").trim(),
+          nameFull: nameKo,
+          nameKo: String(t.teamName || "").trim(),
+        };
+      })
+      .filter(Boolean);
+    _kblCache.set(cacheKey, { ts: Date.now(), teams });
+    return teams;
+  } catch (e) {
+    logDebug("fetchKblTeams failed", e);
+    return [];
+  }
+}
+
+async function fetchKblTeamMap() {
+  const teams = await fetchKblTeams();
+  const map = new Map();
+  (teams || []).forEach((t) => {
+    if (t?.code) map.set(String(t.code), t);
+  });
+  return map;
+}
+
+async function fetchKblMatchList(fromDate, toDate, tcodeList, opts) {
+  const from = String(fromDate || "").replace(/\D/g, "");
+  const to = String(toDate || "").replace(/\D/g, "");
+  const tcode = tcodeList == null || tcodeList === "" ? "all" : String(tcodeList);
+  const grade = opts && opts.seasonGrade != null ? opts.seasonGrade : 1;
+  const maxAgeMs =
+    opts && Number.isFinite(Number(opts.maxAgeMs)) ? Number(opts.maxAgeMs) : 15 * 60 * 1000;
+  const cacheKey = "kbl:list:" + from + ":" + to + ":" + tcode + ":" + grade;
+  if (_kblCache.has(cacheKey)) {
+    const hit = _kblCache.get(cacheKey);
+    if (hit && Date.now() - (hit.ts || 0) < maxAgeMs) return hit.games || [];
+  }
+  const qs =
+    "/match/list?fromDate=" +
+    encodeURIComponent(from) +
+    "&toDate=" +
+    encodeURIComponent(to) +
+    "&tcodeList=" +
+    encodeURIComponent(tcode) +
+    "&seasonGrade=" +
+    encodeURIComponent(String(grade));
+  const data = await kblProxyGet(qs, 45000);
+  const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
+  _kblCache.set(cacheKey, { ts: Date.now(), games: rows });
+  return rows;
+}
+
+async function fetchKblTodayList(opts) {
+  const maxAgeMs =
+    opts && Number.isFinite(Number(opts.maxAgeMs)) ? Number(opts.maxAgeMs) : 10000;
+  const cacheKey = "kbl:today";
+  if (_kblCache.has(cacheKey)) {
+    const hit = _kblCache.get(cacheKey);
+    if (hit && Date.now() - (hit.ts || 0) < maxAgeMs) return hit.games || [];
+  }
+  const data = await kblProxyGet("/match/list/today", 15000);
+  const rows = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [];
+  _kblCache.set(cacheKey, { ts: Date.now(), games: rows });
+  return rows;
+}
+
+async function fetchKblMatchDetail(gmkey, opts) {
+  const id = String(gmkey || "");
+  if (!id) return null;
+  const maxAgeMs =
+    opts && Number.isFinite(Number(opts.maxAgeMs)) ? Number(opts.maxAgeMs) : 60 * 1000;
+  const cacheKey = "kbl:detail:" + id;
+  if (_kblCache.has(cacheKey)) {
+    const hit = _kblCache.get(cacheKey);
+    if (hit && Date.now() - (hit.ts || 0) < maxAgeMs) return hit.detail || null;
+  }
+  try {
+    const data = await kblProxyGet("/match/" + encodeURIComponent(id), 20000);
+    _kblCache.set(cacheKey, { ts: Date.now(), detail: data });
+    return data;
+  } catch (e) {
+    logDebug("fetchKblMatchDetail failed", { gmkey: id, error: String(e && e.message || e) });
+    return null;
+  }
+}
+
+async function fetchKblTeamRecord(gmkey) {
+  const id = String(gmkey || "");
+  if (!id) return null;
+  try {
+    return await kblProxyGet("/match/" + encodeURIComponent(id) + "/team-record", 20000);
+  } catch (e) {
+    logDebug("fetchKblTeamRecord failed", e);
+    return null;
+  }
+}
+
+function kblIsDomesticRegular(g) {
+  const cat = String(g?.seasonCategory || "").toUpperCase();
+  /* R = regular, P = playoff; skip EASL (EA), open matches (OM), all-star, etc. when building form */
+  if (!cat || cat === "R" || cat === "P" || cat === "PO" || cat === "PS") return true;
+  if (cat === "EA" || cat === "EASL" || cat === "OM" || cat === "AS") return false;
+  return true;
+}
+
+async function loadKblGamesForStats() {
+  const teamMap = await fetchKblTeamMap();
+  const now = new Date();
+  /* KBL season typically Oct→Apr; pull ~14 months back for last-10 + H2H depth */
+  const from = new Date(now.getTime());
+  from.setMonth(from.getMonth() - 14);
+  const to = new Date(now.getTime());
+  to.setDate(to.getDate() + 7);
+  const rows = await fetchKblMatchList(kblYmd(from), kblYmd(to), "all", {
+    seasonGrade: 1,
+    maxAgeMs: 15 * 60 * 1000,
+  });
+  const seen = new Set();
+  const out = [];
+  (rows || []).forEach((raw) => {
+    if (!kblIsDomesticRegular(raw)) return;
+    const n = kblNormalizeGame(raw, teamMap);
+    if (!n || !n.id || seen.has(n.id)) return;
+    seen.add(n.id);
+    out.push(n);
+  });
+  return out;
+}
+
+async function enrichKblGamesWithQuarters(games, limit) {
+  const list = (games || []).slice(0, Math.max(0, Number(limit) || 12));
+  const results = await Promise.all(
+    list.map(async (g) => {
+      if (g?.home?.quarters && g?.away?.quarters) return g;
+      const detail = await fetchKblMatchDetail(g.id, { maxAgeMs: 30 * 60 * 1000 });
+      if (!detail) return g;
+      return kblApplyDetailQuarters(Object.assign({}, g), detail);
+    }),
+  );
+  const byId = new Map(results.map((g) => [String(g.id), g]));
+  return (games || []).map((g) => byId.get(String(g.id)) || g);
+}
+
+function buildKblTeamStats(teamCode, allGames, requiredVenue) {
+  const tCode = String(teamCode || "");
+  if (!tCode) return null;
+  const played = (allGames || [])
+    .filter((g) => kblGameIsPlayed(g) || String(g?.status || "").toLowerCase() === "result")
+    .filter((g) => {
+      const hc = String(g?.home?.code || "");
+      const ac = String(g?.away?.code || "");
+      return hc === tCode || ac === tCode;
+    })
+    .filter((g) =>
+      typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(g?.date || g?.gameDate) : true,
+    )
+    .map((g) => {
+      const hc = String(g?.home?.code || "");
+      const isHome = hc === tCode;
+      const me = isHome ? g.home : g.away;
+      const opp = isHome ? g.away : g.home;
+      const mq = me?.quarters || {};
+      const oq = opp?.quarters || {};
+      const q1 = Number(mq.q1);
+      const q2 = Number(mq.q2);
+      const q3 = Number(mq.q3);
+      const q4 = Number(mq.q4);
+      const oq1 = Number(oq.q1);
+      const oq2 = Number(oq.q2);
+      const oq3 = Number(oq.q3);
+      const oq4 = Number(oq.q4);
+      const ms = Number(me?.score);
+      const os = Number(opp?.score);
+      return {
+        id: String(g.id || g.gmkey || ""),
+        date: g.date || g.gameDate || "",
+        venue: isHome ? "home" : "away",
+        ms,
+        os,
+        q1,
+        q2,
+        q3,
+        q4,
+        oq1,
+        oq2,
+        oq3,
+        oq4,
+        h1m: Number.isFinite(q1) && Number.isFinite(q2) ? q1 + q2 : null,
+        h1o: Number.isFinite(oq1) && Number.isFinite(oq2) ? oq1 + oq2 : null,
+        h2m: Number.isFinite(q3) && Number.isFinite(q4) ? q3 + q4 : null,
+        h2o: Number.isFinite(oq3) && Number.isFinite(oq4) ? oq3 + oq4 : null,
+        venueName: g?.venue?.name || null,
+        venueCity: null,
+        venueState: null,
+      };
+    })
+    .filter((g) => Number.isFinite(g.ms) && Number.isFinite(g.os) && g.ms > 0 && g.os > 0)
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+
+  let unique = played;
+  try {
+    let _asOf =
+      (typeof resolvePredictionAsOf === "function" && resolvePredictionAsOf(null, null)) || "";
+    if (!_asOf && typeof getCurrentFixtureMeta === "function") {
+      const _fm = getCurrentFixtureMeta();
+      _asOf = (_fm && (_fm.eventDate || _fm.predictionDate || _fm.asOf || _fm.date)) || "";
+    }
+    if (_asOf && typeof filterEventsAsOf === "function") {
+      unique = filterEventsAsOf(unique, _asOf);
+    }
+  } catch (_eAsOf) {}
+
+  const strictFiltered = requiredVenue ? unique.filter((g) => g.venue === requiredVenue) : unique;
+  const venueReliable = strictFiltered.length >= 2;
+  const chosen = (requiredVenue ? strictFiltered : unique).slice(0, 10);
+  if (chosen.length < 2) return null;
+
+  const scored = [];
+  const allowed = [];
+  const scoredDates = [];
+  const allowedDates = [];
+  const h1Scored = [];
+  const h1Allowed = [];
+  const h1ScoredDates = [];
+  const h1AllowedDates = [];
+  const h2Scored = [];
+  const h2Allowed = [];
+  const h2ScoredDates = [];
+  const h2AllowedDates = [];
+  const qS = { q1: [], q2: [], q3: [], q4: [] };
+  const qA = { q1: [], q2: [], q3: [], q4: [] };
+  const qDates = { q1: [], q2: [], q3: [], q4: [] };
+  const eventIds = [];
+
+  chosen.forEach((g) => {
+    scored.push(Math.round(g.ms));
+    allowed.push(Math.round(g.os));
+    scoredDates.push(g.date || null);
+    allowedDates.push(g.date || null);
+    eventIds.push(g.id || null);
+    if (g.h1m != null && g.h1o != null && g.h1m > 0 && g.h1o > 0) {
+      h1Scored.push(Math.round(g.h1m));
+      h1Allowed.push(Math.round(g.h1o));
+      h1ScoredDates.push(g.date || null);
+      h1AllowedDates.push(g.date || null);
+    }
+    if (g.h2m != null && g.h2o != null && Number.isFinite(g.h2m) && Number.isFinite(g.h2o)) {
+      h2Scored.push(Math.round(g.h2m));
+      h2Allowed.push(Math.round(g.h2o));
+      h2ScoredDates.push(g.date || null);
+      h2AllowedDates.push(g.date || null);
+    }
+    ["q1", "q2", "q3", "q4"].forEach((qk, qi) => {
+      const m = Number([g.q1, g.q2, g.q3, g.q4][qi]);
+      const o = Number([g.oq1, g.oq2, g.oq3, g.oq4][qi]);
+      if (!Number.isFinite(m) || !Number.isFinite(o)) return;
+      qS[qk].push(m);
+      qA[qk].push(o);
+      qDates[qk].push(g.date || null);
+    });
+  });
+
+  return {
+    scored: scored.slice(0, 10),
+    allowed: allowed.slice(0, 10),
+    scored10: scored.slice(0, 10),
+    allowed10: allowed.slice(0, 10),
+    h1Scored: h1Scored.slice(0, 10),
+    h1Allowed: h1Allowed.slice(0, 10),
+    h2Scored: h2Scored.slice(0, 10),
+    h2Allowed: h2Allowed.slice(0, 10),
+    h2ScoredDates: h2ScoredDates.slice(0, 10),
+    h2AllowedDates: h2AllowedDates.slice(0, 10),
+    eventIds: eventIds.slice(0, 10),
+    q1Scored: qS.q1.slice(0, 10),
+    q2Scored: qS.q2.slice(0, 10),
+    q3Scored: qS.q3.slice(0, 10),
+    q4Scored: qS.q4.slice(0, 10),
+    q1Allowed: qA.q1.slice(0, 10),
+    q2Allowed: qA.q2.slice(0, 10),
+    q3Allowed: qA.q3.slice(0, 10),
+    q4Allowed: qA.q4.slice(0, 10),
+    scoredDates: scoredDates.slice(0, 10),
+    ftScoredDates: scoredDates.slice(0, 10),
+    allowedDates: allowedDates.slice(0, 10),
+    ftAllowedDates: allowedDates.slice(0, 10),
+    h1ScoredDates: h1ScoredDates.slice(0, 10),
+    h1AllowedDates: h1AllowedDates.slice(0, 10),
+    q1ScoredDates: qDates.q1.slice(0, 10),
+    q2ScoredDates: qDates.q2.slice(0, 10),
+    q3ScoredDates: qDates.q3.slice(0, 10),
+    q4ScoredDates: qDates.q4.slice(0, 10),
+    ortg10: [],
+    drtg10: [],
+    pace10: [],
+    venueReliable,
+  };
+}
+
+function buildKblH2H(teamACode, teamBCode, allGames) {
+  const tA = String(teamACode || "");
+  const tB = String(teamBCode || "");
+  if (!tA || !tB) return [];
+  return (allGames || [])
+    .filter((g) => kblGameIsPlayed(g) || String(g?.status || "").toLowerCase() === "result")
+    .filter((g) => {
+      const codes = new Set([String(g?.home?.code || ""), String(g?.away?.code || "")]);
+      return codes.has(tA) && codes.has(tB);
+    })
+    .filter((g) =>
+      typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(g?.date || g?.gameDate) : true,
+    )
+    .map((g) => {
+      const hc = String(g?.home?.code || "");
+      const homeIsA = hc === tA;
+      const sideA = homeIsA ? g.home : g.away;
+      const sideB = homeIsA ? g.away : g.home;
+      const aq = sideA?.quarters || {};
+      const bq = sideB?.quarters || {};
+      const q1A = Number(aq.q1);
+      const q2A = Number(aq.q2);
+      const q3A = Number(aq.q3);
+      const q4A = Number(aq.q4);
+      const q1B = Number(bq.q1);
+      const q2B = Number(bq.q2);
+      const q3B = Number(bq.q3);
+      const q4B = Number(bq.q4);
+      return {
+        id: String(g.id || ""),
+        date: g.date || g.gameDate || "",
+        teamAId: tA,
+        teamBId: tB,
+        scoreA: Number(sideA?.score),
+        scoreB: Number(sideB?.score),
+        h1A: Number.isFinite(q1A) && Number.isFinite(q2A) ? q1A + q2A : 0,
+        h1B: Number.isFinite(q1B) && Number.isFinite(q2B) ? q1B + q2B : 0,
+        q1A: Number.isFinite(q1A) ? q1A : 0,
+        q2A: Number.isFinite(q2A) ? q2A : 0,
+        q3A: Number.isFinite(q3A) ? q3A : 0,
+        q4A: Number.isFinite(q4A) ? q4A : 0,
+        q1B: Number.isFinite(q1B) ? q1B : 0,
+        q2B: Number.isFinite(q2B) ? q2B : 0,
+        q3B: Number.isFinite(q3B) ? q3B : 0,
+        q4B: Number.isFinite(q4B) ? q4B : 0,
+      };
+    })
+    .filter((g) => Number.isFinite(g.scoreA) && Number.isFinite(g.scoreB) && g.scoreA > 0 && g.scoreB > 0)
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+}
+
+function resolveKblTeamCode(nameOrCode, clubs, allGames) {
+  const raw = String(nameOrCode || "").trim();
+  if (!raw) return null;
+  const upper = raw.toUpperCase();
+  const norm = upper.replace(/[^A-Z0-9]/g, "");
+  const normKo = raw.replace(/\s+/g, "");
+
+  const exactCode = (clubs || []).find((c) => String(c.code || "") === raw || String(c.code || "").toUpperCase() === upper);
+  if (exactCode) return String(exactCode.code);
+
+  const nameHit = (clubs || []).find((c) => {
+    const names = [c.name, c.nameEn, c.nameFullEn, c.nameFull, c.nameKo]
+      .filter(Boolean)
+      .map((n) => String(n));
+    return names.some((n) => {
+      const nU = n.toUpperCase().replace(/[^A-Z0-9]/g, "");
+      const nKo = n.replace(/\s+/g, "");
+      return (
+        nU === norm ||
+        (norm && nU && (nU.includes(norm) || norm.includes(nU))) ||
+        nKo === normKo ||
+        (normKo.length >= 2 && nKo.includes(normKo))
+      );
+    });
+  });
+  if (nameHit) return String(nameHit.code);
+
+  for (const g of allGames || []) {
+    for (const side of [g.home, g.away]) {
+      if (!side) continue;
+      const code = String(side.code || "");
+      const nU = String(side.name || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+      if (code === raw || code.toUpperCase() === upper || (norm && nU && (nU === norm || nU.includes(norm) || norm.includes(nU)))) {
+        return code;
+      }
+    }
+  }
+  return null;
+}
+
+async function findKblGameByEventId(eventId, opts) {
+  const eid = String(eventId || "");
+  if (!eid) return null;
+  const maxAgeMs = opts && Number.isFinite(Number(opts.maxAgeMs)) ? Number(opts.maxAgeMs) : 10000;
+  const teamMap = await fetchKblTeamMap();
+  try {
+    const today = await fetchKblTodayList({ maxAgeMs });
+    const hit = (today || []).find((g) => String(g?.gmkey || "") === eid);
+    if (hit) {
+      let norm = kblNormalizeGame(hit, teamMap);
+      if (kblGameIsLive(hit) || kblGameIsPlayed(hit)) {
+        const detail = await fetchKblMatchDetail(eid, { maxAgeMs });
+        if (detail) norm = kblApplyDetailQuarters(norm, detail);
+      }
+      return norm;
+    }
+  } catch (_e) {}
+  /* Windowed list search around now */
+  try {
+    const now = new Date();
+    const from = new Date(now.getTime());
+    from.setDate(from.getDate() - 20);
+    const to = new Date(now.getTime());
+    to.setDate(to.getDate() + 20);
+    const rows = await fetchKblMatchList(kblYmd(from), kblYmd(to), "all", {
+      seasonGrade: 1,
+      maxAgeMs,
+    });
+    const hit = (rows || []).find((g) => String(g?.gmkey || "") === eid);
+    if (hit) {
+      let norm = kblNormalizeGame(hit, teamMap);
+      const detail = await fetchKblMatchDetail(eid, { maxAgeMs });
+      if (detail) norm = kblApplyDetailQuarters(norm, detail);
+      return norm;
+    }
+  } catch (_e2) {}
+  /* Direct detail fallback */
+  try {
+    const detail = await fetchKblMatchDetail(eid, { maxAgeMs });
+    if (detail && detail.game) {
+      let norm = kblNormalizeGame(detail.game, teamMap);
+      return kblApplyDetailQuarters(norm, detail);
+    }
+  } catch (_e3) {}
+  return null;
+}
+
+async function fetchKblCompetitionForEvent(league, eventId) {
+  const g = await findKblGameByEventId(eventId, { maxAgeMs: 10000 });
+  return kblGameToEspnCompetition(g);
+}
+
+async function pollKblLiveForLeague(league, eventIds, signal) {
+  if (!eventIds || !eventIds.size) return false;
+  let didChange = false;
+  const teamMap = await fetchKblTeamMap();
+  let todayRows = [];
+  try {
+    todayRows = await fetchKblTodayList({ maxAgeMs: 8000 });
+  } catch (_e) {
+    todayRows = [];
+  }
+  const todayById = new Map((todayRows || []).map((g) => [String(g?.gmkey || ""), g]));
+
+  for (const eid of eventIds) {
+    if (signal && signal.aborted) break;
+    let raw = todayById.get(String(eid)) || null;
+    let norm = raw ? kblNormalizeGame(raw, teamMap) : null;
+    if (!norm) {
+      norm = await findKblGameByEventId(eid, { maxAgeMs: 8000 });
+    } else if (kblGameIsLive(raw) || kblGameIsPlayed(raw)) {
+      const detail = await fetchKblMatchDetail(eid, { maxAgeMs: 8000 });
+      if (detail) norm = kblApplyDetailQuarters(norm, detail);
+    }
+    if (!norm) continue;
+    const comp = kblGameToEspnCompetition(norm);
+    if (!comp) continue;
+    const completed = !!comp.status?.type?.completed;
+    if (completed) {
+      g_liveGameStatus.delete(String(eid));
+      didChange = true;
+      if (typeof settlePendingPicksFromCompetition === "function") {
+        if (settlePendingPicksFromCompetition(eid, comp, true)) didChange = true;
+      }
+      continue;
+    }
+    const _liveMeta = isEspnCompetitionLive(comp.status);
+    if (_liveMeta.live) {
+      const period = Number(comp.status?.period || 0);
+      const clock = _liveMeta.half ? "HALF" : String(comp.status?.displayClock || "");
+      const statusName = String(comp.status?.type?.name || "");
+      const competitors = comp.competitors || [];
+      const homeC = competitors.find((c) => c.homeAway === "home");
+      const awayC = competitors.find((c) => c.homeAway === "away");
+      const homeScore = homeC ? parseFloat(homeC.score) || 0 : null;
+      const awayScore = awayC ? parseFloat(awayC.score) || 0 : null;
+      const homeLs = (homeC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
+      const awayLs = (awayC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
+      const existing = g_liveGameStatus.get(String(eid));
+      const qScores =
+        homeLs.length && awayLs.length
+          ? { home: homeLs, away: awayLs }
+          : existing?.qScores || null;
+      if (!existing || existing.period !== period || existing.clock !== clock) {
+        g_liveGameStatus.set(String(eid), {
+          period,
+          clock,
+          statusName,
+          league,
+          capturedAt: Date.now(),
+          clockFrozen: false,
+          homeScore,
+          awayScore,
+          qScores,
+          _expiredAt: existing?._expiredAt ?? null,
+        });
+        didChange = true;
+      } else {
+        if (homeScore !== null && (existing.homeScore !== homeScore || existing.awayScore !== awayScore)) {
+          existing.homeScore = homeScore;
+          existing.awayScore = awayScore;
+          didChange = true;
+        }
+        if (qScores) existing.qScores = qScores;
+        if (!existing.clockFrozen && clock !== "HALF") {
+          existing.clockFrozen = true;
+          didChange = true;
+        }
+      }
+      if (
+        typeof settlePendingPicksFromCompetition === "function" &&
+        (_liveMeta.half || Number(period || 0) >= 2)
+      ) {
+        if (settlePendingPicksFromCompetition(eid, comp, false)) didChange = true;
+      }
+    } else if (String(comp.status?.type?.state || "") === "pre") {
+      if (g_liveGameStatus.has(String(eid))) {
+        g_liveGameStatus.delete(String(eid));
+        didChange = true;
+      }
+    }
+  }
+  return didChange;
+}
+
+async function loadFixturesKbl(league, offset, myToken, absoluteDateKey) {
+  const sel = document.getElementById("fixtureSelect");
+  const targetLocalKey = absoluteDateKey || getLocalDateKey(offset);
+  try {
+    if (myToken !== _fixtureLoadToken) return;
+    const teamMap = await fetchKblTeamMap();
+    if (myToken !== _fixtureLoadToken) return;
+
+    /* Prefer today endpoint when viewing "today"; else windowed list around target day */
+    let rows = [];
+    const todayKey = getLocalDateKey(0);
+    if (targetLocalKey === todayKey) {
+      try {
+        rows = await fetchKblTodayList({ maxAgeMs: 60 * 1000 });
+      } catch (_eToday) {
+        rows = [];
+      }
+    }
+    if (!rows.length) {
+      /* Convert local YYYYMMDD key → pad a ±1 day Seoul window so TZ edges still hit */
+      const y = Number(String(targetLocalKey).slice(0, 4));
+      const m = Number(String(targetLocalKey).slice(4, 6));
+      const d = Number(String(targetLocalKey).slice(6, 8));
+      const center = new Date(y, m - 1, d, 12, 0, 0, 0);
+      const from = new Date(center.getTime());
+      from.setDate(from.getDate() - 1);
+      const to = new Date(center.getTime());
+      to.setDate(to.getDate() + 1);
+      rows = await fetchKblMatchList(kblYmd(from), kblYmd(to), "all", {
+        seasonGrade: 1,
+        maxAgeMs: 60 * 1000,
+      });
+    }
+    if (myToken !== _fixtureLoadToken) return;
+
+    const events = (rows || [])
+      .map((raw) => kblNormalizeGame(raw, teamMap))
+      .filter((g) => {
+        if (!g?.date) return false;
+        if (!kblGameIsUpcoming(g)) return false;
+        if (getLocalDateKeyFromISO(g.date) !== targetLocalKey) return false;
+        return !!(g.home && g.away);
+      })
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    if (!events.length) {
+      sel.innerHTML = '<option value="">No upcoming matches</option>';
+      return;
+    }
+
+    sel.innerHTML = '<option value="">— Select match —</option>';
+    events.forEach((g) => {
+      const homeName = g.home?.name || "Home";
+      const awayName = g.away?.name || "Away";
+      const homeId = String(g.home?.code || "");
+      const awayId = String(g.away?.code || "");
+      const tipoff = formatFixtureTime(g.date);
+      const opt = document.createElement("option");
+      opt.value = String(g.id || g.gmkey || "");
+      opt.textContent = tipoff + " — " + homeName + " vs " + awayName;
+      opt.dataset.home = homeName;
+      opt.dataset.away = awayName;
+      opt.dataset.homeId = homeId;
+      opt.dataset.awayId = awayId;
+      opt.dataset.eventDate = g.date || "";
+      opt.dataset.eventTimestamp = "";
+      opt.dataset.venueCity = "";
+      opt.dataset.venueState = "";
+      opt.dataset.source = "korea_kbl";
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    if (myToken !== _fixtureLoadToken) return;
+    logDebug("loadFixturesKbl failed", e);
+    sel.innerHTML = '<option value="">Unable to load matches</option>';
+  }
+}
+
+async function fetchKblCore(league, teamAName, teamBName) {
+  if (typeof window.__espnCoreFetchGen !== "number") window.__espnCoreFetchGen = 0;
+  const _fetchGen = ++window.__espnCoreFetchGen;
+  const _fetchLeague = String(league || "");
+  const _nameA = String(teamAName || "").trim();
+  const _nameB = String(teamBName || "").trim();
+  const _stillValid = function (idA, idB) {
+    if (window.__espnCoreFetchGen !== _fetchGen) return false;
+    if (window.__abortSignal && window.__abortSignal.aborted) return false;
+    const curLeague =
+      (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) ||
+      _fetchLeague;
+    if (String(curLeague) !== _fetchLeague) return false;
+    const curA = String(
+      (document.getElementById("teamAName") && document.getElementById("teamAName").value) || "",
+    ).trim();
+    const curB = String(
+      (document.getElementById("teamBName") && document.getElementById("teamBName").value) || "",
+    ).trim();
+    if (curA && _nameA && curA !== _nameA) return false;
+    if (curB && _nameB && curB !== _nameB) return false;
+    if (idA != null && selectedTeamIds && selectedTeamIds.A != null && String(selectedTeamIds.A) !== String(idA))
+      return false;
+    if (idB != null && selectedTeamIds && selectedTeamIds.B != null && String(selectedTeamIds.B) !== String(idB))
+      return false;
+    return true;
+  };
+
+  try {
+    if (!_nameA || !_nameB) throw new Error("Enter both team names before fetching.");
+
+    setStatusHTML('<span class="spinner"></span>Loading KBL schedule feeds...', "loading");
+    const [allGames0, clubs] = await Promise.all([loadKblGamesForStats(), fetchKblTeams()]);
+
+    let teamAId = selectedTeamIds.A || resolveKblTeamCode(_nameA, clubs, allGames0);
+    let teamBId = selectedTeamIds.B || resolveKblTeamCode(_nameB, clubs, allGames0);
+    teamAId = teamAId ? String(teamAId) : null;
+    teamBId = teamBId ? String(teamBId) : null;
+
+    if (!teamAId) throw new Error('Can\'t find "' + _nameA + '" in KBL clubs/games.');
+    if (!teamBId) throw new Error('Can\'t find "' + _nameB + '" in KBL clubs/games.');
+    if (String(teamAId) === String(teamBId))
+      throw new Error("Team A and Team B cannot be the same team.");
+
+    selectedTeamIds.A = String(teamAId);
+    selectedTeamIds.B = String(teamBId);
+    setStatusHTML('<span class="spinner"></span>Building last-10 from KBL match list...', "loading");
+
+    /* Enrich recent games for these two teams with quarter detail (bounded). */
+    const teamGames = (allGames0 || [])
+      .filter((g) => {
+        const hc = String(g?.home?.code || "");
+        const ac = String(g?.away?.code || "");
+        return (
+          (hc === String(teamAId) || ac === String(teamAId) || hc === String(teamBId) || ac === String(teamBId)) &&
+          (kblGameIsPlayed(g) || String(g?.status || "").toLowerCase() === "result")
+        );
+      })
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+      .slice(0, 24);
+    const enrichedSlice = await enrichKblGamesWithQuarters(teamGames, 24);
+    const enrichById = new Map(enrichedSlice.map((g) => [String(g.id), g]));
+    const allGames = (allGames0 || []).map((g) => enrichById.get(String(g.id)) || g);
+
+    const selectedFixture = getSelectedFixtureOption();
+    const teamAVenue =
+      selectedFixture && String(selectedFixture.dataset.homeId || "") === String(teamAId)
+        ? "home"
+        : selectedFixture && String(selectedFixture.dataset.awayId || "") === String(teamAId)
+          ? "away"
+          : null;
+    const teamBVenue =
+      selectedFixture && String(selectedFixture.dataset.homeId || "") === String(teamBId)
+        ? "home"
+        : selectedFixture && String(selectedFixture.dataset.awayId || "") === String(teamBId)
+          ? "away"
+          : null;
+
+    const aStats = buildKblTeamStats(teamAId, allGames, null);
+    const bStats = buildKblTeamStats(teamBId, allGames, null);
+    const aVenueStats = teamAVenue ? buildKblTeamStats(teamAId, allGames, teamAVenue) : null;
+    const bVenueStats = teamBVenue ? buildKblTeamStats(teamBId, allGames, teamBVenue) : null;
+
+    if (aStats?.scored?.length) updateLeagueVolCache(league, aStats.scored, aStats.eventIds || null);
+    if (bStats?.scored?.length) updateLeagueVolCache(league, bStats.scored, bStats.eventIds || null);
+    if (aStats?.q1Scored?.length >= 2) {
+      updateTeamQuarterShapeProfile(
+        league,
+        teamAName,
+        aStats.q1Scored,
+        aStats.q2Scored,
+        aStats.q3Scored,
+        aStats.q4Scored,
+        aStats.eventIds,
+      );
+    }
+    if (bStats?.q1Scored?.length >= 2) {
+      updateTeamQuarterShapeProfile(
+        league,
+        teamBName,
+        bStats.q1Scored,
+        bStats.q2Scored,
+        bStats.q3Scored,
+        bStats.q4Scored,
+        bStats.eventIds,
+      );
+    }
+
+    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates);
+    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates);
+    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates);
+    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates);
+    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates);
+    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates);
+    ["q1", "q2", "q3", "q4"].forEach((qk) => {
+      if (aStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("A", qk, aStats[qk + "ScoredDates"]);
+      if (bStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("B", qk, bStats[qk + "ScoredDates"]);
+    });
+
+    if (!aStats && !bStats) throw new Error("No recent KBL schedule data found for these teams.");
+
+    AppState.injuries.A = defaultInjuryMeta();
+    AppState.injuries.B = defaultInjuryMeta();
+    g_fetchMeta = defaultFetchMeta();
+    hideInjuryBox("A");
+    hideInjuryBox("B");
+    clearSideFields("A");
+    clearSideFields("B");
+    clearH2HFields();
+
+    const messages = [];
+    if (!_stillValid(teamAId, teamBId)) {
+      engineDebug("fetchKblCore: stale/aborted before DOM write — skipping", {
+        gen: _fetchGen,
+        current: window.__espnCoreFetchGen,
+      });
+      return;
+    }
+
+    function _fillSide(prefix, stats, venueStats, venue, name) {
+      if (!(stats?.scored?.length > 0)) {
+        messages.push(safeText(name) + ": no data ❌");
+        return;
+      }
+      document.getElementById(prefix + "FTScored").value = stats.scored.join(",");
+      if (stats.allowed?.length > 0)
+        document.getElementById(prefix + "FTAllowed").value = stats.allowed.join(",");
+      if (venueStats?.scored?.length > 0 && document.getElementById(prefix + "FTScoredHome")) {
+        const venueSection = document.getElementById(prefix + "VenueSplitSection");
+        if (venueSection) venueSection.style.display = "block";
+        const showHome = venue === "home";
+        const showAway = venue === "away";
+        document.getElementById(prefix + "FTScoredHome").parentElement.style.display = showHome
+          ? "block"
+          : "none";
+        document.getElementById(prefix + "FTAllowedHome").parentElement.style.display = showHome
+          ? "block"
+          : "none";
+        document.getElementById(prefix + "FTScoredAway").parentElement.style.display = showAway
+          ? "block"
+          : "none";
+        document.getElementById(prefix + "FTAllowedAway").parentElement.style.display = showAway
+          ? "block"
+          : "none";
+        if (showHome) {
+          document.getElementById(prefix + "FTScoredHome").value = venueStats.scored.join(",");
+          if (venueStats.allowed?.length > 0)
+            document.getElementById(prefix + "FTAllowedHome").value = venueStats.allowed.join(",");
+        } else if (showAway) {
+          document.getElementById(prefix + "FTScoredAway").value = venueStats.scored.join(",");
+          if (venueStats.allowed?.length > 0)
+            document.getElementById(prefix + "FTAllowedAway").value = venueStats.allowed.join(",");
+        }
+      }
+      if (stats.h1Scored?.length > 0)
+        document.getElementById(prefix + "1HScored").value = stats.h1Scored.join(",");
+      if (stats.h1Allowed?.length > 0)
+        document.getElementById(prefix + "1HAllowed").value = stats.h1Allowed.join(",");
+      if (stats.h2Scored?.length > 0 && document.getElementById(prefix + "2HScored"))
+        document.getElementById(prefix + "2HScored").value = stats.h2Scored.join(",");
+      if (stats.h2Allowed?.length > 0 && document.getElementById(prefix + "2HAllowed"))
+        document.getElementById(prefix + "2HAllowed").value = stats.h2Allowed.join(",");
+      if (stats.q1Scored?.length > 0) {
+        document.getElementById(prefix + "Q1Scored").value = stats.q1Scored.join(",");
+        document.getElementById(prefix + "Q2Scored").value = stats.q2Scored.join(",");
+        document.getElementById(prefix + "Q3Scored").value = stats.q3Scored.join(",");
+        document.getElementById(prefix + "Q4Scored").value = stats.q4Scored.join(",");
+        document.getElementById(prefix + "Q1Allowed").value = stats.q1Allowed.join(",");
+        document.getElementById(prefix + "Q2Allowed").value = stats.q2Allowed.join(",");
+        document.getElementById(prefix + "Q3Allowed").value = stats.q3Allowed.join(",");
+        document.getElementById(prefix + "Q4Allowed").value = stats.q4Allowed.join(",");
+      }
+      const tag = document.getElementById(prefix === "a" ? "aAutoTag" : "bAutoTag");
+      if (tag) tag.style.display = stats.scored.length >= 8 ? "inline" : "none";
+      messages.push(safeText(name) + ": " + stats.scored.length + " games ✅");
+    }
+
+    _fillSide("a", aStats, aVenueStats, teamAVenue, teamAName);
+    _fillSide("b", bStats, bVenueStats, teamBVenue, teamBName);
+
+    g_fetchMeta.A = {
+      ft: { source: "korea_kbl", venueReliable: !!aVenueStats?.venueReliable },
+      h1: { source: "korea_kbl", venueReliable: !!aVenueStats?.venueReliable },
+    };
+    g_fetchMeta.B = {
+      ft: { source: "korea_kbl", venueReliable: !!bVenueStats?.venueReliable },
+      h1: { source: "korea_kbl", venueReliable: !!bVenueStats?.venueReliable },
+    };
+
+    setStatusHTML('<span class="spinner"></span>Scanning KBL H2H...', "loading");
+    let h2hGames = [];
+    try {
+      h2hGames = buildKblH2H(teamAId, teamBId, allGames);
+    } catch (e) {
+      logDebug("KBL H2H failed", e);
+    }
+
+    if (h2hGames.length >= 2) {
+      clearH2HFields();
+      const tA = String(teamAId);
+      const h2hA = [];
+      const h2hB = [];
+      for (const g of h2hGames.slice(0, 5)) {
+        if (String(g.teamAId) === tA) {
+          h2hA.push(g.scoreA);
+          h2hB.push(g.scoreB);
+        } else {
+          h2hA.push(g.scoreB);
+          h2hB.push(g.scoreA);
+        }
+      }
+      if (!_stillValid(teamAId, teamBId)) return;
+      document.getElementById("aFTH2H").value = h2hA.join(",");
+      document.getElementById("bFTH2H").value = h2hB.join(",");
+      syncH2HCheckbox("ft", false);
+      queueH2HCheckboxSync(false);
+      document.getElementById("h2hAutoTag").style.display = "inline";
+
+      const h2hA1H = h2hGames
+        .slice(0, 5)
+        .map((g) => (String(g.teamAId) === tA ? g.h1A : g.h1B))
+        .filter((v) => v > 0);
+      const h2hB1H = h2hGames
+        .slice(0, 5)
+        .map((g) => (String(g.teamAId) === tA ? g.h1B : g.h1A))
+        .filter((v) => v > 0);
+      if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
+        document.getElementById("a1HH2H").value = h2hA1H.join(",");
+        document.getElementById("b1HH2H").value = h2hB1H.join(",");
+        syncH2HCheckbox("h1", false);
+        queueH2HCheckboxSync(false);
+      }
+      for (let q = 1; q <= 4; q++) {
+        const key = "q" + q;
+        const h2hAQ = h2hGames
+          .slice(0, 5)
+          .map((g) => (String(g.teamAId) === tA ? g[key + "A"] : g[key + "B"]))
+          .filter((v) => v > 0);
+        const h2hBQ = h2hGames
+          .slice(0, 5)
+          .map((g) => (String(g.teamAId) === tA ? g[key + "B"] : g[key + "A"]))
+          .filter((v) => v > 0);
+        if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
+          const aEl = document.getElementById("aQ" + q + "H2H");
+          const bEl = document.getElementById("bQ" + q + "H2H");
+          if (aEl && bEl) {
+            aEl.value = h2hAQ.join(",");
+            bEl.value = h2hBQ.join(",");
+          }
+        }
+      }
+      messages.push("H2H: " + Math.min(5, h2hGames.length) + " games ✅");
+    } else {
+      messages.push("H2H: insufficient ❌");
+    }
+
+    /* Optional pace sample from latest team-record (fills nothing required for Run; best-effort). */
+    try {
+      const latestA = (aStats?.eventIds || []).find(Boolean);
+      if (latestA) {
+        const rec = await fetchKblTeamRecord(latestA);
+        if (Array.isArray(rec)) {
+          const mine = rec.find((r) => String(r?.tcode || "") === String(teamAId));
+          const pace = Number(mine?.records?.pace);
+          if (Number.isFinite(pace) && pace > 0 && typeof engineDebug === "function") {
+            engineDebug("kbl pace sample", { team: teamAId, gmkey: latestA, pace });
+          }
+        }
+      }
+    } catch (_ePace) {}
+
+    if (!_stillValid(teamAId, teamBId)) return;
+
+    if (typeof updateCardExtraLabels === "function") updateCardExtraLabels();
+    if (typeof applyAvailabilityLayer === "function") applyAvailabilityLayer();
+    if (typeof renderQualityPaceCard === "function") renderQualityPaceCard();
+
+    updateIntelligencePack(league, {
+      ftLine: parseMarketLine(document.getElementById("ftMarket")?.value || ""),
+      h1Line: parseMarketLine(document.getElementById("h1Market")?.value || ""),
+      aLine: parseMarketLine(document.getElementById("teamAMarket")?.value || ""),
+      bLine: parseMarketLine(document.getElementById("teamBMarket")?.value || ""),
+    });
+
+    const fetchAuditIssues = typeof buildFetchAuditIssues === "function"
+      ? buildFetchAuditIssues({
+          league,
+          teamAName,
+          teamBName,
+          aStats,
+          bStats,
+          h2hGames,
+        })
+      : [];
+    setFetchAuditIssues(fetchAuditIssues);
+
+    const aGameCount = Math.min(aStats?.scored?.length || 0, aStats?.allowed?.length || 0);
+    const bGameCount = Math.min(bStats?.scored?.length || 0, bStats?.allowed?.length || 0);
+    const allGood = aGameCount >= 5 && bGameCount >= 5;
+
+    if (allGood) {
+      g_lastFetchedTeams.A = normalizeTeamName(teamAName);
+      g_lastFetchedTeams.B = normalizeTeamName(teamBName);
+      updateSectionLocks();
+    } else {
+      const missingMsg =
+        "⚠️ FETCH INCOMPLETE: " +
+        safeText(teamAName) +
+        " has only " +
+        aGameCount +
+        " games, " +
+        safeText(teamBName) +
+        " has " +
+        bGameCount +
+        " games. Full model requires 5 each. Some markets will be NO PLAY. Click \"Fetch Stats\" again if data looks wrong.";
+      if (!fetchAuditIssues.includes(missingMsg)) fetchAuditIssues.push(missingMsg);
+      setFetchAuditIssues(fetchAuditIssues);
+      if (!messages.includes(missingMsg)) messages.push(missingMsg);
+    }
+
+    const compactFetchStatus = buildCompactFetchStatus(messages, fetchAuditIssues);
+    const statusClass = allGood && !fetchAuditIssues.length ? "ok" : "err";
+    setStatusHTML(
+      compactFetchStatus ? '<div style="font-weight:bold;">' + compactFetchStatus + "</div>" : "",
+      statusClass,
+    );
+    const _last10Issues = applyLast10SeriesAlert();
+    if (_last10Issues.length) {
+      setStatusText("⚠ Last-10 short: " + _last10Issues.length + " field(s) not 10 games.", "err");
+    }
+  } catch (e) {
+    logDebug("fetchKblCore failed", e);
+    setStatusText("❌ KBL fetch failed: " + (e?.message || String(e)), "err");
+  }
+}
+
 async function loadFixtures(offsetOrDate = 0) {
   const myToken = ++_fixtureLoadToken;
   const league = document.getElementById("leagueSelect")?.value || "";
@@ -30390,6 +31429,8 @@ async function loadFixtures(offsetOrDate = 0) {
 
   if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
     await loadFixturesEuroleague(league, offset, myToken, absoluteDateKey);
+  } else if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
+    await loadFixturesKbl(league, offset, myToken, absoluteDateKey);
   } else if (isEspnAutoFetchLeague(league)) {
     await loadFixturesESPN(league, offset, myToken, absoluteDateKey);
   } else {
@@ -30643,6 +31684,8 @@ async function fetchESPN() {
 
   if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
     await fetchEuroleagueCore(league, teamAName, teamBName);
+  } else if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
+    await fetchKblCore(league, teamAName, teamBName);
   } else {
     await fetchESPNCore(league, teamAName, teamBName);
   }
@@ -34300,7 +35343,7 @@ function buildTrackedPickPayload({
     ? !isAutoFetchLeague(league)
     : typeof isEspnAutoFetchLeague === "function"
       ? !isEspnAutoFetchLeague(league)
-      : !["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl", "euroleague", "eurocup"].includes(league);
+      : !["nba", "wnba", "wnba_pre", "ncaa", "ncaaw", "nba_gl", "nba_summer", "ausnbl", "euroleague", "eurocup", "korea_kbl"].includes(league);
 
   if (!fixtureMeta.eventDate) {
     fixtureMeta.eventDate = "";
@@ -34549,17 +35592,7 @@ function buildTrackedPickPayload({
   if (!isActualPlay && !isTrackableNoPlay) return null;
 
   const marketKey = pickRow.marketKey;
-  let side = getPickSideFromText(pickRow.pick) || getPickSideFromText(pickRow.displayPick);
-  if ((!side || side === "exotic") && (marketKey === "winner" || marketKey === "moneyline")) {
-    const rawPick = String(pickRow.pick || pickRow.displayPick || pickRow.bufferedPickText || "").toUpperCase();
-    const homeN = String((originalFixtureMeta && originalFixtureMeta.homeTeam) || "").toUpperCase();
-    const awayN = String((originalFixtureMeta && originalFixtureMeta.awayTeam) || "").toUpperCase();
-    if (rawPick.indexOf("HOME") === 0) side = "home";
-    else if (rawPick.indexOf("AWAY") === 0) side = "away";
-    else if (homeN && rawPick.indexOf(homeN) !== -1) side = "home";
-    else if (awayN && rawPick.indexOf(awayN) !== -1) side = "away";
-    else side = "home";
-  }
+  let side = getPickSideFromText(pickRow.pick);
   if (!side) {
     if (isExoticNoLine) side = "exotic";
     else if (pickRow.pick === "NO PLAY") {
@@ -34788,14 +35821,9 @@ function buildTrackedPickPayload({
     fixtureLabel: `${fixtureMeta.homeTeam && fixtureMeta.homeTeam !== "—" ? fixtureMeta.homeTeam : "A"} vs ${fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—" ? fixtureMeta.awayTeam : "B"}`,
     marketKey,
     marketName: (pickRow.name || "Other").split("<")[0].trim(),
-    pick: String(pickRow.pick || pickRow.displayPick || pickRow.bufferedPickText || "").trim(),
     projection: isFinite(pickRow.proj) ? Number(pickRow.proj) : null,
-    line: (marketKey === "winner" || marketKey === "moneyline")
-      ? (Number.isFinite(Number(trackedLine)) ? Number(trackedLine) : 0)
-      : trackedLine,
-    lineAtPick: (marketKey === "winner" || marketKey === "moneyline")
-      ? (Number.isFinite(Number(trackedLine)) ? Number(trackedLine) : 0)
-      : trackedLine,
+    line: trackedLine,
+    lineAtPick: trackedLine,
     closingLine: null,
     clv: null,
     decisionLine: isFinite(pickRow.decisionLine)
@@ -35693,13 +36721,6 @@ async function runEngine() {
   acknowledgeGlobalEngineAlert();
   renderEngineDebugPanel();
   if (runBtn) runBtn.disabled = true;
-  if (window.__bbRunWatchdog) clearTimeout(window.__bbRunWatchdog);
-  window.__bbRunWatchdog = setTimeout(function () {
-    window.__engineRunInProgress = false;
-    const rb = document.getElementById("runBtn");
-    if (rb) rb.disabled = false;
-    if (typeof engineDebug === "function") engineDebug("run watchdog released the Run button");
-  }, 20000);
   const _last10BeforeRun = typeof applyLast10SeriesAlert === "function" ? applyLast10SeriesAlert() : [];
   function _countSeries(id) {
     const el = document.getElementById(id);
@@ -35739,16 +36760,10 @@ async function runEngine() {
   });
 
   try {
-    const _localState = await withStorageTimeout(loadTrackerStateFromLocal(), 2000, null);
+    const _localState = await loadTrackerStateFromLocal();
     if (_localState) {
-      try {
-        const _merged = mergeTrackerStates(g_trackerState, _localState);
-        normalizeTrackerState(_merged);
-      } catch (_mergeErr) {
-        engineDebug("runEngine: tracker prime merge skipped", {
-          error: String(_mergeErr && _mergeErr.message ? _mergeErr.message : _mergeErr),
-        });
-      }
+      const _merged = mergeTrackerStates(g_trackerState, _localState);
+      normalizeTrackerState(_merged);
     }
 
     engineDebug("tracker primed for run", {
@@ -38705,59 +39720,34 @@ async function runEngine() {
     });
 
     if (persistableTrackedPicks.length) {
-      // Persistence must never abort a finished prediction. Save best-effort.
-      try {
+      // Prediction persistence is a correctness requirement, not a best-effort
+      // debounce. Await the local write before allowing the run to finish, then
+      // flush the same state to the remote tracker when configured.
       await addTrackedPicks(persistableTrackedPicks);
       await forceTrackerSaveNow(persistableTrackedPicks);
 
       // Hard persistence coverage gate: every actionable prediction selected for tracking
       // must exist in the authoritative persisted tracker state before the Run is allowed
       // to complete. Intentional NO PLAY/shadow rows are never part of this denominator.
-      let persistedPickKeys = getPersistedTrackerCoverageKeys(g_trackerState);
-      const coverageMatch = function (p) {
-        return typeof pickCoveredInTrackerState === "function"
-          ? pickCoveredInTrackerState(p, persistedPickKeys)
-          : persistedPickKeys.has(makeTrackerActiveMergeKey(p) || makeTrackedSignature(p));
-      };
-      let missingTracked = persistableTrackedPicks.filter((p) => !coverageMatch(p));
-      if (missingTracked.length) {
-        try {
-          const _retry = repairMissingTrackerCoverage(persistableTrackedPicks);
-          if (_retry && _retry.repaired > 0) {
-            await saveTrackerStateToLocal();
-          }
-        } catch (_covRetry) {}
-        persistedPickKeys = getPersistedTrackerCoverageKeys(g_trackerState);
-        missingTracked = persistableTrackedPicks.filter((p) => !coverageMatch(p));
-      }
-      const deletedSigs = Array.isArray(g_trackerState && g_trackerState.deletedSignatures)
-        ? g_trackerState.deletedSignatures
-        : [];
-      const blockedDeleted = missingTracked.filter(function (p) {
-        return typeof isPickDeleted === "function" && isPickDeleted(ensureTrackedPickKeys(p), deletedSigs);
+      const persistedPickKeys = getPersistedTrackerCoverageKeys(g_trackerState);
+      const missingTracked = persistableTrackedPicks.filter((p) => {
+        const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+        return k && !persistedPickKeys.has(k);
       });
-      missingTracked = missingTracked.filter(function (p) {
-        return !(typeof isPickDeleted === "function" && isPickDeleted(ensureTrackedPickKeys(p), deletedSigs));
-      });
-      const persistedCount = persistableTrackedPicks.length - missingTracked.length - blockedDeleted.length;
+      const persistedCount = persistableTrackedPicks.length - missingTracked.length;
       engineDebug("tracker persistence coverage verification", {
         expectedActionable: persistableTrackedPicks.length,
         persistedActionable: persistedCount,
         missingActionableIds: missingTracked.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
-        blockedByDeletion: blockedDeleted.map((p) => makeTrackerActiveMergeKey(p) || makeTrackedSignature(p)),
         intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
       });
       if (missingTracked.length) {
         const missingSummary = missingTracked
           .map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`)
           .join(", ");
-        /* Do not abort a finished prediction run because a moneyline/no-line
-           tracker row failed to re-key after save. Results stay on screen;
-           the miss is logged for Debug. */
-        engineDebug("tracker persistence coverage incomplete — run continues", {
-          missing: missingSummary,
-          blockedByDeletion: blockedDeleted.length,
-        });
+        throw new Error(
+          `Tracker persistence coverage failure: ${missingTracked.length}/${persistableTrackedPicks.length} actionable predictions missing after verified save. ${missingSummary}`,
+        );
       }
       engineDebug("tracked picks durably saved", {
         persistableTrackedPicks: persistableTrackedPicks.length,
@@ -38765,11 +39755,6 @@ async function runEngine() {
         intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
         trackerStateAfterSave: getTrackerStateDebugScore(g_trackerState),
       });
-      } catch (_persistErr) {
-        engineDebug("tracker save failed after predictions — results kept on screen", {
-          error: String(_persistErr && _persistErr.message ? _persistErr.message : _persistErr),
-        });
-      }
     } else if (actionablePicks.length) {
       // There were actionable output rows but none could be converted into a Tracker
       // payload. Keep the failure visible in the debug panel only; do not contaminate
@@ -38826,25 +39811,17 @@ async function runEngine() {
       stack: err?.stack || "no stack",
     });
     if (table) {
-      const _hasPickRows = table.querySelectorAll("tr").length > 1;
-      if (!_hasPickRows) {
-        table.innerHTML =
-          "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
-        table.style.display = "table";
-        showRunError(table, "NO RESULTS — Run failed — see Debug");
-      } else {
-        engineDebug("run failed after results were drawn — table left intact", {
-          error: String(err && err.message ? err.message : err),
-        });
-      }
+      table.innerHTML =
+        "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
+      table.style.display = "table";
+      showRunError(table, "NO RESULTS — Run failed — see Debug");
     }
     setStatusText("Run failed — see Debug", "err");
+    // Internal engine errors belong in the debug/error surfaces, not underneath the
+    // prediction output table. Only the neutral NO RESULTS state is user-facing.
+    throw err;
   } finally {
     window.__engineRunInProgress = false;
-    if (window.__bbRunWatchdog) {
-      clearTimeout(window.__bbRunWatchdog);
-      window.__bbRunWatchdog = null;
-    }
     MODEL_TUNING.recencyWeights = _savedRecencyWeights;
     engineDebug("run finally", { trackerState: getTrackerStateDebugScore(g_trackerState) });
     if (runBtn) runBtn.disabled = false;
@@ -39398,23 +40375,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
   if (fetchBtn) fetchBtn.addEventListener("click", withErrorBoundary(fetchESPN, "fetchESPN"));
 
   const runBtn = document.getElementById("runBtn");
-  if (runBtn) {
-    const _boundedRun = withErrorBoundary(runEngine, "runEngine");
-    let _runTapAt = 0;
-    runBtn.addEventListener("click", function (ev) {
-      if (Date.now() - _runTapAt < 800) {
-        if (ev && ev.preventDefault) ev.preventDefault();
-        return;
-      }
-      return _boundedRun();
-    });
-    runBtn.addEventListener("touchend", function (ev) {
-      if (runBtn.disabled) return;
-      _runTapAt = Date.now();
-      if (ev && ev.preventDefault) ev.preventDefault();
-      return _boundedRun();
-    }, { passive: false });
-  }
+  if (runBtn) runBtn.addEventListener("click", withErrorBoundary(runEngine, "runEngine"));
 
   const clearBtn = document.getElementById("clearBtn");
   if (clearBtn) clearBtn.addEventListener("click", clearAll);
@@ -49595,13 +50556,11 @@ function copyTrackerData() {
     if (typeof copyTextToClipboard === "function") copyTextToClipboard("TRACKER STATE UNAVAILABLE");
     return "TRACKER STATE UNAVAILABLE";
   }
-  const all = (typeof getCanonicalTrackedPicks === "function"
-    ? getCanonicalTrackedPicks()
-    : [
-        ...(Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : []),
-        ...(Array.isArray(g_trackerState?.archivedPicks) ? g_trackerState.archivedPicks : []),
-      ].map((p) => ensureTrackedPickKeys(p))
-  ).sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a));
+  const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
+  const archived = Array.isArray(g_trackerState?.archivedPicks) ? g_trackerState.archivedPicks : [];
+  const all = [...active, ...archived]
+    .map((p) => ensureTrackedPickKeys(p))
+    .sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a));
 
   const stats = g_trackerState?.stats || {};
   const settled = Number(stats.settled || 0);
