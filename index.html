@@ -1,3 +1,4 @@
+S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -3434,7 +3435,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
             flex-shrink: 0;
             cursor: pointer;
           "
-          title="Search basketball team"
+          title="Search & load team in-page (SofaScore)"
         >
           🔍
         </button>
@@ -3484,7 +3485,15 @@ const BB_LOCK_REGISTRY = Object.freeze([
         <a id="ssTeamALink1" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p1</a>
         <a id="ssTeamALink2" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p2</a>
         <a id="ssTeamALink3" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p3</a>
+        <button
+          type="button"
+          id="ssLoadLastA"
+          onclick="ssLoadLastGamesById('A')"
+          title="Load last games for Team A ID (skip search)"
+          style="background:#2a5a3a;color:#fff;border:none;margin:0;padding:4px 8px;font-size:10px;font-weight:800;cursor:pointer;flex-shrink:0;line-height:1;white-space:nowrap;"
+        >Load last games</button>
       </div>
+      <div id="ssPickListA" style="display:none;margin-top:6px;max-height:160px;overflow:auto;border:1px solid var(--panel-border);border-radius:4px;background:var(--input-bg);"></div>
     </div>
 
     <div
@@ -3532,7 +3541,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
             flex-shrink: 0;
             cursor: pointer;
           "
-          title="Search basketball team"
+          title="Search & load team in-page (SofaScore)"
         >
           🔍
         </button>
@@ -3621,7 +3630,15 @@ const BB_LOCK_REGISTRY = Object.freeze([
           "
           >🔗 p3</a
         >
+        <button
+          type="button"
+          id="ssLoadLastB"
+          onclick="ssLoadLastGamesById('B')"
+          title="Load last games for Team B ID (skip search)"
+          style="background:#2a5a3a;color:#fff;border:none;margin:0;padding:4px 8px;font-size:10px;font-weight:800;cursor:pointer;flex-shrink:0;line-height:1;white-space:nowrap;"
+        >Load last games</button>
       </div>
+      <div id="ssPickListB" style="display:none;margin-top:6px;max-height:160px;overflow:auto;border:1px solid var(--panel-border);border-radius:4px;background:var(--input-bg);"></div>
     </div>
 
     <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--panel-border)">
@@ -5449,12 +5466,12 @@ function updateSofascoreLinks(side) {
   const idVal = idInput.value.trim();
   const prefix = side === "A" ? "ssTeamALink" : "ssTeamBLink";
   if (idVal && /^\d+$/.test(idVal)) {
-    linkEl.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/0";
+    linkEl.href = "https://www.sofascore.com/api/v1/team/" + idVal + "/events/last/0";
     linkEl.style.display = "inline-block";
     for (let p = 1; p <= 3; p++) {
       const el = document.getElementById(prefix + p) || document.getElementById("ssTeam" + side + "Link" + p);
       if (el) {
-        el.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/" + p;
+        el.href = "https://www.sofascore.com/api/v1/team/" + idVal + "/events/last/" + p;
         el.style.display = "inline-block";
       }
     }
@@ -5463,7 +5480,7 @@ function updateSofascoreLinks(side) {
       ["ssTeamBLink1", "ssTeamBLink2", "ssTeamBLink3"].forEach(function (id, idx) {
         const el = document.getElementById(id);
         if (el) {
-          el.href = "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/" + (idx + 1);
+          el.href = "https://www.sofascore.com/api/v1/team/" + idVal + "/events/last/" + (idx + 1);
           el.style.display = "inline-block";
         }
       });
@@ -5477,29 +5494,503 @@ function updateSofascoreLinks(side) {
   }
 }
 
-function searchSofascorePlayer(side) {
+/* Sofa one-tap: prefer www.sofascore.com/api (Chrome-OK); then api.* hosts */
+const SS_API_BASES = ["https://www.sofascore.com", "https://api.sofascore.com", "https://api.sofascore.app"];
+
+function ssSofaSearchUrl(query, base) {
+  return (
+    String(base || SS_API_BASES[0]).replace(/\/+$/, "") +
+    "/api/v1/search/teams?q=" +
+    encodeURIComponent(query) +
+    "&sport=basketball"
+  );
+}
+
+function ssSofaLastEventsUrl(teamId, page, base) {
+  return (
+    String(base || SS_API_BASES[0]).replace(/\/+$/, "") +
+    "/api/v1/team/" +
+    encodeURIComponent(String(teamId)) +
+    "/events/last/" +
+    String(page)
+  );
+}
+
+function ssIsSofaChallengeError(err) {
+  const m = String((err && err.message) || err || "").toLowerCase();
+  if (!m) return false;
+  if (/challenge/.test(m)) return true;
+  if (/\b403\b/.test(m) && (/sofa|directsofa|worker|forbidden|bot/.test(m) || true)) return /\b403\b/.test(m);
+  return false;
+}
+
+function ssSofaBlockedStatus(side, kind) {
+  const who = side ? " for " + side : "";
+  if (kind === "events") {
+    return (
+      "⚠ Sofa blocked the in-page fetch (bot challenge)" +
+      who +
+      ". Tab fallback opened — paste /events/last/0 JSON still works."
+    );
+  }
+  return (
+    "⚠ Sofa blocked the in-page fetch (bot challenge)" +
+    who +
+    ". Tab fallback opened — paste search JSON or team /events/last/0 still works."
+  );
+}
+
+function ssHidePickList(side) {
+  const el = document.getElementById(side === "A" ? "ssPickListA" : "ssPickListB");
+  if (!el) return;
+  el.style.display = "none";
+  el.innerHTML = "";
+}
+
+function ssRankSearchTeams(teams, leagueKey) {
+  const listIn = Array.isArray(teams) ? teams.slice() : [];
+  if (!listIn.length) return [];
+  const wantWomen = typeof isWomenLeagueKey === "function" && isWomenLeagueKey(leagueKey);
+  const youthRe = /esport|e-sport|e sport|cyber|u16|u17|u18|u19|u20|u21|youth|junior|academy/i;
+  let list = listIn.filter(function (t) {
+    return !youthRe.test((t.name || "") + " " + (t.slug || ""));
+  });
+  if (!list.length) list = listIn.slice();
+  const gendered = list.filter(function (t) {
+    if (!t.gender) return true;
+    return wantWomen ? t.gender === "F" : t.gender === "M";
+  });
+  if (gendered.length) list = gendered;
+  list.sort(function (a, b) {
+    return (b.userCount || 0) - (a.userCount || 0) || (b.score || 0) - (a.score || 0);
+  });
+  return list;
+}
+
+function ssIsConfidentTeamPick(ranked, queryName) {
+  if (!ranked || !ranked.length) return false;
+  if (ranked.length === 1) return true;
+  const top = ranked[0];
+  const second = ranked[1];
+  const q = String(queryName || "").trim().toLowerCase();
+  const topName = String(top.name || "").trim().toLowerCase();
+  if (q && topName && (topName === q || topName.indexOf(q) === 0 || q.indexOf(topName) === 0)) {
+    const topUC = Number(top.userCount || 0);
+    const secUC = Number(second && second.userCount || 0);
+    if (topUC >= secUC * 1.5 || topUC >= 100) return true;
+  }
+  const topUC = Number(top.userCount || 0);
+  const secUC = Number(second && second.userCount || 0);
+  if (topUC > 0 && topUC >= Math.max(80, secUC * 2.5)) return true;
+  return false;
+}
+
+function ssShowPickList(side, teams, queryName) {
+  const el = document.getElementById(side === "A" ? "ssPickListA" : "ssPickListB");
+  const st = document.getElementById("ssFetchStatus");
+  if (!el) return;
+  el.innerHTML = "";
+  const header = document.createElement("div");
+  header.style.cssText =
+    "padding:4px 8px;font-size:10px;font-weight:800;color:var(--muted);border-bottom:1px solid var(--panel-border);";
+  header.textContent = "Pick team " + side + (queryName ? ' for "' + queryName + '"' : "") + ":";
+  el.appendChild(header);
+  (teams || []).slice(0, 12).forEach(function (t) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.style.cssText =
+      "display:block;width:100%;text-align:left;background:transparent;border:none;border-bottom:1px solid var(--panel-border);color:var(--text);padding:6px 8px;font-size:11px;cursor:pointer;";
+    const meta = [];
+    if (t.country) meta.push(t.country);
+    if (t.gender) meta.push(t.gender);
+    if (t.userCount) meta.push(t.userCount + " fans");
+    btn.textContent = (t.name || "Team") + " · ID " + t.id + (meta.length ? " · " + meta.join(" · ") : "");
+    btn.title = "Load " + (t.name || t.id);
+    btn.addEventListener("click", function () {
+      ssHidePickList(side);
+      ssLoadTeamFromOneTapPick(side, t);
+    });
+    el.appendChild(btn);
+  });
+  el.style.display = "block";
+  if (st) {
+    st.style.color = "#d98a00";
+    st.textContent =
+      "Several teams matched for " +
+      side +
+      " — tap one below (or paste search JSON as fallback).";
+  }
+}
+
+function ssTryAutoFillTournamentBonus() {
+  try {
+    const leagueSelect = document.getElementById("leagueSelect")?.value || "";
+    const tidEl = document.getElementById("ssTournamentId");
+    const tNameEl = document.getElementById("ssTournamentName");
+    const mapped =
+      typeof getSofaUniqueTournamentIdForLeague === "function"
+        ? getSofaUniqueTournamentIdForLeague(leagueSelect)
+        : null;
+    if (mapped) {
+      window.__fixtureTournamentId = mapped;
+      if (tidEl && !String(tidEl.value || "").trim()) tidEl.value = mapped;
+      if (tNameEl && !String(tNameEl.textContent || "").trim()) {
+        const sel = document.getElementById("leagueSelect");
+        const lab =
+          sel && sel.selectedIndex >= 0
+            ? sel.options[sel.selectedIndex]?.text || leagueSelect
+            : leagueSelect;
+        tNameEl.textContent = "(" + lab + " · locked to selected league)";
+      }
+      return;
+    }
+    if (typeof getFixtureTournamentId === "function" && getFixtureTournamentId() != null) return;
+    const evA = window.__lastEventsA || [];
+    const evB = window.__lastEventsB || [];
+    if (!evA.length || !evB.length) return;
+    if (typeof detectTournamentIdIntersection !== "function") return;
+    const candidates = detectTournamentIdIntersection(evA, evB);
+    if (!candidates.length) return;
+    const best = candidates[0];
+    window.__fixtureTournamentId = best.id;
+    if (tidEl && !String(tidEl.value || "").trim()) tidEl.value = best.id;
+    if (tNameEl) {
+      tNameEl.textContent = best.name
+        ? "(" + best.name + (candidates.length > 1 ? " · override if wrong" : "") + ")"
+        : "";
+    }
+  } catch (_eBonus) {
+    if (typeof reportSoftFailure === "function") reportSoftFailure("ssTryAutoFillTournamentBonus", _eBonus);
+  }
+}
+
+async function ssProxyFetchSofaFirst(urlBuilder, timeoutMs) {
+  /* Try each Sofa API host via proxyFetch; return first success. */
+  let lastErr = null;
+  for (let i = 0; i < SS_API_BASES.length; i++) {
+    const url = urlBuilder(SS_API_BASES[i]);
+    try {
+      return await proxyFetch(url, timeoutMs || 12000);
+    } catch (e) {
+      lastErr = e;
+      if (typeof reportSoftFailure === "function") {
+        reportSoftFailure("ssProxyFetchSofaFirst/" + SS_API_BASES[i], e);
+      }
+    }
+  }
+  throw lastErr || new Error("Sofa fetch failed on all hosts");
+}
+
+async function ssLoadTeamFromOneTapPick(side, picked) {
+  const st = document.getElementById("ssFetchStatus");
+  if (!picked || picked.id == null) {
+    if (st) {
+      st.style.color = "#d92d2a";
+      st.textContent = "❌ No team selected for " + side + ".";
+    }
+    return;
+  }
   const nameEl = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
+  const idEl = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
   const mainEl = document.getElementById(side === "A" ? "teamAName" : "teamBName");
+  const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
+  if (nameEl) nameEl.value = picked.name || nameEl.value;
+  if (mainEl && picked.name) mainEl.value = picked.name;
+  if (idEl) idEl.value = String(picked.id);
+  if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
+  if (st) {
+    st.style.color = "#d98a00";
+    st.textContent =
+      "⏳ Loading last games for " +
+      (picked.name || "team") +
+      " (" +
+      picked.id +
+      ")…";
+  }
+  let events = [];
+  let eventsErr = null;
+  try {
+    events = await ssFetchTeamLastEvents(picked.id);
+  } catch (_eFetch) {
+    eventsErr = _eFetch;
+    if (typeof reportSoftFailure === "function") reportSoftFailure("ssLoadTeamFromOneTapPick", _eFetch);
+    events = [];
+  }
+  if (!events.length) {
+    const tabUrl = ssSofaLastEventsUrl(picked.id, 0, SS_API_BASES[0]);
+    try {
+      window.open(tabUrl, "_blank");
+    } catch (_eOpen) {}
+    if (st) {
+      st.style.color = "#d98a00";
+      if (eventsErr) {
+        st.textContent = ssSofaBlockedStatus(side, "events");
+      } else {
+        st.textContent =
+          "✅ Team locked: " +
+          (picked.name || "") +
+          " (" +
+          picked.id +
+          "). No last-events returned — tab opened; paste /events/last/0 as fallback.";
+      }
+    }
+    ssTryAutoFillTournamentBonus();
+    return;
+  }
+  if (pasteEl) {
+    try {
+      pasteEl.value = JSON.stringify({ events: events });
+    } catch (_eStr) {
+      pasteEl.value = "";
+    }
+  }
+  if (typeof parseSofascoreIndividual === "function") {
+    await parseSofascoreIndividual(side);
+  }
+  ssTryAutoFillTournamentBonus();
+  if (st) {
+    st.style.color = "#2f8f4a";
+    st.textContent =
+      "✅ Team " +
+      side +
+      " one-tap loaded: " +
+      (picked.name || "") +
+      " (" +
+      picked.id +
+      ") — last games in.";
+  }
+}
+
+async function ssLoadLastGamesById(side) {
+  const key = side === "A" ? "A" : "B";
+  const idEl = document.getElementById(key === "A" ? "ssTeamAId" : "ssTeamBId");
+  const nameEl = document.getElementById(key === "A" ? "ssTeamAName" : "ssTeamBName");
+  const mainEl = document.getElementById(key === "A" ? "teamAName" : "teamBName");
+  const st = document.getElementById("ssFetchStatus");
+  const idVal = String((idEl && idEl.value) || "").trim();
+  if (!/^\d+$/.test(idVal)) {
+    if (st) {
+      st.style.color = "#d92d2a";
+      st.textContent = "❌ Enter a numerical Team " + key + " ID first, then Load last games.";
+    }
+    return;
+  }
+  const nm = String((nameEl && nameEl.value) || (mainEl && mainEl.value) || "").trim() || ("Team " + idVal);
+  await ssLoadTeamFromOneTapPick(key, { id: idVal, name: nm });
+}
+
+
+async function ssBridgePollSearch(query, timeoutMs) {
+  /* Poll local ingest bridge (extension POSTs when www.sofascore.com/api tab loads JSON). */
+  const q = String(query || "").trim();
+  const deadline = Date.now() + (Number(timeoutMs) || 45000);
+  const url = "http://127.0.0.1:8877/poll/search?q=" + encodeURIComponent(q);
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (res.ok) {
+        const j = await res.json();
+        if (j && !j.error && Array.isArray(j.results)) return j;
+      }
+    } catch (_e) {}
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+async function ssBridgeRequestFetch(apiUrl, kind, meta) {
+  try {
+    const res = await fetch("http://127.0.0.1:8877/request/fetch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: apiUrl,
+        kind: kind || "events",
+        meta: meta || {},
+      }),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data && data.id ? data.id : null;
+  } catch (_e) {
+    return null;
+  }
+}
+
+async function ssBridgeEnsureSofaTab() {
+  try {
+    window.open("https://www.sofascore.com/", "_blank");
+  } catch (_e) {}
+}
+
+async function ssBridgePollResult(jobId, timeoutMs) {
+  const deadline = Date.now() + (Number(timeoutMs) || 45000);
+  const url =
+    "http://127.0.0.1:8877/poll/result?id=" + encodeURIComponent(String(jobId || ""));
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.ok && data.body) return data.body;
+        if (data && data.ok === false) return null;
+      }
+    } catch (_e) {}
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+async function ssBridgePollEvents(teamId, page, timeoutMs) {
+  /* Queue a same-origin fetch job for the extension on www.sofascore.com, then poll. */
+  const id = String(teamId || "").trim();
+  const pg = String(page || 0);
+  const apiUrl = ssSofaLastEventsUrl(id, pg, "https://www.sofascore.com");
+  const jobId = await ssBridgeRequestFetch(apiUrl, "events", {
+    teamId: id,
+    page: pg,
+    kind: "events",
+  });
+  await ssBridgeEnsureSofaTab();
+  if (jobId) {
+    const viaJob = await ssBridgePollResult(jobId, timeoutMs);
+    if (viaJob && Array.isArray(viaJob.events)) return viaJob;
+  }
+  const deadline = Date.now() + Math.min(Number(timeoutMs) || 20000, 20000);
+  const url =
+    "http://127.0.0.1:8877/poll/events?teamId=" +
+    encodeURIComponent(id) +
+    "&page=" +
+    encodeURIComponent(pg);
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, { cache: "no-store" });
+      if (res.ok) {
+        const j = await res.json();
+        if (j && !j.error && Array.isArray(j.events)) return j;
+      }
+    } catch (_e) {}
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return null;
+}
+
+async function searchSofascorePlayer(side) {
+  const key = side === "A" ? "A" : "B";
+  const nameEl = document.getElementById(key === "A" ? "ssTeamAName" : "ssTeamBName");
+  const mainEl = document.getElementById(key === "A" ? "teamAName" : "teamBName");
   const rawName = (nameEl?.value || mainEl?.value || "").trim();
+  const st = document.getElementById("ssFetchStatus");
+  ssHidePickList(key);
   if (!rawName) {
     alert("Enter a player/team name first.");
     return;
   }
-  const searchName = rawName.split(",")[0].trim();
+  try {
+    const _lgSel =
+      (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
+    const _lg = String(_lgSel || "").toLowerCase();
+    if (_lg === "ncaa" || _lg === "ncaaw") {
+      if (st) {
+        st.style.color = "#d92d2a";
+        st.textContent =
+          "❌ NCAA/NCAAW use ESPN auto-fetch only — Sofa search is disabled for this league.";
+      }
+      return;
+    }
+  } catch (_ncaaGate) {}
 
-  const searchUrl =
-    "https://api.sofascore.com/api/v1/search/teams?q=" +
-    encodeURIComponent(searchName) +
-    "&sport=basketball";
-  window.open(searchUrl, "_blank");
-  const st = document.getElementById("ssFetchStatus");
+  const searchName = rawName.split(",")[0].trim();
+  const searchUrl = ssSofaSearchUrl(searchName, SS_API_BASES[0]);
+
+  if (typeof proxyFetch !== "function") {
+    window.open(searchUrl, "_blank");
+    if (st) {
+      st.style.color = "#d98a00";
+      st.textContent =
+        "🔍 In-page fetch unavailable — opened Sofa search tab for " +
+        key +
+        ". Paste JSON as fallback.";
+    }
+    return;
+  }
+
   if (st) {
     st.style.color = "#d98a00";
-    st.textContent =
-      "🔍 Basketball-only search opened for " +
-      side +
-      " — paste that search JSON here, or copy the team ID into the ID box.";
+    st.textContent = '🔍 Searching SofaScore for "' + searchName + '" (team ' + key + ")…";
   }
+
+  let parsed = null;
+  try {
+    parsed = await ssProxyFetchSofaFirst(function (base) {
+      return ssSofaSearchUrl(searchName, base);
+    }, 14000);
+  } catch (_eSearch) {
+    if (typeof reportSoftFailure === "function") reportSoftFailure("searchSofascorePlayer", _eSearch);
+    if (st) {
+      st.style.color = "#d98a00";
+      st.textContent =
+        "⚠ Sofa blocked in-page fetch for " +
+        key +
+        " — opening API tab + bridge…";
+    }
+    const bridgeUrl = ssSofaSearchUrl(searchName, "https://www.sofascore.com");
+    parsed = null;
+    for (let _bridgeTry = 0; _bridgeTry < 4 && !parsed; _bridgeTry++) {
+      try {
+        window.open(bridgeUrl, "_blank");
+      } catch (_eOpen) {}
+      parsed = await ssBridgePollSearch(searchName, _bridgeTry === 0 ? 18000 : 12000);
+    }
+    if (!parsed) {
+      if (st) {
+        st.style.color = "#d98a00";
+        st.textContent = ssSofaBlockedStatus(key, "search");
+      }
+      return;
+    }
+    if (st) {
+      st.style.color = "#d98a00";
+      st.textContent = "🔍 Bridge received Sofa search for " + key + " — continuing…";
+    }
+  }
+
+  const leagueSelect = document.getElementById("leagueSelect")?.value || "";
+  const teams = typeof ssCollectSearchTeams === "function" ? ssCollectSearchTeams(parsed) : [];
+  if (!teams.length) {
+    if (st) {
+      st.style.color = "#d92d2a";
+      st.textContent =
+        '❌ No basketball teams found for "' +
+        searchName +
+        '". Try another name, or paste search JSON as fallback.';
+    }
+    return;
+  }
+
+  const ranked = ssRankSearchTeams(teams, leagueSelect);
+  const confident = ssIsConfidentTeamPick(ranked, searchName);
+  if (confident) {
+    const picked =
+      ranked[0] ||
+      (typeof ssPickTeamFromSearch === "function" ? ssPickTeamFromSearch(teams, leagueSelect) : null);
+    if (!picked) {
+      if (st) {
+        st.style.color = "#d92d2a";
+        st.textContent = "❌ Could not auto-pick a team for " + key + ".";
+      }
+      return;
+    }
+    if (st) {
+      st.style.color = "#d98a00";
+      st.textContent =
+        "🔍 Matched " + (picked.name || "team") + " (" + picked.id + ") — loading last games…";
+    }
+    await ssLoadTeamFromOneTapPick(key, picked);
+    return;
+  }
+
+  ssShowPickList(key, ranked.length ? ranked : teams, searchName);
 }
 
 window.__lastEventsA = null;
@@ -6363,29 +6854,42 @@ function ssPickTeamFromSearch(teams, leagueKey) {
 }
 
 async function ssFetchTeamLastEvents(teamId) {
-  /* ISSUE-009: same page depth 0–3 for both Team A and Team B */
+  /* ISSUE-009: same page depth 0–3 for both Team A and Team B.
+     Tries www.sofascore.com then api.* via proxyFetch; on 403 uses tab+local bridge. */
   const id = String(teamId || "").trim();
   if (!/^[0-9]+$/.test(id)) return [];
-  if (typeof proxyFetch !== "function") return [];
   const pages = [];
-  try {
-    for (let page = 0; page <= 3; page++) {
-      try {
-        const payload = await proxyFetch(
-          "https://api.sofascore.com/api/v1/team/" + id + "/events/last/" + page,
-        );
-        if (!payload) break;
-        pages.push(payload);
-        if (!payload.hasNextPage) break;
-      } catch (_ePage) {
-        if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents/p" + page, _ePage);
-        break;
+  let lastPageErr = null;
+  if (typeof proxyFetch === "function" && typeof ssProxyFetchSofaFirst === "function") {
+    try {
+      for (let page = 0; page <= 3; page++) {
+        try {
+          const payload = await ssProxyFetchSofaFirst(function (base) {
+            return ssSofaLastEventsUrl(id, page, base);
+          }, 14000);
+          if (!payload) break;
+          pages.push(payload);
+          if (!payload.hasNextPage) break;
+        } catch (_ePage) {
+          lastPageErr = _ePage;
+          if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents/p" + page, _ePage);
+          break;
+        }
       }
+    } catch (_e0) {
+      if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents", _e0);
+      lastPageErr = _e0;
     }
-  } catch (_e0) {
-    if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents", _e0);
-    return [];
   }
+  if (!pages.length) {
+    for (let page = 0; page <= 3; page++) {
+      const payload = await ssBridgePollEvents(id, page, page === 0 ? 28000 : 14000);
+      if (!payload) break;
+      pages.push(payload);
+      if (!payload.hasNextPage) break;
+    }
+  }
+  if (!pages.length && lastPageErr) throw lastPageErr;
   const merged = new Map();
   pages.forEach(function (payload) {
     ssExtractPastedEvents(payload).forEach(function (ev) {
@@ -16791,7 +17295,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
     if (/site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com/i.test(u)) {
       return "DirectESPN";
     }
-    if (/api\.sofascore\.com|api\.sofascore\.app/i.test(u)) {
+    if (/api\.sofascore\.com|api\.sofascore\.app|www\.sofascore\.com/i.test(u)) {
       return "DirectSofa";
     }
     if (/feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net/i.test(u)) {
@@ -16825,7 +17329,19 @@ async function proxyFetch(url, timeoutMs = 12000) {
         headers: extraHeaders || undefined,
       });
 
-      if (!res.ok) throw new Error(`${label} HTTP ${res.status}: ${res.statusText}`);
+      if (!res.ok) {
+        let bodySnippet = "";
+        try {
+          bodySnippet = String(await res.text() || "").slice(0, 220);
+        } catch (_bodyErr) {}
+        const err = new Error(
+          `${label} HTTP ${res.status}: ${res.statusText}` +
+            (bodySnippet ? " — " + bodySnippet : ""),
+        );
+        err.status = res.status;
+        err.body = bodySnippet;
+        throw err;
+      }
 
       const text = await res.text();
       try {
@@ -16865,7 +17381,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       throw new Error("proxyFetch: URL unparseable");
     }
     const _allowedHost =
-      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net|api\.kbl\.or\.kr)$/i.test(_host);
+      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app|www\.sofascore\.com|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net|api\.kbl\.or\.kr)$/i.test(_host);
     if (!_allowedHost) {
       engineDebug("proxyFetch blocked non-allowlisted host", { request: fetchLabel, host: _host });
       throw new Error("proxyFetch: target host not allowlisted");
@@ -16895,16 +17411,22 @@ async function proxyFetch(url, timeoutMs = 12000) {
       _proxyFetchCacheEvictIfNeeded();
       return directData;
     } catch (directErr) {
-      const workerTimeoutMs = Math.min(4000, Math.max(1, Number(timeoutMs) || 4000));
+      /* Sofa search/events: give Worker enough budget (not starved at 4s after direct 403).
+         Other hosts keep short Worker fallback to avoid burning live-clock budgets. */
+      const _isSofaUrl = /api\.sofascore\.(com|app)/i.test(String(url || ""));
+      const workerTimeoutMs = _isSofaUrl
+        ? Math.min(Math.max(Number(timeoutMs) || 12000, 10000), 20000)
+        : Math.min(4000, Math.max(1, Number(timeoutMs) || 4000));
       try {
         if (!window.__BB_WORKER_FALLBACK_NOTED__) {
           window.__BB_WORKER_FALLBACK_NOTED__ = true;
           engineDebug(
-            "Direct path miss; using short Worker fallback for allowlisted hosts (normal fallback)",
+            "Direct path miss; using Worker fallback for allowlisted hosts (normal fallback)",
             {
               sampleRequest: fetchLabel,
               note: "Further Worker misses this session are silent unless direct allowlisted hosts also fail",
               workerTimeoutMs,
+              sofaLongBudget: _isSofaUrl,
             },
           );
         }
