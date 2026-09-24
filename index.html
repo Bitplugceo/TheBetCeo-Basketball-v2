@@ -1,4 +1,3 @@
-S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -14582,10 +14581,100 @@ function isBetterTrackerStateCandidate(nextState, bestState) {
   return false;
 }
 
+/* ISSUE-RAID-01: military-raid audit — deletion-safe candidate merge.
+   Root cause of "deleted/old picks keep coming back": this used to hand back
+   whichever single storage key scored highest by raw pick counts. A stale
+   legacy-build snapshot that never saw a later deletion always has MORE
+   picks than the correctly-pruned current state, so it could win the tie
+   break and resurrect deleted/expired data. Fix: union deletedSignatures
+   across every candidate FIRST, filter every candidate against that union
+   BEFORE scoring, then physically purge the losing keys so they can never
+   be read again. */
+function unionDeletedSignaturesAcrossCandidates(candidates = []) {
+  const out = new Set();
+  candidates.forEach((c) => {
+    if (c && Array.isArray(c.deletedSignatures)) {
+      c.deletedSignatures.forEach((s) => {
+        if (s) out.add(String(s));
+      });
+    }
+  });
+  if (g_deletedSigLock) g_deletedSigLock.forEach((s) => out.add(String(s)));
+  return [...out];
+}
+
+function stripDeletedFromCandidate(candidate, deletedUnion) {
+  if (!candidate || !deletedUnion || !deletedUnion.length) return candidate;
+  const isGone = (p) => {
+    try {
+      return isPickDeleted(p, deletedUnion);
+    } catch (_e) {
+      return false;
+    }
+  };
+  if (Array.isArray(candidate.activePicks)) {
+    candidate.activePicks = candidate.activePicks.filter((p) => !isGone(p));
+  }
+  if (Array.isArray(candidate.archivedPicks)) {
+    candidate.archivedPicks = candidate.archivedPicks.filter((p) => !isGone(p));
+  }
+  candidate.deletedSignatures = [
+    ...new Set([...(Array.isArray(candidate.deletedSignatures) ? candidate.deletedSignatures : []), ...deletedUnion]),
+  ];
+  return candidate;
+}
+
+/* ISSUE-RAID-01b: permanently retire every non-canonical tracker storage key
+   (current-build key + legacy build keys) once a clean winner is chosen, so
+   old zombie snapshots can never again be read back in as "best". Best-effort
+   and safe to call repeatedly — a no-op once cleanup has already happened. */
+async function purgeZombieTrackerStorageKeys(keepKey) {
+  const keys = getTrackerLocalStateCandidateKeys().filter((k) => k && k !== keepKey);
+  if (!keys.length) return { purged: 0 };
+  let purged = 0;
+  try {
+    const db = await initBBDatabase();
+    await Promise.all(
+      keys.map(
+        (key) =>
+          new Promise((resolve) => {
+            try {
+              const tx = db.transaction(BB_STORE_NAME, "readwrite");
+              tx.objectStore(BB_STORE_NAME).delete(key);
+              tx.oncomplete = () => {
+                purged++;
+                resolve();
+              };
+              tx.onerror = () => resolve();
+            } catch (_e) {
+              resolve();
+            }
+          }),
+      ),
+    );
+  } catch (_dbErr) {
+    engineDebug("purgeZombieTrackerStorageKeys: IndexedDB purge failed", {
+      error: _dbErr?.message || String(_dbErr),
+    });
+  }
+  keys.forEach((key) => {
+    try {
+      if (localStorage.getItem(key) !== null) {
+        localStorage.removeItem(key);
+        purged++;
+      }
+    } catch (_lsErr) {}
+  });
+  if (purged > 0) {
+    engineDebug("Zombie tracker storage keys purged", { purged, keys });
+  }
+  return { purged };
+}
+
 async function loadTrackerStateFromLocal() {
   try {
-    let bestState = null;
     const keys = getTrackerLocalStateCandidateKeys();
+    const candidates = [];
 
     for (const key of keys) {
       const raw = await readAsyncStorage(key);
@@ -14603,12 +14692,29 @@ async function loadTrackerStateFromLocal() {
       }
 
       if (!parsed || typeof parsed !== "object") continue;
+      candidates.push({ key, state: parsed });
+    }
 
-      if (!bestState || isBetterTrackerStateCandidate(parsed, bestState)) {
-        bestState = parsed;
+    if (!candidates.length) return null;
+
+    const deletedUnion = unionDeletedSignaturesAcrossCandidates(candidates.map((c) => c.state));
+
+    let best = null;
+    for (const c of candidates) {
+      const cleaned = stripDeletedFromCandidate(c.state, deletedUnion);
+      if (!best || isBetterTrackerStateCandidate(cleaned, best.state)) {
+        best = { key: c.key, state: cleaned };
       }
     }
-    return bestState;
+
+    // A winner from a non-canonical (legacy/build-versioned) key is promoted
+    // to the canonical stable key on the next save; either way, every OTHER
+    // candidate key is now dead weight and gets purged permanently so it can
+    // never resurrect deleted or stale data again.
+    const canonicalKey = getTrackerLocalStateStableKey();
+    purgeZombieTrackerStorageKeys(canonicalKey).catch(() => {});
+
+    return best ? best.state : null;
   } catch (err) {
     engineDebug("WATCHDOG: Local load failed, using empty state", err);
     return null;
@@ -14898,15 +15004,43 @@ function getTotalSettledCountForLeague(league) {
   ).length;
 }
 
-function getAllTrackedPicksForReport() {
-  const active = Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks
-    : [];
-  const archived = Array.isArray(AppState.tracker.state.archivedPicks)
-    ? AppState.tracker.state.archivedPicks
-    : [];
+/* ISSUE-RAID-03: single canonical pick pool — the Tracked Picks page header
+   ("X wins • Y losses") and the Engine Report page were each rolling their
+   own view of activePicks+archivedPicks (one via rebuildTrackerStats, one
+   via getAllTrackedPicksForReport), neither de-duplicated the same way
+   renderTrackedPicks() already does for the visible table. If the same
+   event/market ever exists in both buckets, or twice within one bucket
+   during a merge window, the two pages' counts diverge. Both now read from
+   this single deduped, deletion-filtered function so "the game count is not
+   matching" cannot happen from a data-shape mismatch again. */
+function getCanonicalTrackedPicksPool() {
+  const state = AppState.tracker.state || {};
+  const active = Array.isArray(state.activePicks) ? state.activePicks : [];
+  const archived = Array.isArray(state.archivedPicks) ? state.archivedPicks : [];
+  const deleted = Array.isArray(state.deletedSignatures) ? state.deletedSignatures : [];
 
-  return [...active, ...archived].map((p) => ensureTrackedPickKeys(p));
+  const unique = new Map();
+  [...active, ...archived]
+    .map((p) => ensureTrackedPickKeys(p))
+    .filter((p) => !isPickDeleted(p, deleted))
+    .forEach((p) => {
+      const key =
+        (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) ||
+        makeTrackedSignature(p);
+      if (!key) return;
+      const existing = unique.get(key);
+      if (!existing) {
+        unique.set(key, p);
+        return;
+      }
+      unique.set(key, resolveTrackedPick(existing, p));
+    });
+
+  return [...unique.values()];
+}
+
+function getAllTrackedPicksForReport() {
+  return getCanonicalTrackedPicksPool();
 }
 let g_trackerDerivedState = defaultTrackerDerivedState();
 
@@ -15662,23 +15796,170 @@ function acknowledgeGlobalEngineAlert() {
   applyGlobalEngineAlertState();
 }
 
-function triggerTrackerMilitaryRaid() {
+let g_militaryRaidInFlight = false;
+
+/* ISSUE-RAID-05: "Military Raid" — one-tap global overseer for the whole
+   tracker engine, not just whatever page it was tapped from. See ISSUE log
+   on the debug page for the full list of bugs this closes. */
+async function triggerTrackerMilitaryRaid() {
+  if (g_militaryRaidInFlight) {
+    engineDebug("Military Raid already in progress — ignoring duplicate tap");
+    return null;
+  }
+  g_militaryRaidInFlight = true;
+
   const statusEl = document.getElementById("trackerStatusLabel");
-  if (statusEl) {
-    statusEl.textContent = "Triggered ⚡️";
-    statusEl.style.color = "#ff6b6b";
-    setTimeout(() => {
-      statusEl.textContent = "Completed ⚡️";
-      statusEl.style.color = "#4ade80";
-    }, 500);
-    setTimeout(() => {
-      statusEl.textContent = "";
-      statusEl.style.color = "";
-    }, 1000);
+  const setStatus = (text, color) => {
+    if (!statusEl) return;
+    statusEl.textContent = text;
+    statusEl.style.color = color || "";
+  };
+  setStatus("RAID IN PROGRESS ⚡️", "#ffcf73");
+
+  const countPending = () =>
+    (Array.isArray(AppState.tracker.state.activePicks) ? AppState.tracker.state.activePicks : []).filter(
+      (p) => String(p.resultStatus || "pending").toLowerCase() === "pending",
+    ).length;
+
+  const before = {
+    active: Array.isArray(AppState.tracker.state.activePicks) ? AppState.tracker.state.activePicks.length : 0,
+    archived: Array.isArray(AppState.tracker.state.archivedPicks) ? AppState.tracker.state.archivedPicks.length : 0,
+    pending: countPending(),
+  };
+
+  const report = {
+    zombieKeysPurged: 0,
+    bucketsReconciled: false,
+    settledThisPass: 0,
+    archivedThisPass: 0,
+    liveGamesSynced: 0,
+    desyncsRepaired: [],
+    errors: [],
+  };
+
+  const runStage = async (label, fn) => {
+    try {
+      await fn();
+    } catch (err) {
+      const errMsg = err?.message || String(err);
+      report.errors.push({ stage: label, error: errMsg });
+      engineDebug(`Military Raid: ${label} failed`, { error: errMsg });
+      if (typeof AFDB !== "undefined" && typeof AFDB.log === "function") {
+        AFDB.log("ERROR", "RAID", `Raid stage "${label}" failed: ${errMsg}`, { stage: label });
+      }
+    }
+  };
+
+  // 1. Purge zombie storage keys permanently. Anything deleted stays deleted —
+  //    no legacy/build-versioned snapshot survives to resurrect it later.
+  await runStage("purge zombie storage", async () => {
+    const canonicalKey = getTrackerLocalStateStableKey();
+    const res = await purgeZombieTrackerStorageKeys(canonicalKey);
+    report.zombieKeysPurged = res?.purged || 0;
+  });
+
+  // 2. Reconcile active/archived buckets — kill cross-bucket duplicates so every
+  //    pick sits in exactly one correct position.
+  await runStage("reconcile buckets", () => {
+    const reconciled = reconcileTrackerBucketConflicts(
+      AppState.tracker.state.activePicks,
+      AppState.tracker.state.archivedPicks,
+    );
+    AppState.tracker.state.activePicks = reconciled.activePicks;
+    AppState.tracker.state.archivedPicks = reconciled.archivedPicks;
+    report.bucketsReconciled = true;
+  });
+
+  // 3. Force-settle every pending pick a result is already available for, and
+  //    force-refresh live status so a live game shows LIVE immediately.
+  await runStage("force-settle + live sync", async () => {
+    const pendingBefore = countPending();
+    if (typeof refreshTrackedPickResults === "function") await refreshTrackedPickResults();
+    if (typeof pollLiveGameClocks === "function") await pollLiveGameClocks();
+    report.settledThisPass = Math.max(0, pendingBefore - countPending());
+    report.liveGamesSynced = g_liveGameStatus ? g_liveGameStatus.size : 0;
+  });
+
+  // 4. Archive sweep — anything settled 10h+ ago moves to archive and off the
+  //    Tracked Picks page, for good.
+  await runStage("archive sweep", () => {
+    const archivedBefore = Array.isArray(AppState.tracker.state.archivedPicks)
+      ? AppState.tracker.state.archivedPicks.length
+      : 0;
+    if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
+    const archivedAfter = Array.isArray(AppState.tracker.state.archivedPicks)
+      ? AppState.tracker.state.archivedPicks.length
+      : 0;
+    report.archivedThisPass = Math.max(0, archivedAfter - archivedBefore);
+  });
+
+  // 5. Push the cleaned state through every remaining storage layer.
+  await runStage("force save (local + server)", async () => {
+    if (typeof forceTrackerSaveNow === "function") await forceTrackerSaveNow();
+  });
+
+  // 6. Re-sync from server so a stale local view can't quietly persist.
+  await runStage("re-hydrate from server", async () => {
+    if (typeof hydrateTrackedPicks === "function") await hydrateTrackedPicks(true);
+  });
+
+  // 7. Detect + repair a Tracked Picks vs Engine Report count desync using the
+  //    single canonical de-duplicated pool both pages now read from.
+  await runStage("count consistency check", () => {
+    const statsBefore = { ...(AppState.tracker.state.stats || {}) };
+    const headerStats = rebuildTrackerStats();
+    if (statsBefore.settled !== headerStats.settled || statsBefore.total !== headerStats.total) {
+      report.desyncsRepaired.push({ before: statsBefore, after: headerStats });
+    }
+  });
+
+  // 8. Re-render whatever the person is currently looking at.
+  await runStage("re-render", () => {
+    if (typeof renderTrackedPicks === "function") renderTrackedPicks();
+    if (
+      typeof isTrackerReportView === "function" &&
+      isTrackerReportView() &&
+      typeof renderTrackerAnalytics === "function"
+    ) {
+      renderTrackerAnalytics();
+    }
+  });
+
+  // 9. Run the existing anomaly sweep (invalid inputs, storage capacity,
+  //    pace/edge anomalies, win-rate threshold) and fold its findings in.
+  await runStage("diagnostic sweep", async () => {
+    if (typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function") {
+      await AFDB.runTestFetch();
+    }
+  });
+
+  const after = {
+    active: Array.isArray(AppState.tracker.state.activePicks) ? AppState.tracker.state.activePicks.length : 0,
+    archived: Array.isArray(AppState.tracker.state.archivedPicks) ? AppState.tracker.state.archivedPicks.length : 0,
+    pending: countPending(),
+  };
+
+  const summaryMsg =
+    `Military Raid complete — ${report.zombieKeysPurged} zombie key(s) purged, ` +
+    `${report.settledThisPass} pick(s) force-settled, ${report.archivedThisPass} archived, ` +
+    `${report.liveGamesSynced} live game(s) synced` +
+    (report.desyncsRepaired.length ? `, ${report.desyncsRepaired.length} count desync(s) repaired` : "") +
+    (report.errors.length ? `, ${report.errors.length} stage(s) hit errors (see data)` : "") +
+    ".";
+
+  if (typeof AFDB !== "undefined" && typeof AFDB.log === "function") {
+    AFDB.log("VERDICT", "RAID", summaryMsg, { before, after, ...report });
   }
-  if (typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function") {
-    AFDB.runTestFetch();
-  }
+  engineDebug(summaryMsg, { before, after, ...report });
+
+  setStatus(
+    report.errors.length ? "RAID DONE (warnings) ⚡️" : "RAID COMPLETE ⚡️",
+    report.errors.length ? "#ffcf73" : "#4ade80",
+  );
+  setTimeout(() => setStatus("", ""), 2400);
+
+  g_militaryRaidInFlight = false;
+  return report;
 }
 
 function getDebugSeverity(line) {
@@ -17895,7 +18176,13 @@ function ensureTrackedPickKeys(pick = {}) {
 
   next.resultStatus = String(next.resultStatus || "pending").toLowerCase();
   if (["win", "loss", "push"].includes(next.resultStatus) && !next.settledAt) {
-    next.settledAt = next.eventDate || next.createdAt || new Date().toISOString();
+    /* ISSUE-RAID-02: never fall back to "now" here — a pick lacking a real
+       settledAt is, by definition, an old/legacy record, not a fresh one.
+       Stamping "now" made it look freshly-settled on every session that
+       re-derived it, which kept it inside the 10h visibility window forever
+       and it never archived off the Tracked Picks page. Fall back to real
+       historical dates, or an epoch date so it's immediately archive-eligible. */
+    next.settledAt = next.eventDate || next.createdAt || "1970-01-01T00:00:00.000Z";
   }
 
   next.modelVersion = normalizeModelVersion(next.modelVersion);
@@ -18100,13 +18387,8 @@ function buildBestPickOnlyShadowExperiment(items = []) {
 
 /* SECTION 218 — rebuild-tracker-stats */
 function rebuildTrackerStats() {
-  const active = Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks
-    : [];
-  const archived = Array.isArray(AppState.tracker.state.archivedPicks)
-    ? AppState.tracker.state.archivedPicks
-    : [];
-  const all = [...active, ...archived];
+  /* ISSUE-RAID-03: canonical deduped pool — see getCanonicalTrackedPicksPool(). */
+  const all = getCanonicalTrackedPicksPool();
 
   const _settledForDivergence = all.filter((p) =>
     ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase()),
@@ -20189,6 +20471,28 @@ function unlockPageBehindTracker() {
   window.scrollTo(0, y);
 }
 
+/* ISSUE-RAID-04b: local-only housekeeping ticker. Runs purely against
+   in-memory state (no network) so it can't fail/stall on a bad connection;
+   it exists only to make the 10h archive cutoff self-enforcing while the
+   panel is open, instead of depending on the user to trigger a refresh. */
+let _trackerHousekeepingTimer = null;
+function startTrackerHousekeepingTicker() {
+  stopTrackerHousekeepingTicker();
+  _trackerHousekeepingTimer = setInterval(() => {
+    try {
+      if (archiveExpiredTrackedPicks()) renderTrackedPicks();
+    } catch (_hkErr) {
+      engineDebug("tracker housekeeping tick failed", { error: _hkErr?.message || String(_hkErr) });
+    }
+  }, 60000);
+}
+function stopTrackerHousekeepingTicker() {
+  if (_trackerHousekeepingTimer) {
+    clearInterval(_trackerHousekeepingTimer);
+    _trackerHousekeepingTimer = null;
+  }
+}
+
 async function openTrackerModal() {
   const modal = document.getElementById("trackerModal");
   if (!modal) return;
@@ -20203,6 +20507,7 @@ async function openTrackerModal() {
   refreshTrackerInBackground(true);
   scheduleLiveClockPoll(0);
   startLiveClockTicker();
+  startTrackerHousekeepingTicker();
 }
 
 function closeTrackerModal() {
@@ -20213,6 +20518,7 @@ function closeTrackerModal() {
   clearTimeout(_liveClockPollTimer);
   _liveClockPollTimer = null;
   stopLiveClockTicker();
+  stopTrackerHousekeepingTicker();
   modal.classList.remove("open");
   syncTrackerModalView();
   modal.setAttribute("aria-hidden", "true");
@@ -20220,6 +20526,19 @@ function closeTrackerModal() {
 }
 
 function renderTrackedPicks() {
+  /* ISSUE-RAID-04: local, synchronous, no-network safety net. Previously the
+     only thing that moved a settled pick into archivedPicks once it crossed
+     TRACKER_SETTLED_VISIBLE_MS (10h) was a background network refresh, which
+     only fires on specific triggers (opening the tracker, window focus,
+     connectivity change, a live clock reaching zero). Leaving the page open
+     — or reopening it without one of those triggers — meant expired picks
+     just sat there. Every render now re-evaluates the 10h cutoff first. */
+  try {
+    if (typeof archiveExpiredTrackedPicks === "function") archiveExpiredTrackedPicks();
+  } catch (_archErr) {
+    engineDebug("renderTrackedPicks: archive sweep failed", { error: _archErr?.message || String(_archErr) });
+  }
+
   const summaryEl = document.getElementById("trackerSummary");
   const marketSummaryEl = document.getElementById("trackerMarketSummary"); // optional — DOM node removed (JC-1)
   const emptyEl = document.getElementById("trackerEmpty");
@@ -21552,6 +21871,19 @@ function renderTrackerAnalytics() {
   const overallRecord = buildRecord(learningPicks);
   const lockRecord = buildRecord(lockSettled);
 
+  /* ISSUE-RAID-03: all-time record — identical pool/dedup logic to the
+     Tracked Picks page header, so this number is provably the same as
+     "X wins • Y losses" up there. overallRecord above is intentionally
+     narrower (current model version only, decisive win/loss only, no
+     pushes/no-plays) because that's what model tuning should learn from —
+     this all-time figure exists purely so the two pages never look like
+     they disagree without explanation. */
+  const allTimePool = getCanonicalTrackedPicksPool();
+  const allTimeRecord = buildRecord(allTimePool);
+  const allTimePushes = allTimePool.filter(
+    (p) => String(p.resultStatus || "").toLowerCase() === "push",
+  ).length;
+
   const bestMarket = marketRows.find((row) => row.settled >= 2) || null;
   const weakMarket = [...marketRows].reverse().find((row) => row.settled >= 2) || null;
   const bestLeague = leagueRows.find((row) => row.settled >= 2) || null;
@@ -21718,14 +22050,19 @@ function renderTrackerAnalytics() {
           <div class="tracker-kpi-sub">Current model ${safeText(currentVersion)}</div>
         </div>
         <div class="tracker-kpi-card">
-          <div class="tracker-kpi-label">Settled picks</div>
+          <div class="tracker-kpi-label">Settled picks (learning-eligible)</div>
           <div class="tracker-kpi-value">${settled}</div>
-          <div class="tracker-kpi-sub">Checkpoint target ${trackerMin}</div>
+          <div class="tracker-kpi-sub">Checkpoint target ${trackerMin} • excludes pushes/no-plays/other versions</div>
         </div>
         <div class="tracker-kpi-card">
           <div class="tracker-kpi-label">Review status</div>
           <div class="tracker-kpi-value">${safeText(checkpointStatus)}</div>
           <div class="tracker-kpi-sub">${safeText(reviewVersionSub)}</div>
+        </div>
+        <div class="tracker-kpi-card">
+          <div class="tracker-kpi-label">All-time (matches Tracked Picks page)</div>
+          <div class="tracker-kpi-value">${allTimeRecord.settled}</div>
+          <div class="tracker-kpi-sub">${allTimeRecord.wins}W-${allTimeRecord.losses}L-${allTimePushes}P • every version, incl. pushes</div>
         </div>
       </div>
 
@@ -40405,6 +40742,21 @@ const fixtureSelect = document.getElementById("fixtureSelect");
     await refreshTrackerInBackground(true);
   }, 50);
 
+  /* ISSUE-RAID-04c: global local-only archive sweep. Independent of the
+     tracker panel, of window focus, and of connectivity — a settled pick
+     that crosses the 10h cutoff gets physically archived within 5 minutes
+     no matter what the user is doing on the page. Pure in-memory scan, no
+     network call, so it cannot fail or stall. */
+  setInterval(() => {
+    try {
+      if (typeof archiveExpiredTrackedPicks === "function" && archiveExpiredTrackedPicks()) {
+        if (typeof renderTrackedPicks === "function") renderTrackedPicks();
+      }
+    } catch (_globalHkErr) {
+      engineDebug("global archive sweep failed", { error: _globalHkErr?.message || String(_globalHkErr) });
+    }
+  }, 300000);
+
   let _refreshDebounceTimer = null;
   let _lastBackgroundSync = 0;
 
@@ -41113,7 +41465,7 @@ const AFDB = (function () {
       .join("");
 
     const headerBtns =
-      '<button onclick="AFDB.copy(this)" style="background:#111;border:1px solid #333;color:#49d45f;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📋 Copy Log</button><button onclick="AFDB.clear()" style="background:#111;border:1px solid #333;color:#ff5c61;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">🗑️ Clear</button><button onclick="AFDB.runTestFetch()" style="background:#2a0608;border:1px solid #d91f26;color:#fff;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(217,31,38,0.4);">🚨 MILITARY RAID</button><button onclick="window.openVisualReportFromDebug()" style="background:#111;border:1px solid #333;color:#d4af37;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📊 Tracker Report</button><button onclick="window.EngineAuditor ? EngineAuditor.open() : alert(`Full Audit did not open: the EngineAuditor script was not found on this page. The auditor module may be missing from this deploy.`)" style="background:#0a1f0a;border:1px solid #2f8f4a;color:#49ff7a;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(47,143,74,0.4);">🩺 Full Audit</button><button onclick="AFDB.close()" style="background:#111;border:1px solid #555;color:#ccc;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">✕ Close</button>';
+      '<button onclick="AFDB.copy(this)" style="background:#111;border:1px solid #333;color:#49d45f;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📋 Copy Log</button><button onclick="AFDB.clear()" style="background:#111;border:1px solid #333;color:#ff5c61;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">🗑️ Clear</button><button onclick="typeof triggerTrackerMilitaryRaid === \'function\' ? triggerTrackerMilitaryRaid() : AFDB.runTestFetch()" style="background:#2a0608;border:1px solid #d91f26;color:#fff;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(217,31,38,0.4);">🚨 MILITARY RAID</button><button onclick="window.openVisualReportFromDebug()" style="background:#111;border:1px solid #333;color:#d4af37;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📊 Tracker Report</button><button onclick="window.EngineAuditor ? EngineAuditor.open() : alert(`Full Audit did not open: the EngineAuditor script was not found on this page. The auditor module may be missing from this deploy.`)" style="background:#0a1f0a;border:1px solid #2f8f4a;color:#49ff7a;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(47,143,74,0.4);">🩺 Full Audit</button><button onclick="AFDB.close()" style="background:#111;border:1px solid #555;color:#ccc;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">✕ Close</button>';
 
     const emptyMsg = _showOnlyErrors
       ? "No suspects arrested. The code is clean."
@@ -41138,11 +41490,22 @@ const AFDB = (function () {
       _sampleCount +
       " samples logged</span></div>";
 
+    const knownIssuesHtml =
+      '<details style="background:#0d0d0d;border-bottom:1px solid #1a1a1a;flex-shrink:0;"><summary style="padding:8px 12px;color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.8px;cursor:pointer;list-style:none;">\ud83d\udee0\ufe0f KNOWN ISSUES \u2014 ARRESTED &amp; FIXED (tap to expand)</summary>' +
+      '<div style="padding:2px 12px 10px 12px;color:#999;font-size:10px;line-height:1.6;">' +
+      '<div><b style="color:#49d45f;">ISSUE-RAID-01</b> &mdash; Deleted/old picks resurrecting: local storage scanned multiple legacy snapshot keys and picked whichever had the most picks, which could be a stale copy from before a deletion. Fixed: deletions now filtered across every candidate before scoring, and losing keys are purged permanently.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-RAID-02</b> &mdash; Settled picks never left the page: a missing settledAt used to fall back to "now", making an old pick look freshly-settled forever. Fixed: falls back to real historical dates only.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-RAID-03</b> &mdash; Tracked Picks vs Engine Report count mismatch: header and report each rolled their own un-deduped pool, and the report\'s headline number was silently scoped to learning-eligible picks only (current model version, decisive results, no pushes). Fixed: both now read one canonical deduped pool, and the report shows an explicit "All-time" figure that matches the header, labeled separately from the model-tuning figure.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-RAID-04</b> &mdash; 10h archive cutoff not enforced: archiving only ran as a side effect of background network syncs, which didn\'t fire while the page just sat open. Fixed: enforced on every render, every 60s while the tracker is open, and every 5 minutes globally &mdash; all local, no network required.</div>' +
+      '<div><b style="color:#49d45f;">ISSUE-RAID-05</b> &mdash; Military Raid was cosmetic: one status flash + a single diagnostic fetch test, and the debug-panel copy of the button didn\'t even do that. Fixed: one tap now purges zombie storage, reconciles buckets, force-settles pending picks, force-syncs live games, archives expired picks, saves to every layer, re-hydrates, repairs count desyncs, re-renders, then runs the diagnostic sweep &mdash; from either button.</div>' +
+      "</div></details>";
+
     panel.innerHTML =
       '<div style="background:#080808;border-bottom:1px solid #222;padding:12px;display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;flex-shrink:0;"><div style="color:#d4af37;font-size:14px;font-weight:900;letter-spacing:1px;">\ud83d\udd2c AUTO-FETCH DEBUG BRAIN (BB)</div><div style="display:flex;gap:8px;flex-wrap:wrap;">' +
       headerBtns +
       "</div></div>" +
       driftHtml +
+      knownIssuesHtml +
       '<div style="display:flex;flex-direction:column;flex:1;overflow-y:auto;background:#0a0a0a;"><div style="flex:1;"><div style="padding:10px 12px;background:#111;color:#d4af37;font-size:11px;font-weight:900;text-transform:uppercase;position:sticky;top:0;z-index:10;border-bottom:1px solid #222;display:flex;justify-content:space-between;align-items:center;"><span>\ud83d\udce1 FETCH & ENGINE LOGS</span><button onclick="AFDB.toggleFilter()" style="background:none;border:none;color:#4ea9ff;font-size:14px;font-weight:bold;cursor:pointer;">' +
       filterLabel +
       '</button></div><div style="padding-bottom:15px;">' +
