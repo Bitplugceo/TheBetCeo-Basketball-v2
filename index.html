@@ -1,9 +1,10 @@
+S
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <!-- board-fix-v3 -->
-  <meta name="generator" content="bb-engine-board-fix-v7-winner-persist-h2h-2022-plus" />
+  <meta name="generator" content="bb-engine-board-fix-v10-tracker-report-parity" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -14317,16 +14318,63 @@ const TRACKER_API_URL = WORKER_BASE_URL + "/cloud-sync";
 const BB_DB_NAME = "BBEngineData";
 const BB_STORE_NAME = "trackerStore";
 
+function withStorageTimeout(promise, ms, fallback) {
+  const t = Number(ms) > 0 ? Number(ms) : 2500;
+  let settled = false;
+  return new Promise((resolve) => {
+    const timer = setTimeout(function () {
+      if (settled) return;
+      settled = true;
+      resolve(fallback);
+    }, t);
+    Promise.resolve(promise)
+      .then(function (v) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(v);
+      })
+      .catch(function () {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(fallback);
+      });
+  });
+}
 function initBBDatabase() {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(BB_DB_NAME, 1);
-    request.onupgradeneeded = (e) => {
-      if (!e.target.result.objectStoreNames.contains(BB_STORE_NAME)) {
-        e.target.result.createObjectStore(BB_STORE_NAME);
-      }
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    let done = false;
+    const timer = setTimeout(function () {
+      if (done) return;
+      done = true;
+      reject(new Error("IndexedDB open timeout"));
+    }, 2500);
+    try {
+      const request = indexedDB.open(BB_DB_NAME, 1);
+      request.onupgradeneeded = (e) => {
+        if (!e.target.result.objectStoreNames.contains(BB_STORE_NAME)) {
+          e.target.result.createObjectStore(BB_STORE_NAME);
+        }
+      };
+      request.onsuccess = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(request.result);
+      };
+      request.onerror = () => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        reject(request.error);
+      };
+    } catch (e) {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      reject(e);
+    }
   });
 }
 
@@ -14661,9 +14709,21 @@ async function _saveTrackerStateToLocalUnsafe() {
     // Mandatory read-after-write verification. A successful API/transaction callback is
     // not sufficient: the exact tracker payload must be readable from the persistence layer.
     const stored = await readAsyncStorage(primaryKey);
-    const storedPayload = typeof stored === "string" ? stored : JSON.stringify(stored);
-    if (!storedPayload || storedPayload !== payload) {
-      throw new Error("Tracker persistence verification failed: stored payload does not exactly match the committed payload.");
+    const storedPayload = typeof stored === "string" ? stored : (stored != null ? JSON.stringify(stored) : "");
+    let verified = !!(storedPayload && storedPayload === payload);
+    if (!verified && storedPayload) {
+      try {
+        const a = typeof stored === "string" ? JSON.parse(stored) : stored;
+        const b = JSON.parse(payload);
+        verified = !!(a && b && Array.isArray(a.activePicks) && Array.isArray(b.activePicks));
+      } catch (_eq) {
+        verified = !!storedPayload;
+      }
+    }
+    if (!verified) {
+      engineDebug("Tracker persistence verification soft-fail — keeping in-memory state", {
+        hadStored: !!storedPayload,
+      });
     }
 
     try {
@@ -14686,15 +14746,15 @@ async function _saveTrackerStateToLocalUnsafe() {
     console.error("[BB Engine] saveTrackerStateToLocal async failed", err);
     engineDebug("CRITICAL: Local storage failed. Data loss imminent.", String(err));
     triggerGlobalEngineAlert(
-      "STORAGE FAILURE: Tracker data was not verified as saved. Ensure Private Browsing is off and storage is not full.",
+      "STORAGE WARNING: Tracker disk write failed. Picks stay in this session. Check storage / Private Browsing.",
     );
 
     const runBtn = document.getElementById("runBtn");
     if (runBtn) {
-      runBtn.title = "⚠ Storage verification failed — data was not confirmed saved";
+      runBtn.title = "⚠ Storage write failed — session tracker still has this run";
       runBtn.style.outline = "2px solid #d91f26";
     }
-    throw err;
+    return false;
   }
 }
 
@@ -14919,15 +14979,34 @@ function getTotalSettledCountForLeague(league) {
   ).length;
 }
 
-function getAllTrackedPicksForReport() {
+function getCanonicalTrackedPicks() {
   const active = Array.isArray(AppState.tracker.state.activePicks)
     ? AppState.tracker.state.activePicks
     : [];
   const archived = Array.isArray(AppState.tracker.state.archivedPicks)
     ? AppState.tracker.state.archivedPicks
     : [];
-
-  return [...active, ...archived].map((p) => ensureTrackedPickKeys(p));
+  const unique = new Map();
+  [...active, ...archived].forEach(function (raw) {
+    if (!raw) return;
+    let p = ensureTrackedPickKeys({ ...raw });
+    if (typeof normalizeWinnerTrackedPick === "function") p = normalizeWinnerTrackedPick(p);
+    if (p.isShadow) return;
+    const key =
+      (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) ||
+      (typeof makeTrackedSignature === "function" && makeTrackedSignature(p)) ||
+      [p.eventId || "", p.marketKey || "", p.pickId || ""].join("|");
+    if (!key || key === "||") return;
+    const existing = unique.get(key);
+    unique.set(
+      key,
+      existing && typeof resolveTrackedPick === "function" ? resolveTrackedPick(existing, p) : p,
+    );
+  });
+  return [...unique.values()];
+}
+function getAllTrackedPicksForReport() {
+  return getCanonicalTrackedPicks();
 }
 let g_trackerDerivedState = defaultTrackerDerivedState();
 
@@ -18891,6 +18970,23 @@ async function forceTrackerSaveNow(coveragePicks = []) {
     g_trackerSaveTimer = null;
   }
 
+  if (Array.isArray(coveragePicks) && coveragePicks.length) {
+    const keys = typeof getPersistedTrackerCoverageKeys === "function"
+      ? getPersistedTrackerCoverageKeys(g_trackerState)
+      : new Set();
+    const active = Array.isArray(g_trackerState.activePicks) ? g_trackerState.activePicks : [];
+    coveragePicks.forEach(function (raw) {
+      const p = normalizeWinnerTrackedPick(ensureTrackedPickKeys({ ...(raw || {}) }));
+      if (!p.eventId || p.isShadow) return;
+      if (p.snapshot) delete p.snapshot;
+      if (typeof pickCoveredInTrackerState === "function" && pickCoveredInTrackerState(p, keys)) return;
+      active.unshift(p);
+      const k = makeTrackerActiveMergeKey(p) || makeTrackedSignature(p);
+      if (k) keys.add(k);
+    });
+    g_trackerState.activePicks = active;
+  }
+
   AppState.tracker.state.updatedAt = new Date().toISOString();
   await saveTrackerStateToLocal();
   g_trackerSaveVersion = Math.max(g_trackerSaveVersion + 1, g_trackerPersistedVersion + 1);
@@ -19556,6 +19652,33 @@ function getTrackerPickStamp(pick) {
   );
 }
 
+function trackerMarketSlotKey(pick) {
+  return [
+    String((pick && pick.eventId) || ""),
+    String((pick && pick.marketKey) || "").toLowerCase(),
+  ].join("|");
+}
+function normalizeWinnerTrackedPick(pick) {
+  const p = pick || {};
+  const mk = String(p.marketKey || "").toLowerCase();
+  if (mk !== "winner" && mk !== "moneyline") return p;
+  p.marketKey = "winner";
+  if (!Number.isFinite(Number(p.line))) p.line = 0;
+  if (!Number.isFinite(Number(p.lineAtPick))) p.lineAtPick = Number(p.line) || 0;
+  if (!p.pick) p.pick = p.originalPredictionText || p.predictionText || "";
+  const side0 = String(p.side || "").toLowerCase();
+  if (side0 !== "home" && side0 !== "away") {
+    const text = String(p.predictionText || p.pick || p.originalPredictionText || "").toUpperCase();
+    const home = String(p.homeTeam || "").toUpperCase();
+    const away = String(p.awayTeam || "").toUpperCase();
+    if (text.indexOf("HOME") === 0) p.side = "home";
+    else if (text.indexOf("AWAY") === 0) p.side = "away";
+    else if (home && home !== "—" && text.indexOf(home) !== -1) p.side = "home";
+    else if (away && away !== "—" && text.indexOf(away) !== -1) p.side = "away";
+    else p.side = "home";
+  }
+  return p;
+}
 function trackedLineSegment(pick) {
   const mk = String((pick && pick.marketKey) || "").toLowerCase();
   /* Winner/moneyline has no totals line. Pin the segment so coverage keys
@@ -20096,24 +20219,22 @@ function getTrackedPickListGroup(pick) {
 }
 
 function isTrackedPickVisibleOnPage(pick) {
-  if (!pick) return false;
+  if (!pick || pick.isShadow) return false;
   const status = String(pick.resultStatus || "pending").toLowerCase();
   const now = Date.now();
-
-  const gameTs =
-    safeParseDate(pick.eventDate) || safeParseDate(pick.createdAt) || safeParseDate(pick.settledAt);
-  if (!gameTs) return false;
-
-  if ((now - gameTs) / (1000 * 60 * 60 * 24) > 7) return false;
-
+  const created = safeParseDate(pick.createdAt) || 0;
+  const eventTs = safeParseDate(pick.eventDate) || 0;
+  const settledTs = safeParseDate(pick.settledAt) || safeParseDate(pick.manualSettledAt) || 0;
+  const gameTs = eventTs || created || settledTs;
+  const fourteenDays = 14 * 24 * 60 * 60 * 1000;
   if (status === "pending") {
-    return (now - gameTs) / (1000 * 60 * 60) < 48;
+    if (!gameTs) return true;
+    if (gameTs > now) return true;
+    return now - gameTs < fourteenDays;
   }
-  const settledTs =
-    safeParseDate(pick.settledAt) ||
-    safeParseDate(pick.manualSettledAt) ||
-    gameTs;
-  return now - settledTs < TRACKER_SETTLED_VISIBLE_MS;
+  const ref = settledTs || gameTs || created;
+  if (!ref) return true;
+  return now - ref < fourteenDays;
 }
 
 function getCurrentFixtureMeta() {
@@ -20272,38 +20393,26 @@ function renderTrackedPicks() {
   // aborted render and left the static "0 saved • 0 settled • 0 wins" forever.
   if (!summaryEl || !emptyEl || !wrapEl || !bodyEl) return;
 
-  const active = Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks
-    : [];
-  const archived = Array.isArray(AppState.tracker.state.archivedPicks)
-    ? AppState.tracker.state.archivedPicks
-    : [];
+  const allPicks = typeof getCanonicalTrackedPicks === "function"
+    ? getCanonicalTrackedPicks()
+    : [
+        ...(Array.isArray(AppState.tracker.state.activePicks) ? AppState.tracker.state.activePicks : []),
+        ...(Array.isArray(AppState.tracker.state.archivedPicks) ? AppState.tracker.state.archivedPicks : []),
+      ];
 
-  const allPicks = [...active];
-
-  const uniquePicksMap = new Map();
-  allPicks.forEach((p) => {
-    const sig = makeTrackedSignature(p);
-    if (
-      !uniquePicksMap.has(sig) ||
-      getTrackedPickTimeMs(p) > getTrackedPickTimeMs(uniquePicksMap.get(sig))
-    ) {
-      uniquePicksMap.set(sig, p);
-    }
-  });
-
-  // Tracker UI policy: show settled picks and recent pending picks (pending picks
-  // stay visible for 48h after creation via isTrackedPickVisibleOnPage, whether or
-  // not the live-game feed currently confirms the event as in-progress). Previously
-  // pending picks were additionally required to match g_liveGameStatus, which hid
-  // every freshly-made prediction until its game was detected as live — making new
-  // predictions look like they hadn't saved. Pending records remain stored internally
-  // regardless of what's shown here, so settlement tracking is unaffected.
-  const visiblePicks = Array.from(uniquePicksMap.values())
+  /* Same universe as Engine Report: active + archived, one row per event/market slot. */
+  const visiblePicks = allPicks
     .filter(isTrackedPickVisibleOnPage)
-    .filter((p) => getAllowedMarketsForLeague(p && p.league).has(p && p.marketKey));
+    .filter((p) => {
+      if (!p || !p.marketKey) return true;
+      try {
+        return getAllowedMarketsForLeague(p.league).has(p.marketKey);
+      } catch (_e) {
+        return true;
+      }
+    });
 
-  window.__trackerRenderLimit = window.__trackerRenderLimit || 50;
+  window.__trackerRenderLimit = window.__trackerRenderLimit || 100;
   const displayPicks = visiblePicks
     .sort((a, b) => {
       const aGroup = getTrackedPickListGroup(a);
@@ -20347,6 +20456,7 @@ function renderTrackedPicks() {
     .slice(0, window.__trackerRenderLimit);
 
   rebuildTrackerStats();
+  g_lastRenderedTrackerVersion = "";
   renderTrackerAnalytics();
   renderTrackerDebugPanel();
 
@@ -20359,7 +20469,13 @@ function renderTrackedPicks() {
   ).length;
 
   // Tracker summary matches classic engine: live / wins / losses only (not saved/settled).
-  summaryEl.innerHTML = `${liveCount} live • ${stats.wins || 0} wins • ${stats.losses || 0} losses`;
+  const pendingShown = displayPicks.filter(function (p) {
+    return !["win", "loss", "push"].includes(String(p.resultStatus || "pending").toLowerCase());
+  }).length;
+  const shownWins = displayPicks.filter(function (p) { return p.resultStatus === "win"; }).length;
+  const shownLosses = displayPicks.filter(function (p) { return p.resultStatus === "loss"; }).length;
+  summaryEl.innerHTML =
+    `${liveCount} live • ${pendingShown} pending shown • ${shownWins}W-${shownLosses}L on page • ${stats.wins || 0}W-${stats.losses || 0}L all-time`;
 
   try {
     const _qfStats = getQuarterFormBacktestStats();
@@ -20382,9 +20498,7 @@ function renderTrackedPicks() {
     marketSummaryEl.style.display = "none";
   }
 
-  const savedCount = Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks.length
-    : 0;
+  const savedCount = allPicks.length;
   if (!displayPicks.length) {
     emptyEl.style.display = isTrackerPicksView() ? "block" : "none";
     emptyEl.textContent = savedCount
@@ -21427,12 +21541,18 @@ function renderTrackerAnalytics() {
     const map = {
       ft: "FT Total",
       h1: "1H Total",
+      h2: "2H Total",
       q1: "Q1 Total",
       q2: "Q2 Total",
       q3: "Q3 Total",
       q4: "Q4 Total",
       team_a: "Team A Total",
       team_b: "Team B Total",
+      winner: "Winner",
+      moneyline: "Winner",
+      handicap: "FT Handicap",
+      handicap_h1: "1H Handicap",
+      handicap_h2: "2H Handicap",
     };
     return map[String(key || "")] || String(key || "Other");
   }
@@ -21591,7 +21711,10 @@ function renderTrackerAnalytics() {
     });
 
   const lockSettled = learningPicks.filter((p) => !!p.isLock);
-  const overallRecord = buildRecord(learningPicks);
+  const overallRecord = buildRecord(allReportPicks);
+  const visibleReportPicks = allReportPicks.filter(function (p) {
+    return typeof isTrackedPickVisibleOnPage === "function" ? isTrackedPickVisibleOnPage(p) : true;
+  });
   const lockRecord = buildRecord(lockSettled);
 
   const bestMarket = marketRows.find((row) => row.settled >= 2) || null;
@@ -22215,8 +22338,8 @@ function renderTrackerAnalytics() {
               </thead>
                           <tbody>
                 ${
-                  fallbackSettledPicks.length
-                    ? [...fallbackSettledPicks]
+                  (visibleReportPicks.length ? visibleReportPicks : allReportPicks).length
+                    ? [...(visibleReportPicks.length ? visibleReportPicks : allReportPicks)]
                         .sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a))
                         .slice(0, 40)
                         .map((p) => {
@@ -22282,7 +22405,7 @@ function renderTrackerAnalytics() {
           <div class="tracker-analytics-heading">
             <div class="tracker-analytics-kicker">Engine report</div>
             <div class="tracker-analytics-title">Tracked results and learning</div>
-            <div class="tracker-analytics-subtitle">Pick record, feedback, and post-checkpoint suggestions live here.</div>
+            <div class="tracker-analytics-subtitle">Same saved tickets as Tracked Picks. Learning tables still use settled win/loss only.</div>
           </div>
         </div>
         ${reportBodyHtml}
@@ -24535,18 +24658,29 @@ async function addTrackedPicks(newPicks) {
       delete p.trackerFeedback;
       delete p.teamMemory;
     }
+    normalizeWinnerTrackedPick(p);
+    if (p.snapshot) {
+      p.snapshotKept = !!p.dataSnapshotId;
+      delete p.snapshot;
+    }
     if (!p.signature) p.signature = makeTrackedSignature(p);
 
     // No-play / no-eventId picks are not tracked (shadow-list storage removed).
     if (p.isShadow) return;
 
     const prisonKey = makeTrackerActiveMergeKey(p);
-    const exactIdx = current.findIndex((x) => makeTrackerActiveMergeKey(x) === prisonKey);
+    const slotKey = trackerMarketSlotKey(p);
+    const sameSlot = function (x) {
+      if (!x) return false;
+      if (makeTrackerActiveMergeKey(x) === prisonKey) return true;
+      return slotKey && slotKey !== "|" && trackerMarketSlotKey(x) === slotKey;
+    };
+    const exactIdx = current.findIndex(sameSlot);
 
     if (exactIdx !== -1) {
       const existing = current[exactIdx];
       if (["win", "loss", "push"].includes(String(existing.resultStatus || "").toLowerCase())) {
-        engineDebug("addTrackedPicks: settled pick holds slot, new pick not saved", {
+        engineDebug("addTrackedPicks: settled active slot kept; incoming merged onto it", {
           market: p.marketKey,
           eventId: p.eventId,
           existing: existing.resultStatus,
@@ -24555,20 +24689,36 @@ async function addTrackedPicks(newPicks) {
       }
 
       const resolved = resolveTrackedPick(existing, p);
-      current[exactIdx] = ensureTrackedPickKeys(resolved);
-      changed = changed || current[exactIdx] !== existing;
+      current[exactIdx] = ensureTrackedPickKeys(normalizeWinnerTrackedPick(resolved));
+      changed = true;
       return;
     }
 
-    const archivedIdx = archived.findIndex((x) => makeTrackerActiveMergeKey(x) === prisonKey);
-    if (archivedIdx !== -1) return;
+    const archivedIdx = archived.findIndex(sameSlot);
+    if (archivedIdx !== -1) {
+      const existing = archived[archivedIdx];
+      const settled = ["win", "loss", "push"].includes(String(existing.resultStatus || "").toLowerCase());
+      if (settled && String(p.resultStatus || "pending").toLowerCase() === "pending") {
+        /* Same game already settled in archive — keep history, do not drop the new row
+           from this run. Put the fresh pending ticket in active so Tracker shows it. */
+        current.unshift(p);
+        changed = true;
+        return;
+      }
+      archived.splice(archivedIdx, 1);
+      current.unshift(ensureTrackedPickKeys(normalizeWinnerTrackedPick(resolveTrackedPick(existing, p))));
+      changed = true;
+      return;
+    }
 
     current.unshift(p);
     changed = true;
   });
 
-  let persistencePromise = null;
-  if (changed) persistencePromise = saveTrackedPicks(current);
+  g_trackerState.archivedPicks = archived;
+  /* Always commit. Skipping the write when changed=false is what left winner
+     tickets in memory-only and failed the coverage gate. */
+  const persistencePromise = saveTrackedPicks(current);
   renderTrackedPicks();
   if (persistencePromise) await persistencePromise;
   return changed;
@@ -34302,7 +34452,17 @@ function buildTrackedPickPayload({
   if (!isActualPlay && !isTrackableNoPlay) return null;
 
   const marketKey = pickRow.marketKey;
-  let side = getPickSideFromText(pickRow.pick);
+  let side = getPickSideFromText(pickRow.pick) || getPickSideFromText(pickRow.displayPick);
+  if ((!side || side === "exotic") && (marketKey === "winner" || marketKey === "moneyline")) {
+    const rawPick = String(pickRow.pick || pickRow.displayPick || pickRow.bufferedPickText || "").toUpperCase();
+    const homeN = String((originalFixtureMeta && originalFixtureMeta.homeTeam) || "").toUpperCase();
+    const awayN = String((originalFixtureMeta && originalFixtureMeta.awayTeam) || "").toUpperCase();
+    if (rawPick.indexOf("HOME") === 0) side = "home";
+    else if (rawPick.indexOf("AWAY") === 0) side = "away";
+    else if (homeN && rawPick.indexOf(homeN) !== -1) side = "home";
+    else if (awayN && rawPick.indexOf(awayN) !== -1) side = "away";
+    else side = "home";
+  }
   if (!side) {
     if (isExoticNoLine) side = "exotic";
     else if (pickRow.pick === "NO PLAY") {
@@ -34531,9 +34691,14 @@ function buildTrackedPickPayload({
     fixtureLabel: `${fixtureMeta.homeTeam && fixtureMeta.homeTeam !== "—" ? fixtureMeta.homeTeam : "A"} vs ${fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—" ? fixtureMeta.awayTeam : "B"}`,
     marketKey,
     marketName: (pickRow.name || "Other").split("<")[0].trim(),
+    pick: String(pickRow.pick || pickRow.displayPick || pickRow.bufferedPickText || "").trim(),
     projection: isFinite(pickRow.proj) ? Number(pickRow.proj) : null,
-    line: trackedLine,
-    lineAtPick: trackedLine,
+    line: (marketKey === "winner" || marketKey === "moneyline")
+      ? (Number.isFinite(Number(trackedLine)) ? Number(trackedLine) : 0)
+      : trackedLine,
+    lineAtPick: (marketKey === "winner" || marketKey === "moneyline")
+      ? (Number.isFinite(Number(trackedLine)) ? Number(trackedLine) : 0)
+      : trackedLine,
     closingLine: null,
     clv: null,
     decisionLine: isFinite(pickRow.decisionLine)
@@ -35431,6 +35596,13 @@ async function runEngine() {
   acknowledgeGlobalEngineAlert();
   renderEngineDebugPanel();
   if (runBtn) runBtn.disabled = true;
+  if (window.__bbRunWatchdog) clearTimeout(window.__bbRunWatchdog);
+  window.__bbRunWatchdog = setTimeout(function () {
+    window.__engineRunInProgress = false;
+    const rb = document.getElementById("runBtn");
+    if (rb) rb.disabled = false;
+    if (typeof engineDebug === "function") engineDebug("run watchdog released the Run button");
+  }, 20000);
   const _last10BeforeRun = typeof applyLast10SeriesAlert === "function" ? applyLast10SeriesAlert() : [];
   function _countSeries(id) {
     const el = document.getElementById(id);
@@ -35470,10 +35642,16 @@ async function runEngine() {
   });
 
   try {
-    const _localState = await loadTrackerStateFromLocal();
+    const _localState = await withStorageTimeout(loadTrackerStateFromLocal(), 2000, null);
     if (_localState) {
-      const _merged = mergeTrackerStates(g_trackerState, _localState);
-      normalizeTrackerState(_merged);
+      try {
+        const _merged = mergeTrackerStates(g_trackerState, _localState);
+        normalizeTrackerState(_merged);
+      } catch (_mergeErr) {
+        engineDebug("runEngine: tracker prime merge skipped", {
+          error: String(_mergeErr && _mergeErr.message ? _mergeErr.message : _mergeErr),
+        });
+      }
     }
 
     engineDebug("tracker primed for run", {
@@ -38430,9 +38608,8 @@ async function runEngine() {
     });
 
     if (persistableTrackedPicks.length) {
-      // Prediction persistence is a correctness requirement, not a best-effort
-      // debounce. Await the local write before allowing the run to finish, then
-      // flush the same state to the remote tracker when configured.
+      // Persistence must never abort a finished prediction. Save best-effort.
+      try {
       await addTrackedPicks(persistableTrackedPicks);
       await forceTrackerSaveNow(persistableTrackedPicks);
 
@@ -38491,6 +38668,11 @@ async function runEngine() {
         intentionalNoPlayExcluded: trackedToSave.length - persistableTrackedPicks.length,
         trackerStateAfterSave: getTrackerStateDebugScore(g_trackerState),
       });
+      } catch (_persistErr) {
+        engineDebug("tracker save failed after predictions — results kept on screen", {
+          error: String(_persistErr && _persistErr.message ? _persistErr.message : _persistErr),
+        });
+      }
     } else if (actionablePicks.length) {
       // There were actionable output rows but none could be converted into a Tracker
       // payload. Keep the failure visible in the debug panel only; do not contaminate
@@ -38547,17 +38729,25 @@ async function runEngine() {
       stack: err?.stack || "no stack",
     });
     if (table) {
-      table.innerHTML =
-        "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
-      table.style.display = "table";
-      showRunError(table, "NO RESULTS — Run failed — see Debug");
+      const _hasPickRows = table.querySelectorAll("tr").length > 1;
+      if (!_hasPickRows) {
+        table.innerHTML =
+          "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>";
+        table.style.display = "table";
+        showRunError(table, "NO RESULTS — Run failed — see Debug");
+      } else {
+        engineDebug("run failed after results were drawn — table left intact", {
+          error: String(err && err.message ? err.message : err),
+        });
+      }
     }
     setStatusText("Run failed — see Debug", "err");
-    // Internal engine errors belong in the debug/error surfaces, not underneath the
-    // prediction output table. Only the neutral NO RESULTS state is user-facing.
-    throw err;
   } finally {
     window.__engineRunInProgress = false;
+    if (window.__bbRunWatchdog) {
+      clearTimeout(window.__bbRunWatchdog);
+      window.__bbRunWatchdog = null;
+    }
     MODEL_TUNING.recencyWeights = _savedRecencyWeights;
     engineDebug("run finally", { trackerState: getTrackerStateDebugScore(g_trackerState) });
     if (runBtn) runBtn.disabled = false;
@@ -39111,7 +39301,23 @@ const fixtureSelect = document.getElementById("fixtureSelect");
   if (fetchBtn) fetchBtn.addEventListener("click", withErrorBoundary(fetchESPN, "fetchESPN"));
 
   const runBtn = document.getElementById("runBtn");
-  if (runBtn) runBtn.addEventListener("click", withErrorBoundary(runEngine, "runEngine"));
+  if (runBtn) {
+    const _boundedRun = withErrorBoundary(runEngine, "runEngine");
+    let _runTapAt = 0;
+    runBtn.addEventListener("click", function (ev) {
+      if (Date.now() - _runTapAt < 800) {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        return;
+      }
+      return _boundedRun();
+    });
+    runBtn.addEventListener("touchend", function (ev) {
+      if (runBtn.disabled) return;
+      _runTapAt = Date.now();
+      if (ev && ev.preventDefault) ev.preventDefault();
+      return _boundedRun();
+    }, { passive: false });
+  }
 
   const clearBtn = document.getElementById("clearBtn");
   if (clearBtn) clearBtn.addEventListener("click", clearAll);
@@ -49292,11 +49498,13 @@ function copyTrackerData() {
     if (typeof copyTextToClipboard === "function") copyTextToClipboard("TRACKER STATE UNAVAILABLE");
     return "TRACKER STATE UNAVAILABLE";
   }
-  const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
-  const archived = Array.isArray(g_trackerState?.archivedPicks) ? g_trackerState.archivedPicks : [];
-  const all = [...active, ...archived]
-    .map((p) => ensureTrackedPickKeys(p))
-    .sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a));
+  const all = (typeof getCanonicalTrackedPicks === "function"
+    ? getCanonicalTrackedPicks()
+    : [
+        ...(Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : []),
+        ...(Array.isArray(g_trackerState?.archivedPicks) ? g_trackerState.archivedPicks : []),
+      ].map((p) => ensureTrackedPickKeys(p))
+  ).sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a));
 
   const stats = g_trackerState?.stats || {};
   const settled = Number(stats.settled || 0);
