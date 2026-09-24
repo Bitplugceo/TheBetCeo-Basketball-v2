@@ -1,9 +1,9 @@
-S
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <!-- board-fix-v3 -->
-  <meta name="generator" content="bb-engine-board-fix-v10-tracker-report-parity" />
+  <meta name="generator" content="bb-engine-board-fix-v11-archive-10h-delete-forever" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -14991,6 +14991,7 @@ function getCanonicalTrackedPicks() {
     let p = ensureTrackedPickKeys({ ...raw });
     if (typeof normalizeWinnerTrackedPick === "function") p = normalizeWinnerTrackedPick(p);
     if (p.isShadow) return;
+    if (typeof isPickDeleted === "function" && isPickDeleted(p, (AppState.tracker.state && AppState.tracker.state.deletedSignatures) || [])) return;
     const key =
       (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) ||
       (typeof makeTrackedSignature === "function" && makeTrackedSignature(p)) ||
@@ -18694,7 +18695,9 @@ function normalizeTrackerState(raw) {
     lineMemory: remoteLineMemory,
   };
 
-  const _del = AppState.tracker.state.deletedSignatures || [];
+  persistDeletedForeverKeys(AppState.tracker.state.deletedSignatures || []);
+  const _del = persistDeletedForeverKeys(AppState.tracker.state.deletedSignatures || []);
+  AppState.tracker.state.deletedSignatures = _del;
   const _isGone = (p) => {
     if (typeof isPickDeleted === "function") return isPickDeleted(p, _del);
     const keys = [p?.signature, p?.pickId].filter(Boolean);
@@ -19786,10 +19789,16 @@ function collectTrackedPickKeys(pick, extra) {
   if (pick) {
     add(typeof makeTrackedSignature === "function" ? makeTrackedSignature(pick) : "");
     add(typeof makeTrackerActiveMergeKey === "function" ? makeTrackerActiveMergeKey(pick) : "");
+    add(typeof trackerMarketSlotKey === "function" ? trackerMarketSlotKey(pick) : "");
     add(pick.signature);
     add(pick.pickId);
+    add(pick.eventId);
+    if (pick.eventId && pick.marketKey) add(String(pick.eventId) + "|" + String(pick.marketKey).toLowerCase());
+    if (typeof trackerCoverageKeysForPick === "function") {
+      trackerCoverageKeysForPick(pick).forEach(add);
+    }
   }
-  return [...new Set(keys)];
+  return [...new Set(keys.filter(Boolean))];
 }
 
 function findTrackedPickBySignature(signature) {
@@ -19853,13 +19862,44 @@ function lockDeletedPickKeys(keys) {
   });
 }
 
+function loadDeletedForeverKeys() {
+  try {
+    const raw = localStorage.getItem("BB_TRACKER_DELETED_FOREVER");
+    const arr = raw ? JSON.parse(raw) : [];
+    return Array.isArray(arr) ? arr.map(String).filter(Boolean) : [];
+  } catch (_e) {
+    return [];
+  }
+}
+function persistDeletedForeverKeys(keys) {
+  const next = [...new Set([
+    ...loadDeletedForeverKeys(),
+    ...(keys || []).map(String).filter(Boolean),
+    ...(g_deletedSigLock ? [...g_deletedSigLock] : []),
+  ])].slice(-4000);
+  try {
+    localStorage.setItem("BB_TRACKER_DELETED_FOREVER", JSON.stringify(next));
+  } catch (_e) {}
+  lockDeletedPickKeys(next);
+  return next;
+}
 function isPickDeleted(pick, deletedList = []) {
   if (!pick) return false;
   const deletedSet = new Set(
-    [...(deletedList || []), ...(g_deletedSigLock ? [...g_deletedSigLock] : [])].filter(Boolean),
+    [
+      ...(deletedList || []),
+      ...(g_deletedSigLock ? [...g_deletedSigLock] : []),
+      ...loadDeletedForeverKeys(),
+    ].filter(Boolean),
   );
   if (!deletedSet.size) return false;
-  return collectTrackedPickKeys(pick).some((k) => deletedSet.has(k));
+  if (collectTrackedPickKeys(pick).some((k) => deletedSet.has(k))) return true;
+  const slot = typeof trackerMarketSlotKey === "function" ? trackerMarketSlotKey(pick) : "";
+  if (slot && slot !== "|" && deletedSet.has(slot)) return true;
+  const eid = String(pick.eventId || "");
+  const mk = String(pick.marketKey || "").toLowerCase();
+  if (eid && mk && deletedSet.has(eid + "|" + mk)) return true;
+  return false;
 }
 
 function mergeTrackerStates(localState, serverState) {
@@ -20118,11 +20158,12 @@ function archiveExpiredTrackedPicks() {
     const isSettled = ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase());
     const gameTs = safeParseDate(p.eventDate) || safeParseDate(p.createdAt) || 0;
     const settledTs = safeParseDate(p.settledAt) || safeParseDate(p.manualSettledAt) || 0;
-    const refTs = isSettled ? (settledTs || now) : gameTs;
-    const isExpired = refTs > 0 && now - refTs >= cutoffMs;
-    const isTimestamplessSettled = false;
+    const createdTs = safeParseDate(p.createdAt) || 0;
+    /* Never use `now` as the ref — that kept undated settled rows on the page forever. */
+    const refTs = isSettled ? (settledTs || gameTs || createdTs) : gameTs;
+    const isExpired = isSettled && (refTs === 0 || now - refTs >= cutoffMs);
     const isGhost = isSettled && gameTs > 0 && (now - gameTs) / (1000 * 60 * 60 * 24) > 7;
-    if ((isSettled && isExpired) || isTimestamplessSettled || isGhost) {
+    if ((isSettled && isExpired) || isGhost) {
       moveToArchived.push(stripHeavyData(p));
       changed = true;
     } else {
@@ -20219,21 +20260,23 @@ function getTrackedPickListGroup(pick) {
 
 function isTrackedPickVisibleOnPage(pick) {
   if (!pick || pick.isShadow) return false;
+  if (typeof isPickDeleted === "function" && isPickDeleted(pick, (AppState.tracker.state && AppState.tracker.state.deletedSignatures) || [])) {
+    return false;
+  }
   const status = String(pick.resultStatus || "pending").toLowerCase();
   const now = Date.now();
   const created = safeParseDate(pick.createdAt) || 0;
   const eventTs = safeParseDate(pick.eventDate) || 0;
   const settledTs = safeParseDate(pick.settledAt) || safeParseDate(pick.manualSettledAt) || 0;
   const gameTs = eventTs || created || settledTs;
-  const fourteenDays = 14 * 24 * 60 * 60 * 1000;
   if (status === "pending") {
     if (!gameTs) return true;
     if (gameTs > now) return true;
-    return now - gameTs < fourteenDays;
+    return (now - gameTs) / (1000 * 60 * 60) < 48;
   }
   const ref = settledTs || gameTs || created;
-  if (!ref) return true;
-  return now - ref < fourteenDays;
+  if (!ref) return false;
+  return now - ref < TRACKER_SETTLED_VISIBLE_MS;
 }
 
 function getCurrentFixtureMeta() {
@@ -20392,14 +20435,14 @@ function renderTrackedPicks() {
   // aborted render and left the static "0 saved • 0 settled • 0 wins" forever.
   if (!summaryEl || !emptyEl || !wrapEl || !bodyEl) return;
 
-  const allPicks = typeof getCanonicalTrackedPicks === "function"
-    ? getCanonicalTrackedPicks()
-    : [
-        ...(Array.isArray(AppState.tracker.state.activePicks) ? AppState.tracker.state.activePicks : []),
-        ...(Array.isArray(AppState.tracker.state.archivedPicks) ? AppState.tracker.state.archivedPicks : []),
-      ];
+  if (typeof archiveExpiredTrackedPicks === "function") {
+    try { archiveExpiredTrackedPicks(); } catch (_arch) {}
+  }
+  const allPicks = Array.isArray(AppState.tracker.state.activePicks)
+    ? AppState.tracker.state.activePicks.slice()
+    : [];
 
-  /* Same universe as Engine Report: active + archived, one row per event/market slot. */
+  /* Tracked Picks page: active window only. Archived/10h+ settled stay off this page. */
   const visiblePicks = allPicks
     .filter(isTrackedPickVisibleOnPage)
     .filter((p) => {
@@ -20468,13 +20511,7 @@ function renderTrackedPicks() {
   ).length;
 
   // Tracker summary matches classic engine: live / wins / losses only (not saved/settled).
-  const pendingShown = displayPicks.filter(function (p) {
-    return !["win", "loss", "push"].includes(String(p.resultStatus || "pending").toLowerCase());
-  }).length;
-  const shownWins = displayPicks.filter(function (p) { return p.resultStatus === "win"; }).length;
-  const shownLosses = displayPicks.filter(function (p) { return p.resultStatus === "loss"; }).length;
-  summaryEl.innerHTML =
-    `${liveCount} live • ${pendingShown} pending shown • ${shownWins}W-${shownLosses}L on page • ${stats.wins || 0}W-${stats.losses || 0}L all-time`;
+  summaryEl.innerHTML = `${liveCount} live • ${stats.wins || 0} wins • ${stats.losses || 0} losses`;
 
   try {
     const _qfStats = getQuarterFormBacktestStats();
@@ -23398,15 +23435,31 @@ function applyTrackedPickDeletion(signature) {
     if (pick) break;
   }
   const keys = collectTrackedPickKeys(pick, signature);
+  if (pick && typeof trackerMarketSlotKey === "function") keys.push(trackerMarketSlotKey(pick));
   lockDeletedPickKeys(keys);
-  const deleted = AppState.tracker.state.deletedSignatures || [];
+  persistDeletedForeverKeys(keys);
+  const deleted = persistDeletedForeverKeys(
+    (AppState.tracker.state.deletedSignatures || []).concat(keys),
+  );
+  AppState.tracker.state.deletedSignatures = deleted;
   AppState.tracker.state.activePicks = (AppState.tracker.state.activePicks || []).filter(
     (p) => !isPickDeleted(p, deleted),
   );
   AppState.tracker.state.archivedPicks = (AppState.tracker.state.archivedPicks || []).filter(
     (p) => !isPickDeleted(p, deleted),
   );
+  try {
+    const mem = AppState.tracker.state.lineMemory || {};
+    const eid = pick && pick.eventId ? String(pick.eventId) : "";
+    if (eid) {
+      Object.keys(mem).forEach(function (k) {
+        if (String(k).indexOf(eid) !== -1) delete mem[k];
+      });
+      AppState.tracker.state.lineMemory = mem;
+    }
+  } catch (_lm) {}
   AppState.tracker.state.updatedAt = new Date().toISOString();
+  if (typeof g_lastDerivedUpdatedAt !== "undefined") g_lastDerivedUpdatedAt = null;
   rebuildTrackerStats();
   return { pick, keys };
 }
@@ -24666,6 +24719,13 @@ async function addTrackedPicks(newPicks) {
 
     // No-play / no-eventId picks are not tracked (shadow-list storage removed).
     if (p.isShadow) return;
+    if (typeof isPickDeleted === "function" && isPickDeleted(p, (g_trackerState && g_trackerState.deletedSignatures) || [])) {
+      engineDebug("addTrackedPicks: skipped permanently deleted ticket", {
+        market: p.marketKey,
+        eventId: p.eventId,
+      });
+      return;
+    }
 
     const prisonKey = makeTrackerActiveMergeKey(p);
     const slotKey = trackerMarketSlotKey(p);
