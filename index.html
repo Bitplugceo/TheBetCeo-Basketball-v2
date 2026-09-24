@@ -1,9 +1,10 @@
+S
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <!-- board-fix-v3 -->
-  <meta name="generator" content="bb-engine-board-fix-v11-archive-10h-delete-forever" />
+  <meta name="generator" content="bb-engine-board-fix-v13-delete-one-market-only" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -19792,8 +19793,11 @@ function collectTrackedPickKeys(pick, extra) {
     add(typeof trackerMarketSlotKey === "function" ? trackerMarketSlotKey(pick) : "");
     add(pick.signature);
     add(pick.pickId);
-    add(pick.eventId);
-    if (pick.eventId && pick.marketKey) add(String(pick.eventId) + "|" + String(pick.marketKey).toLowerCase());
+    /* Ticket scope only: event + market. Never the bare eventId or one
+       delete would tombstone Winner + totals + handicaps for the same game. */
+    if (pick.eventId && pick.marketKey) {
+      add(String(pick.eventId) + "|" + String(pick.marketKey).toLowerCase());
+    }
     if (typeof trackerCoverageKeysForPick === "function") {
       trackerCoverageKeysForPick(pick).forEach(add);
     }
@@ -19893,12 +19897,14 @@ function isPickDeleted(pick, deletedList = []) {
     ].filter(Boolean),
   );
   if (!deletedSet.size) return false;
-  if (collectTrackedPickKeys(pick).some((k) => deletedSet.has(k))) return true;
+  const ticketKeys = collectTrackedPickKeys(pick);
+  if (ticketKeys.some((k) => deletedSet.has(k))) return true;
   const slot = typeof trackerMarketSlotKey === "function" ? trackerMarketSlotKey(pick) : "";
   if (slot && slot !== "|" && deletedSet.has(slot)) return true;
   const eid = String(pick.eventId || "");
   const mk = String(pick.marketKey || "").toLowerCase();
   if (eid && mk && deletedSet.has(eid + "|" + mk)) return true;
+  /* A leftover bare eventId tombstone must not kill sibling markets. */
   return false;
 }
 
@@ -20157,13 +20163,15 @@ function archiveExpiredTrackedPicks() {
     const p = ensureTrackedPickKeys({ ...pick });
     const isSettled = ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase());
     const gameTs = safeParseDate(p.eventDate) || safeParseDate(p.createdAt) || 0;
-    const settledTs = safeParseDate(p.settledAt) || safeParseDate(p.manualSettledAt) || 0;
-    const createdTs = safeParseDate(p.createdAt) || 0;
-    /* Never use `now` as the ref — that kept undated settled rows on the page forever. */
-    const refTs = isSettled ? (settledTs || gameTs || createdTs) : gameTs;
-    const isExpired = isSettled && (refTs === 0 || now - refTs >= cutoffMs);
+    /* Game tip time wins. A rewritten settledAt must not keep Sep-17 tickets on the page. */
+    const isExpired = isSettled && (typeof isSettledPickPastPageWindow === "function"
+      ? isSettledPickPastPageWindow(p)
+      : (function () {
+          const refTs = getTrackedPickClockMs(p);
+          return refTs === 0 || now - refTs >= cutoffMs;
+        })());
     const isGhost = isSettled && gameTs > 0 && (now - gameTs) / (1000 * 60 * 60 * 24) > 7;
-    if ((isSettled && isExpired) || isGhost) {
+    if (isExpired || isGhost) {
       moveToArchived.push(stripHeavyData(p));
       changed = true;
     } else {
@@ -20206,12 +20214,41 @@ function archiveExpiredTrackedPicks() {
 <script>
 
 function safeParseDate(val) {
-  if (!val) return 0;
-  let ms = Date.parse(String(val));
+  if (val == null || val === "") return 0;
+  if (typeof val === "number" && isFinite(val)) {
+    const n = val > 0 && val < 1e12 ? val * 1000 : val;
+    return n > 0 ? n : 0;
+  }
+  const s = String(val).trim();
+  if (!s) return 0;
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const n = Number(s);
+    if (!isFinite(n) || n <= 0) return 0;
+    return n < 1e12 ? n * 1000 : n;
+  }
+  let ms = Date.parse(s);
   if (Number.isFinite(ms) && ms > 0) return ms;
-  ms = Date.parse(String(val).replace(/-/g, "/").replace("T", " "));
+  ms = Date.parse(s.replace(/-/g, "/").replace("T", " "));
+  if (Number.isFinite(ms) && ms > 0) return ms;
+  ms = Date.parse(s.replace(" at ", " "));
   if (Number.isFinite(ms) && ms > 0) return ms;
   return 0;
+}
+function getTrackedPickClockMs(pick) {
+  if (!pick) return 0;
+  const eventTs = safeParseDate(pick.eventDate);
+  const createdTs = safeParseDate(pick.createdAt);
+  const settledTs = safeParseDate(pick.settledAt) || safeParseDate(pick.manualSettledAt);
+  const candidates = [eventTs, createdTs, settledTs].filter(function (t) { return t > 0; });
+  if (!candidates.length) return 0;
+  return Math.min.apply(null, candidates);
+}
+function isSettledPickPastPageWindow(pick) {
+  const status = String((pick && pick.resultStatus) || "pending").toLowerCase();
+  if (status !== "win" && status !== "loss" && status !== "push") return false;
+  const ref = getTrackedPickClockMs(pick);
+  if (!ref) return true;
+  return Date.now() - ref >= TRACKER_SETTLED_VISIBLE_MS;
 }
 
 function makeTrackedSignature(pick) {
@@ -20265,18 +20302,13 @@ function isTrackedPickVisibleOnPage(pick) {
   }
   const status = String(pick.resultStatus || "pending").toLowerCase();
   const now = Date.now();
-  const created = safeParseDate(pick.createdAt) || 0;
-  const eventTs = safeParseDate(pick.eventDate) || 0;
-  const settledTs = safeParseDate(pick.settledAt) || safeParseDate(pick.manualSettledAt) || 0;
-  const gameTs = eventTs || created || settledTs;
-  if (status === "pending") {
-    if (!gameTs) return true;
-    if (gameTs > now) return true;
-    return (now - gameTs) / (1000 * 60 * 60) < 48;
+  if (status === "win" || status === "loss" || status === "push") {
+    return !isSettledPickPastPageWindow(pick);
   }
-  const ref = settledTs || gameTs || created;
-  if (!ref) return false;
-  return now - ref < TRACKER_SETTLED_VISIBLE_MS;
+  const gameTs = getTrackedPickClockMs(pick);
+  if (!gameTs) return true;
+  if (gameTs > now) return true;
+  return (now - gameTs) / (1000 * 60 * 60) < 48;
 }
 
 function getCurrentFixtureMeta() {
@@ -20444,7 +20476,11 @@ function renderTrackedPicks() {
 
   /* Tracked Picks page: active window only. Archived/10h+ settled stay off this page. */
   const visiblePicks = allPicks
-    .filter(isTrackedPickVisibleOnPage)
+    .filter(function (p) {
+      if (!p) return false;
+      if (isSettledPickPastPageWindow(p)) return false;
+      return isTrackedPickVisibleOnPage(p);
+    })
     .filter((p) => {
       if (!p || !p.marketKey) return true;
       try {
@@ -23451,9 +23487,11 @@ function applyTrackedPickDeletion(signature) {
   try {
     const mem = AppState.tracker.state.lineMemory || {};
     const eid = pick && pick.eventId ? String(pick.eventId) : "";
-    if (eid) {
+    const mk = pick && pick.marketKey ? String(pick.marketKey).toLowerCase() : "";
+    if (eid && mk) {
       Object.keys(mem).forEach(function (k) {
-        if (String(k).indexOf(eid) !== -1) delete mem[k];
+        const ks = String(k).toLowerCase();
+        if (ks.indexOf(String(eid).toLowerCase()) !== -1 && ks.indexOf(mk) !== -1) delete mem[k];
       });
       AppState.tracker.state.lineMemory = mem;
     }
