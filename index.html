@@ -1,3 +1,4 @@
+S
 
 <!DOCTYPE html>
 <html lang="en">
@@ -3087,7 +3088,6 @@ const BB_LOCK_REGISTRY = Object.freeze([
       <optgroup label="── B ──────────────────">
         <option value="bahrain_premier">Bahrain - Premier League</option>
         <option value="bal">BAL - Basketball Africa League</option>
-        <option value="bbl">BBL - Germany</option>
         <option value="belarus_premier">Belarus - Premier League</option>
         <option value="belarus_premier_w">Belarus - Premier League, Women</option>
         <option value="belgium_top">Belgium - Top Division 1</option>
@@ -3146,12 +3146,13 @@ const BB_LOCK_REGISTRY = Object.freeze([
         <option value="fiba_u20eb_b">FIBA - U20 EuroBasket, Div. B</option>
         <option value="finland_koris">Finland - Korisliiga</option>
         <option value="france_lfb_w">France - LFB Women</option>
-        <option value="proa">France - Pro A</option>
-        <option value="prob">France - Pro B</option>
+        <option value="proa">France - LNB</option>
+        <option value="prob">France - LNB Elite 2</option>
       </optgroup>
       <optgroup label="── G ──────────────────">
         <option value="georgia_super">Georgia - Superleague</option>
         <option value="georgia_w">Georgia - Women's Superliga</option>
+        <option value="bbl">Germany - BBL</option>
         <option value="germany_dbbl">Germany - DBBL</option>
         <option value="germany_proa">Germany - Pro A</option>
         <option value="gb_super_league_w">Great Britain - Super League Women</option>
@@ -15797,13 +15798,139 @@ function acknowledgeGlobalEngineAlert() {
 }
 
 let g_militaryRaidInFlight = false;
+const MILITARY_RAID_STAGE_TIMEOUT_MS = 15000; // a stage that hangs this long is treated as failed, not frozen forever
+
+function withRaidTimeout(promise, ms, label) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`"${label}" timed out after ${ms}ms`)), ms);
+    Promise.resolve(promise).then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
+
+/* Structured logging: every raid event goes through one shape (event name +
+   payload) instead of ad hoc strings scattered through the function, so a
+   log consumer can filter/aggregate on `event` without parsing prose. */
+function raidLog(event, data) {
+  const payload = Object.assign({ event, ts: Date.now() }, data || {});
+  const level = /fatal|error|timeout|missing|failed/i.test(event)
+    ? "ERROR"
+    : /complete|verdict|passed/i.test(event)
+      ? "VERDICT"
+      : "INFO";
+  engineDebug(`Military Raid: ${event}`, payload);
+  if (typeof AFDB !== "undefined" && typeof AFDB.log === "function") {
+    AFDB.log(level, "RAID", event, payload);
+  }
+  return payload;
+}
+
+/* Everything the raid calls that isn't guaranteed to exist on every page/build.
+   Declared once so "is this loaded?" is answered up front and logged loudly,
+   instead of each stage silently no-op'ing on its own typeof check with no
+   record of what was skipped or why. */
+const MILITARY_RAID_DEPENDENCIES = [
+  "getTrackerLocalStateStableKey",
+  "purgeZombieTrackerStorageKeys",
+  "reconcileTrackerBucketConflicts",
+  "refreshTrackedPickResults",
+  "pollLiveGameClocks",
+  "archiveExpiredTrackedPicks",
+  "forceTrackerSaveNow",
+  "hydrateTrackedPicks",
+  "rebuildTrackerStats",
+  "renderTrackedPicks",
+  "isTrackerReportView",
+  "renderTrackerAnalytics",
+];
+
+function checkMilitaryRaidDependencies() {
+  const root = typeof window !== "undefined" ? window : globalThis;
+  const missing = MILITARY_RAID_DEPENDENCIES.filter((name) => typeof root[name] !== "function");
+  if (!(typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function")) {
+    missing.push("AFDB.runTestFetch");
+  }
+  return missing;
+}
+
+/* Framework-free smoke test for the raid's pure/synchronous helpers. There's
+   no test runner or build step in this single-file app, so this is a manual
+   assertion suite instead: it only touches synthetic in-memory data (never
+   AppState or real storage) and is safe to run any time. Call
+   runMilitaryRaidSelfTest() from the console before trusting a deploy. */
+function runMilitaryRaidSelfTest() {
+  const results = [];
+  const check = (name, pass, detail) => {
+    results.push({ name, pass: !!pass, detail: detail ?? null });
+  };
+
+  const fastPromise = withRaidTimeout(Promise.resolve("ok"), 500, "self-test-fast").then(
+    (v) => check("withRaidTimeout resolves before deadline", v === "ok", { value: v }),
+    (err) => check("withRaidTimeout resolves before deadline", false, err?.message),
+  );
+
+  const hungPromise = withRaidTimeout(new Promise(() => {}), 30, "self-test-hang").then(
+    () => check("withRaidTimeout rejects a hung stage", false, "did not reject"),
+    (err) =>
+      check(
+        "withRaidTimeout rejects a hung stage",
+        /timed out/i.test(err?.message || ""),
+        err?.message,
+      ),
+  );
+
+  const dupPick = {
+    eventId: "SELFTEST-EVT-1",
+    marketKey: "ft",
+    side: "over",
+    line: 220,
+    resultStatus: "pending",
+    homeTeam: "Self Test Home",
+    awayTeam: "Self Test Away",
+  };
+  try {
+    const reconciled = reconcileTrackerBucketConflicts([{ ...dupPick }], [{ ...dupPick }]);
+    const activeMatches = (reconciled.activePicks || []).filter((p) => p.eventId === "SELFTEST-EVT-1");
+    const archivedMatches = (reconciled.archivedPicks || []).filter((p) => p.eventId === "SELFTEST-EVT-1");
+    check(
+      "reconcileTrackerBucketConflicts dedupes a cross-bucket duplicate",
+      activeMatches.length === 1 && archivedMatches.length === 0,
+      { activeMatches: activeMatches.length, archivedMatches: archivedMatches.length },
+    );
+  } catch (err) {
+    check(
+      "reconcileTrackerBucketConflicts dedupes a cross-bucket duplicate",
+      false,
+      err?.message || String(err),
+    );
+  }
+
+  try {
+    const missing = checkMilitaryRaidDependencies();
+    check("checkMilitaryRaidDependencies returns an array", Array.isArray(missing), { missing });
+  } catch (err) {
+    check("checkMilitaryRaidDependencies returns an array", false, err?.message || String(err));
+  }
+
+  return Promise.all([fastPromise, hungPromise]).then(() => {
+    const failed = results.filter((r) => !r.pass);
+    const summary = `Military Raid self-test: ${results.length - failed.length}/${results.length} passed`;
+    raidLog(failed.length ? "selftest_failed" : "selftest_passed", { results });
+    if (typeof console !== "undefined") {
+      console[failed.length ? "warn" : "log"](summary, results);
+    }
+    return { passed: results.length - failed.length, total: results.length, results };
+  });
+}
 
 /* ISSUE-RAID-05: "Military Raid" — one-tap global overseer for the whole
    tracker engine, not just whatever page it was tapped from. See ISSUE log
    on the debug page for the full list of bugs this closes. */
 async function triggerTrackerMilitaryRaid() {
   if (g_militaryRaidInFlight) {
-    engineDebug("Military Raid already in progress — ignoring duplicate tap");
+    raidLog("duplicate_tap_ignored", {});
     return null;
   }
   g_militaryRaidInFlight = true;
@@ -15814,7 +15941,10 @@ async function triggerTrackerMilitaryRaid() {
     statusEl.textContent = text;
     statusEl.style.color = color || "";
   };
+
+  try {
   setStatus("RAID IN PROGRESS ⚡️", "#ffcf73");
+  raidLog("raid_start", {});
 
   const countPending = () =>
     (Array.isArray(AppState.tracker.state.activePicks) ? AppState.tracker.state.activePicks : []).filter(
@@ -15827,7 +15957,13 @@ async function triggerTrackerMilitaryRaid() {
     pending: countPending(),
   };
 
+  const missingDeps = checkMilitaryRaidDependencies();
+  if (missingDeps.length) {
+    raidLog("preflight_missing_dependencies", { missing: missingDeps });
+  }
+
   const report = {
+    missingDependencies: missingDeps,
     zombieKeysPurged: 0,
     bucketsReconciled: false,
     settledThisPass: 0,
@@ -15839,14 +15975,11 @@ async function triggerTrackerMilitaryRaid() {
 
   const runStage = async (label, fn) => {
     try {
-      await fn();
+      await withRaidTimeout(fn(), MILITARY_RAID_STAGE_TIMEOUT_MS, label);
     } catch (err) {
       const errMsg = err?.message || String(err);
       report.errors.push({ stage: label, error: errMsg });
-      engineDebug(`Military Raid: ${label} failed`, { error: errMsg });
-      if (typeof AFDB !== "undefined" && typeof AFDB.log === "function") {
-        AFDB.log("ERROR", "RAID", `Raid stage "${label}" failed: ${errMsg}`, { stage: label });
-      }
+      raidLog("stage_failed", { stage: label, error: errMsg });
     }
   };
 
@@ -15947,10 +16080,7 @@ async function triggerTrackerMilitaryRaid() {
     (report.errors.length ? `, ${report.errors.length} stage(s) hit errors (see data)` : "") +
     ".";
 
-  if (typeof AFDB !== "undefined" && typeof AFDB.log === "function") {
-    AFDB.log("VERDICT", "RAID", summaryMsg, { before, after, ...report });
-  }
-  engineDebug(summaryMsg, { before, after, ...report });
+  raidLog("raid_complete", { summary: summaryMsg, before, after, ...report });
 
   setStatus(
     report.errors.length ? "RAID DONE (warnings) ⚡️" : "RAID COMPLETE ⚡️",
@@ -15958,8 +16088,19 @@ async function triggerTrackerMilitaryRaid() {
   );
   setTimeout(() => setStatus("", ""), 2400);
 
-  g_militaryRaidInFlight = false;
   return report;
+  } catch (fatalErr) {
+    // Anything that throws outside the per-stage guards (e.g. AppState in an
+    // unexpected shape while building `before`/`after`) lands here instead of
+    // leaking out and leaving g_militaryRaidInFlight stuck true forever.
+    const errMsg = fatalErr?.message || String(fatalErr);
+    raidLog("raid_fatal", { error: errMsg });
+    setStatus("RAID FAILED ⚠️", "#ff6b6b");
+    setTimeout(() => setStatus("", ""), 2400);
+    return null;
+  } finally {
+    g_militaryRaidInFlight = false;
+  }
 }
 
 function getDebugSeverity(line) {
