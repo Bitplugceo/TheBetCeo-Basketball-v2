@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5409,8 +5408,8 @@ function updateTeamUIFromStats(side, stats) {
     setVal(prefix + suf, "");
   });
 
+  const role = typeof getFixtureSideRole === "function" ? getFixtureSideRole(side) : "";
   (function fillVenueBoxesByRole() {
-    const role = typeof getFixtureSideRole === "function" ? getFixtureSideRole(side) : "";
     const elSH = document.getElementById(prefix + "FTScoredHome");
     const elAH = document.getElementById(prefix + "FTAllowedHome");
     const elSA = document.getElementById(prefix + "FTScoredAway");
@@ -26600,6 +26599,31 @@ function resetCardExtrasOnMatchChange() {
   const q = document.getElementById("qualityPaceBody");
   if (q) q.textContent = "Fetch stats to load ORTG, DRTG, net and pace.";
 }
+function renderQualityPaceCard() {
+  const body = document.getElementById("qualityPaceBody");
+  if (!body) return;
+  const nameA = (document.getElementById("teamAName")?.value || "").trim() || "Team A";
+  const nameB = (document.getElementById("teamBName")?.value || "").trim() || "Team B";
+  const dataA = (typeof AppState !== "undefined" && AppState.context?.data?.A) || {};
+  const dataB = (typeof AppState !== "undefined" && AppState.context?.data?.B) || {};
+  const oA = avgOrNaN(dataA.ortg10);
+  const dA = avgOrNaN(dataA.drtg10);
+  const oB = avgOrNaN(dataB.ortg10);
+  const dB = avgOrNaN(dataB.drtg10);
+  const pA = avgOrNaN(dataA.pace10);
+  const pB = avgOrNaN(dataB.pace10);
+  const netA = isFinite(oA) && isFinite(dA) ? oA - dA : NaN;
+  const netB = isFinite(oB) && isFinite(dB) ? oB - dB : NaN;
+  if (![oA, dA, oB, dB, pA, pB].some((v) => isFinite(v))) {
+    body.textContent = "Fetch stats to load ORTG, DRTG, net and pace.";
+    return;
+  }
+  const fmt = (v) => (isFinite(v) ? v.toFixed(1) : "—");
+  const fmtSigned = (v) => (isFinite(v) ? (v > 0 ? "+" : "") + v.toFixed(1) : "—");
+  const row = (label, o, d, n, p) =>
+    `<div>${escapeHtml(label)}: ORTG ${fmt(o)} &middot; DRTG ${fmt(d)} &middot; Net ${fmtSigned(n)} &middot; Pace ${fmt(p)}</div>`;
+  body.innerHTML = row(nameA, oA, dA, netA, pA) + row(nameB, oB, dB, netB, pB);
+}
 function updateCardExtraLabels() {
   const nameA = (document.getElementById("teamAName")?.value || "").trim() || "Team A";
   const nameB = (document.getElementById("teamBName")?.value || "").trim() || "Team B";
@@ -34152,6 +34176,7 @@ function compute2HProjection({
     finiteCount(bH2H) >= 2;
   const _preH2H_A2 = projA2H;
   const _preH2H_B2 = projB2H;
+  let hw;
   if (h2HasH2H) {
     const massacreH2H = getMassacreH2HSeries(
       "h2",
@@ -34208,7 +34233,7 @@ function compute2HProjection({
         : 0;
     const _h2PreH2HTotal =
       isFinite(projA2H) && isFinite(projB2H) ? Number(projA2H) + Number(projB2H) : NaN;
-    const hw = getH2HWeight(
+    hw = getH2HWeight(
       decayH2HA.length,
       decayH2HB.length,
       "h2",
@@ -34598,7 +34623,56 @@ function getMatchupDeltaSignal(side, marketKey, parsed) {
   };
 }
 
-/* Removed obsolete unreferenced mean helper. */
+/* SECTION 324B — cross-signal-agreement
+   ASSUMPTION (not part of the original spec — implemented to fill a previously-missing
+   function): combines two independent signal sources already used elsewhere in the engine
+   into a single {signals:[...]} list of over/under leans for one side of a market, so the
+   caller (getPickExplanationFactors) can check whether independent signals agree with the
+   model's pick. Uses the same 3% materiality threshold already applied to the Matchup-delta
+   factor display. Revisit if a different definition of "cross-signal agreement" was intended. */
+function getCrossSignalAgreement(side, marketKey, parsed) {
+  const signals = [];
+  const seasonSeries =
+    marketKey === "ft" ? getOverallSeries(side, 10) : getManualSeries(side, marketKey, parsed);
+  const seasonAvg = avgOrNaN(seasonSeries);
+  if (!Array.isArray(seasonSeries) || !isFinite(seasonAvg) || seasonAvg <= 0) {
+    return { side, marketKey, signals };
+  }
+
+  // Signal 1: head-to-head history vs season average (same basis as getMatchupDeltaSignal).
+  const h2hSeries = getH2HSeries(side, marketKey, parsed);
+  if (Array.isArray(h2hSeries) && h2hSeries.length >= 2) {
+    const h2hAvg = avgOrNaN(h2hSeries);
+    if (isFinite(h2hAvg)) {
+      const deltaPct = ((h2hAvg - seasonAvg) / seasonAvg) * 100;
+      if (Math.abs(deltaPct) >= 3) {
+        signals.push({
+          source: "h2h",
+          direction: deltaPct > 0 ? "over" : "under",
+          deltaPct: Number(deltaPct.toFixed(1)),
+        });
+      }
+    }
+  }
+
+  // Signal 2: recent form (last 5 games) vs the full 10-game season average.
+  const recentSeries = seasonSeries.slice(0, 5);
+  if (recentSeries.length >= 3) {
+    const recentAvg = avgOrNaN(recentSeries);
+    if (isFinite(recentAvg)) {
+      const deltaPct = ((recentAvg - seasonAvg) / seasonAvg) * 100;
+      if (Math.abs(deltaPct) >= 3) {
+        signals.push({
+          source: "recent_form",
+          direction: deltaPct > 0 ? "over" : "under",
+          deltaPct: Number(deltaPct.toFixed(1)),
+        });
+      }
+    }
+  }
+
+  return { side, marketKey, signals };
+}
 
 /* SECTION 326 — calibrate-confidence-model */
 function calibrateConfidenceModel() {
@@ -37628,7 +37702,7 @@ async function runEngine() {
 
     const projDiff = ftCalc.projAFT - ftCalc.projBFT;
 
-    const _coeffFitted = isConfidenceCoeffFitted(league, marketKey);
+    const _coeffFitted = isConfidenceCoeffFitted(league, "ft");
 
     const winnerMarginInputs = getMarginConfidenceInputs(
       winnerEdge,
@@ -37831,10 +37905,10 @@ async function runEngine() {
         h2Method: h2Calc.h2Method,
         h2hWeightApplied: h2Calc.h2hWeightApplied,
         h2hContribution: h2Calc.h2hContribution,
-        modelType: getConfidenceModelProvenance(league, marketKey).modelType,
-        fallbackReason: getConfidenceModelProvenance(league, marketKey).fallbackReason,
-        settledResults: getConfidenceModelProvenance(league, marketKey).settledResults,
-        requiredResults: getConfidenceModelProvenance(league, marketKey).requiredResults,
+        modelType: getConfidenceModelProvenance(league, "h2").modelType,
+        fallbackReason: getConfidenceModelProvenance(league, "h2").fallbackReason,
+        settledResults: getConfidenceModelProvenance(league, "h2").settledResults,
+        requiredResults: getConfidenceModelProvenance(league, "h2").requiredResults,
         volatility: h2VolatilityForConf,
         volLimit: getMarketVolLimit(league, "h2"),
         coeffFitted: _coeffFitted,
@@ -38440,7 +38514,7 @@ async function runEngine() {
       const warnings = [];
       const rows = Array.isArray(picks) ? picks : [];
       const finite = (v) => Number.isFinite(Number(v));
-      const prov = getConfidenceModelProvenance(leagueKey, marketKey || "ft");
+      const prov = getConfidenceModelProvenance(leagueKey, "ft");
       if (!meta || !meta.homeTeam || !meta.awayTeam) {
         errors.push("teams/events not identified");
       }
@@ -38642,7 +38716,7 @@ async function runEngine() {
         volatilityBlock: ftCalc.volatilityBlock,
         trap: ftTrap,
         h1Trap: h1Trap,
-        coeffFitted: isConfidenceCoeffFitted(league, marketKey || "ft"),
+        coeffFitted: isConfidenceCoeffFitted(league, "ft"),
 
         aVol: ftCalc.aVol,
         bVol: ftCalc.bVol,
