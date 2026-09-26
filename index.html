@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4806,7 +4805,13 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
   }
 
   const canonicalRows = [];
+  const seenCanonicalEventIds = new Set();
   completedAll.forEach(ev => {
+    const _rawEventId = ev?.id != null ? String(ev.id) : String(ev?.eventId || "");
+    // SofaScore pagination can overlap at page boundaries. A game must exist once
+    // in the canonical sample, never twice. Keep the first (newest) occurrence.
+    if (!_rawEventId || seenCanonicalEventIds.has(_rawEventId)) return;
+    seenCanonicalEventIds.add(_rawEventId);
     const isHome = String(ev?.homeTeam?.id || "") === String(teamId);
     const myScore = isHome ? ev?.homeScore : ev?.awayScore;
     const oppScore = isHome ? ev?.awayScore : ev?.homeScore;
@@ -4902,7 +4907,13 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
     completeOverall: overallRows.length,
     availableComplete: canonicalRows.length,
     overallEventIds: overallRows.map(r=>r.eventId),
-    overallAligned: new Set(overallRows.map(r=>r.eventId)).size === overallRows.length,
+    // The run-time validator consumes canonical rows from inputIntegrity first.
+    // Keep the exact same rows here so validation cannot falsely report missing IDs
+    // after a successful canonical fetch.
+    overallGameRows: overallRows,
+    overallAligned: overallRows.length > 0 &&
+      overallRows.every(r => r && r.eventId != null && String(r.eventId) !== "") &&
+      new Set(overallRows.map(r=>String(r.eventId))).size === overallRows.length,
     venue: {
       home: { count: venueRows.home.length, eventIds: venueRows.home.map(r=>r.eventId), aligned: true },
       away: { count: venueRows.away.length, eventIds: venueRows.away.map(r=>r.eventId), aligned: true },
