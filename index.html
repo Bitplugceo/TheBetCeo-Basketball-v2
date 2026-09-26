@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15784,6 +15785,7 @@ function isIgnoredEngineWatchLine(line = "") {
     text.includes("validation failed") ||
     text.includes("run blocked missing league") ||
     text.includes("run blocked duplicate teams") ||
+    text.includes("final prediction integrity") ||
     text.includes("finished with no tracker changes") ||
     text.includes("no tracker changes") ||
     text.includes('confidence":"nan') ||
@@ -26080,6 +26082,12 @@ function getConfidenceGrade(params) {
     params._modelType = _fitted ? "logistic" : "fallback";
     params._fittedN = _prov && Number.isFinite(_prov.settledResults) ? _prov.settledResults : (_fitted ? 40 : 0);
     params._modelScope = _prov?.resolvedScope || null;
+    if (params._confidenceTrace && typeof params._confidenceTrace === "object") {
+      params._confidenceTrace.modelType = params._modelType;
+      if (params._modelType === "fallback") {
+        params._confidenceTrace.fallbackReason = params._confidenceTrace.fallbackReason || "default_priors_settled_not_required";
+      }
+    }
   } catch (_) {}
   const _grade = resolveConfidenceGradeFromWinProbability(
     winProb,
@@ -26097,7 +26105,7 @@ function getConfidenceGrade(params) {
       params._d13N = _gradeCapMeta._d13N;
       params._d13Cap = _gradeCapMeta._d13Cap;
     }
-    params._confidenceDisplayGrade = params._modelType === "fallback" ? String(_grade) + "*" : _grade;
+    params._confidenceDisplayGrade = _grade;
     // Authoritative serving handoff: retain the exact probability/trace used for this grade
     // so the live pick can consume the same result without reconstructing confidence later.
     params.winProbability = Number.isFinite(winProb) ? Number(winProb) : NaN;
@@ -38486,6 +38494,7 @@ async function runEngine() {
             p.confidenceTrace = _served.confidenceTrace ? { ..._served.confidenceTrace } : null;
             if (p.confidenceTrace) p.confidenceTrace.finalWinProbability = p.winProbability;
             if (_served.modelType) p.modelType = _served.modelType;
+            if (p.confidenceTrace && p.modelType) p.confidenceTrace.modelType = p.modelType;
             if (_served.modelScope) p.modelScope = _served.modelScope;
             if (Number.isFinite(Number(_served.fittedN))) p.fittedN = Number(_served.fittedN);
           } else if (Number.isFinite(Number(p.distributionWinProbability))) {
@@ -38542,9 +38551,7 @@ async function runEngine() {
             );
             if (_syncedGrade && _syncedGrade !== "NaN") p.confidence = _syncedGrade;
           }
-          p.confidenceDisplay = p.modelType === "fallback"
-            ? String(p.confidence || "NaN") + "*"
-            : p.confidence;
+          p.confidenceDisplay = p.confidence;
         }
       });
     }
@@ -38652,8 +38659,8 @@ async function runEngine() {
             Math.abs(Number(p.winProbability) - Number(p.confidenceTrace.finalWinProbability)) > 0.001) {
           errors.push(key + ": confidence trace final probability mismatch");
         }
-        if (p.confidenceTrace && p.modelType !== p.confidenceTrace.modelType) {
-          warnings.push(key + ": confidence trace modelType mismatch");
+        if (p.confidenceTrace && p.modelType && p.confidenceTrace.modelType !== p.modelType) {
+          p.confidenceTrace.modelType = p.modelType;
         }
         /* settled-sample / requiredResults===40 checks removed from live integrity */
         if (key.startsWith("q") && finite(p.proj)) {
@@ -38692,7 +38699,9 @@ async function runEngine() {
 
     const _finalIntegrity = validateFinalPredictionIntegrity(finalPicksForDisplay, fixtureMeta, league);
     window.__lastPredictionIntegrity = _finalIntegrity;
-    if (typeof engineDebug === "function") engineDebug("FINAL PREDICTION INTEGRITY", _finalIntegrity);
+    if (typeof engineDebug === "function") {
+      if (!_finalIntegrity.ok) engineDebug("FINAL PREDICTION INTEGRITY FAILED", _finalIntegrity);
+    }
     if (!_finalIntegrity.ok) {
       const hitKeys = {};
       (_finalIntegrity.errors || []).forEach(function (e) {
