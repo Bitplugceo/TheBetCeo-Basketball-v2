@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <!-- board-fix-v3 -->
-  <meta name="generator" content="bb-engine-board-fix-v11-no-notes" />
+  <meta name="generator" content="bb-engine-board-fix-v14-rest25" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -4855,12 +4855,25 @@ function ssFinalFtPoints(scoreObj) {
 }
 
 window.__seriesDateCache = window.__seriesDateCache || {};
-function stashSeriesDates(side, marketKey, dates) {
+function stashSeriesDates(side, marketKey, dates, metric) {
   if (!Array.isArray(dates) || !dates.length) return;
-  window.__seriesDateCache[side + "_" + marketKey] = dates;
+  const _k = (typeof _seriesDateCacheKey === "function") ? _seriesDateCacheKey(side, marketKey, metric || "scored") : (side + "_" + marketKey + "_" + (metric || "scored"));
+  window.__seriesDateCache[_k] = dates;
 }
-function getStashedSeriesDates(side, marketKey) {
-  return window.__seriesDateCache[side + "_" + marketKey] || null;
+function _seriesDateCacheKey(side, marketKey, metric) {
+  let league = "", team = "", eventId = "";
+  try {
+    const fm = typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null;
+    league = String((fm && fm.league) || (typeof AppState !== "undefined" && AppState.context && AppState.context.data && AppState.context.data.league) || "");
+    eventId = String((fm && (fm.eventId || fm.id)) || "");
+    team = String(side || "");
+    if (fm) team = String(side === "B" ? (fm.teamBId || fm.awayId || "B") : (fm.teamAId || fm.homeId || "A"));
+  } catch (_e) {}
+  return [league, team, eventId, marketKey, metric || "any"].join("|");
+}
+function getStashedSeriesDates(side, marketKey, metric) {
+  const _k = _seriesDateCacheKey(side, marketKey, metric);
+  return window.__seriesDateCache[_k] || null;
 }
 
 function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predictionAsOf) {
@@ -5751,9 +5764,9 @@ function updateTeamUIFromStats(side, stats) {
       const dates = Array.isArray(own) && own.length ? own : stats.ftScoredDates;
       const n = Array.isArray(series) && series.length ? Math.min(10, series.length, dates.length) : Math.min(10, dates.length);
       AppState.context.data[side].overall[mk + "ScoredDates10"] = dates.slice(0, n);
-      if (typeof stashSeriesDates === "function") stashSeriesDates(side, mk, dates.slice(0, n));
+      if (typeof stashSeriesDates === "function") stashSeriesDates(side, mk, dates.slice(0, n), "scored");
     });
-    if (typeof stashSeriesDates === "function") stashSeriesDates(side, "ft", stats.ftScoredDates);
+    if (typeof stashSeriesDates === "function") stashSeriesDates(side, "ft", stats.ftScoredDates, "scored");
   }
 
   const _venueH1Scored = _role === "away" ? stats.h1AwayScoredList : stats.h1HomeScoredList;
@@ -7098,16 +7111,6 @@ function resolveFtSeries(side, ctx, opts) {
 }
 window.resolveFtSeries = resolveFtSeries;
 
-function buildGlobalModelState({ league, parsed, lines, injMultA = 1, injMultB = 1 }) {
-  const eb = getLeagueScoreBase(league);
-  const volLimit = getMarketVolLimit(league, "ft");
-
-  const aFTS = resolveFtSeries("A", null, { limit: 10, manual: parsed && parsed.aFTScored });
-  const bFTS = resolveFtSeries("B", null, { limit: 10, manual: parsed && parsed.bFTScored });
-  const intel = computeIntelligencePack(league, lines, parsed, "ft");
-  return { league, eb, volLimit, intel, injMultA, injMultB, aFTS, bFTS, lines };
-}
-
 /* SECTION 107 — model-config */
 const MODEL_CONFIG = {
   /* ISSUE-018: LINE_ANCHOR_* deleted (were UNUSED) */
@@ -7115,13 +7118,9 @@ const MODEL_CONFIG = {
 
 /* SECTION 108 — model-tuning */
 const MODEL_TUNING = {
-  // UNUSED — sample-size leagueBase anchor only; not book line shrink
-  anchorEnabled: { ft: true, h1: true, h2: true, team: true },
   h2hMaxWeight: 0.3,
   recencyWeights: [1.35, 1.2, 1.0, 0.85, 0.7, 0.56, 0.44, 0.33, 0.24, 0.16],
 
-  // UNUSED — sample-size leagueBase anchor only; not book line shrink
-  quarterAnchorBlendWeight: 0.7,
 };
 
 const TUNABLE_PARAM_REGISTRY = {
@@ -7663,17 +7662,6 @@ const TUNABLE_PARAM_REGISTRY = {
     description: "Optional extra injury-impact scale. Default 1.0 is a no-op. Audit #7.",
     lastVerifiedAt: null,
   },
-  paceDampening: {
-    value: 0.35,
-    min: 0.0,
-    max: 1.0,
-    type: "scalar",
-    scope: "global",
-    appliesTo: ["ft"],
-    description:
-      "LEGACY lock-fingerprint field. Not applied to live pace (would change totals). Kept so old config keys still parse. Audit #7.",
-    lastVerifiedAt: null,
-  },
   teamVolScale: {
     value: 0.5,
     min: 0.3,
@@ -7800,17 +7788,6 @@ const TUNABLE_PARAM_REGISTRY = {
     appliesTo: ["ft", "team_a", "team_b"],
     description:
       "Point signal applied by buildTotalMarketIntelSignal/buildTeamMarketIntelSignal (via applyDampedIntelSignal in computeFTProjection) when a team has under 1 day of rest (back-to-back). Was hardcoded; now tunable AND live-wired.",
-    lastVerifiedAt: null,
-  },
-  quarterAnchorBlendWeight: {
-    value: 1.0,
-    min: 1.0,
-    max: 1.0,
-    type: "scalar",
-    scope: "global",
-    appliesTo: ["q1", "q2", "q3", "q4"],
-    description:
-      "Legacy compatibility parameter. Quarter reconciliation is independent_no_rescale (FIX #39 / F-01): quarters keep independent projections; this value is unused (no blend / no pair rescale) and retained only for backwards-compatible parameter storage.",
     lastVerifiedAt: null,
   },
 
@@ -9020,7 +8997,7 @@ window.applyConstantProposalFromUI = function (constantName) {
 
 /* SECTION 119 — stored-confidence-model-proposal */
 const CONFIDENCE_REQUIRED_SAMPLE = 40;
-const CONFIDENCE_CALIBRATION_VERSION = "confidence-cal-v2";
+const CONFIDENCE_CALIBRATION_VERSION = "confidence-cal-v3-family";
 const CONFIDENCE_PROPOSAL_META_KEY = "BB_CONFIDENCE_MODEL_PROPOSAL_META_V2";
 const CONFIDENCE_APPLY_HISTORY_KEY = "BB_CONFIDENCE_MODEL_APPLY_HISTORY_V2";
 
@@ -9373,7 +9350,6 @@ const TUNING_GRID = {
     [1.0, 1.0, 1.0, 1.0, 1.0, 0.8, 0.63, 0.5, 0.4, 0.32],
   ],
   edgeMults: [1.0],
-  paceDampenings: [0.35],
   injuryMults: [1.0],
 };
 
@@ -11022,10 +10998,12 @@ function computeQuarterProjection({
       const ctxAQ = _ctxRoot.A || {};
       const ctxBQ = _ctxRoot.B || {};
 
-      const leaguePaceBaseQ =
+      const _rawPaceQ =
         LEAGUE_PACE_BASES[league] ||
         LEAGUE_PACE_BASES.default ||
         74 * ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown);
+      const _regMinQ = (typeof getLeagueRegulationMinutes === "function" ? getLeagueRegulationMinutes(league) : 48) || 48;
+      const leaguePaceBaseQ = _rawPaceQ * (48 / _regMinQ);
       const leagueRatingBaseQ =
         LEAGUE_RATING_BASES[league] ||
         LEAGUE_RATING_BASES.default *
@@ -11049,12 +11027,12 @@ function computeQuarterProjection({
       const oppA = Number.isFinite(_qAlB) ? _qAlB : avgOrNaN(bA);
       const oppB = Number.isFinite(_qAlA) ? _qAlA : avgOrNaN(aA);
       const projA_pts = anchorProjection(
-        isFinite(oppA) ? _qScA * _twQ + oppA * _owQ : _dateAwareAvgAQ,
+        isFinite(oppA) ? _qScA * _twQ + oppA * _owQ : NaN,
         sampleSize,
         leagueBaseQ,
       );
       const projB_pts = anchorProjection(
-        isFinite(oppB) ? _qScB * _twQ + oppB * _owQ : _dateAwareAvgBQ,
+        isFinite(oppB) ? _qScB * _twQ + oppB * _owQ : NaN,
         sampleSize,
         leagueBaseQ,
       );
@@ -11133,6 +11111,12 @@ function computeQuarterProjection({
 
       projA *= injA;
       projB *= injB;
+      if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function" && typeof computeIntelligencePack === "function") {
+        const _qIntel = computeIntelligencePack(league, null, _parsed);
+        const _qVolR = Number.isFinite(qVolRatio) ? qVolRatio : 1;
+        projA = applyDampedIntelSignal(projA, buildTeamMarketIntelSignal(_qIntel, "A").signal, _qVolR);
+        projB = applyDampedIntelSignal(projB, buildTeamMarketIntelSignal(_qIntel, "B").signal, _qVolR);
+      }
 
       const _qInjOppBoostFactor =
         getParam("injuryOppBoostFactor", league) ?? INJURY_OPPONENT_BOOST_FACTOR;
@@ -11144,7 +11128,7 @@ function computeQuarterProjection({
       const hasH2H = maybeReadH2HEnabled(qKey) && aH2H.length >= 2 && bH2H.length >= 2;
       const tier = getSampleTier(aS, bS);
 
-      const qFullModel = tier === "full";
+      const qFullModel = tier === "full" && Number.isFinite(oppA) && Number.isFinite(oppB);
       const qProjectionOnly = !hasH2H && tier === "thin";
       const _qPaceA10 = avgOrNaN(ctxAQ.pace10);
       const _qPaceB10 = avgOrNaN(ctxBQ.pace10);
@@ -11152,7 +11136,7 @@ function computeQuarterProjection({
         ? Math.abs(_qPaceA10 - _qPaceB10) > 6
         : false;
       if (hasH2H) {
-        const massacreH2HQ = getMassacreH2HSeries(qKey, typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null, _parsed);
+        const massacreH2HQ = getMassacreH2HSeries(qKey, typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null, _parsed, _ctxRoot, config?.recencyWeights ?? null);
         const decayH2HA = massacreH2HQ.A.length >= 2 ? massacreH2HQ.A : aH2H;
         const decayH2HB = massacreH2HQ.B.length >= 2 ? massacreH2HQ.B : bH2H;
 
@@ -11218,13 +11202,14 @@ function computeQuarterProjection({
         projA = isFinite(avgH2HA) ? projA * (1 - hw) + avgH2HA * hw : projA;
         projB = isFinite(avgH2HB) ? projB * (1 - hw) + avgH2HB * hw : projB;
 
-        const _aInjAdjBaselineQ =
-          avgOrNaN(aS) * injA * injuryOpponentBoostMultiplier(injB, _qInjOppBoostFactor);
-        const _bInjAdjBaselineQ =
-          avgOrNaN(bS) * injB * injuryOpponentBoostMultiplier(injA, _qInjOppBoostFactor);
-        projA = clipProjectionToBaseline(projA, _aInjAdjBaselineQ, volLimit);
-        projB = clipProjectionToBaseline(projB, _bInjAdjBaselineQ, volLimit);
       }
+
+      const _aInjAdjBaselineQ =
+        avgOrNaN(aS) * injA * injuryOpponentBoostMultiplier(injB, _qInjOppBoostFactor);
+      const _bInjAdjBaselineQ =
+        avgOrNaN(bS) * injB * injuryOpponentBoostMultiplier(injA, _qInjOppBoostFactor);
+      projA = clipProjectionToBaseline(projA, _aInjAdjBaselineQ, volLimit);
+      projB = clipProjectionToBaseline(projB, _bInjAdjBaselineQ, volLimit);
 
       const qProj = projA + projB;
       let qEdge = Number.isFinite(lineVal) ? qProj - lineVal : NaN;
@@ -11535,6 +11520,7 @@ function evaluatePickWithParams(pick, paramOverrides) {
       hasH2H,
       false,
       league,
+      { marketKey: pick.marketKey },
     );
     try {
       const _distProb = distributionWinProbability(edge, volLimit || 12, volRatio);
@@ -12337,6 +12323,7 @@ async function runRetrospectiveAnalysis(pick) {
               _hasH2H,
               false,
               league,
+              { marketKey },
             );
             // Every eligible settled observation advances the candidate's authoritative
             // observation count. Delta remains the existing candidate-comparison metric.
@@ -13523,8 +13510,21 @@ function updateLeagueVolCache(league, values, sampleIds) {
   saveVolCache(cache);
 }
 
-function getLearnedLeagueStats(league) {
+function getLearnedLeagueStats(league, asOfOverride = null) {
   const lk = String(league || "").toLowerCase();
+  let _asOf = asOfOverride;
+  try {
+    const _ctx = typeof AppState !== "undefined" ? AppState.context?.data : null;
+    _asOf = _asOf || (typeof resolvePredictionAsOf === "function" ? resolvePredictionAsOf(null, _ctx) : null);
+    const _replay = typeof AppState !== "undefined" && !!(AppState.replayMode || AppState.ui?.replayMode);
+    if (_asOf || _replay) {
+      // Existing learned league cache entries have no per-observation date identity.
+      // They therefore cannot prove historical membership at an as-of cutoff.
+      return null;
+    }
+  } catch (_asOfErr) {
+    return null;
+  }
   const cache = loadVolCache();
   const entry = cache[lk];
   if (!entry || !(entry.n >= VOL_CACHE_MIN_SAMPLES)) return null;
@@ -14867,7 +14867,6 @@ function getLiveConfigFingerprint(league) {
       "underEdgeFactor",
       "injuryOppBoostFactor",
       "advancedBlendWeight",
-      "quarterAnchorBlendWeight",
       "fatigueB2BPenalty",
       "volatilityLimit",
       "edgeFTPointThreshold",
@@ -14878,7 +14877,6 @@ function getLiveConfigFingerprint(league) {
       "confidenceBThresh",
       "confidenceCThresh",
       "recencyWeights",
-      "paceDampening",
       "edgeMult",
       "injuryMult",
       "edgeH2PointThreshold",
@@ -15705,44 +15703,14 @@ function renderEngineErrorPage() {
     typeof AppState !== "undefined" && AppState.ui
       ? String(AppState.ui.alertLastLine || "Engine error — no additional message recorded.")
       : "Engine error — no additional message recorded.";
-  const inputErrors =
-    typeof AppState !== "undefined" && AppState.ui && Array.isArray(AppState.ui.inputErrors)
-      ? AppState.ui.inputErrors.filter(Boolean)
-      : [];
-  const auditIssues =
-    typeof AppState !== "undefined" && AppState.ui && Array.isArray(AppState.ui.auditIssues)
-      ? AppState.ui.auditIssues.filter(Boolean)
-      : [];
-  const debugLines =
-    typeof g_engineDebugLog !== "undefined" && Array.isArray(g_engineDebugLog)
-      ? g_engineDebugLog.filter((line) => /error|fatal|exception|failed|cannot access|referenceerror/i.test(String(line))).slice(0, 20)
-      : [];
-
-  const list = (items, emptyText) =>
-    items.length
-      ? '<ul style="margin:0;padding-left:18px;display:grid;gap:7px;">' +
-        items.map((x) => '<li style="font-size:11px;line-height:1.45;color:#ddd;white-space:pre-wrap;word-break:break-word;">' + _escapeEngineErrorHtml(x) + "</li>").join("") +
-        "</ul>"
-      : '<div style="font-size:11px;color:#666;">' + _escapeEngineErrorHtml(emptyText) + "</div>";
 
   body.innerHTML =
-    '<div style="border:1px solid #6b171b;background:#120708;padding:12px;margin-bottom:12px;">' +
-      '<div style="color:#ff5c61;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:7px;">CURRENT ERROR</div>' +
-      '<pre style="margin:0;color:#ff767b;font-size:11px;line-height:1.5;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;">' +
+    '<div style="border:1px solid #6b171b;background:#120708;padding:14px;">' +
+      '<div style="color:#ff5c61;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">SUMMARY</div>' +
+      '<pre style="margin:0;color:#ff767b;font-size:12px;line-height:1.5;white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;">' +
         _escapeEngineErrorHtml(lastLine) +
       '</pre>' +
-    '</div>' +
-    '<div style="border:1px solid #222;background:#0c0c0c;padding:12px;margin-bottom:12px;">' +
-      '<div style="color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">INPUT / FETCH ISSUES</div>' +
-      list(inputErrors, "None recorded.") +
-    '</div>' +
-    '<div style="border:1px solid #222;background:#0c0c0c;padding:12px;margin-bottom:12px;">' +
-      '<div style="color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">AUDIT ISSUES</div>' +
-      list(auditIssues, "None recorded.") +
-    '</div>' +
-    '<div style="border:1px solid #222;background:#0c0c0c;padding:12px;">' +
-      '<div style="color:#d4af37;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.8px;margin-bottom:8px;">RECENT ERROR LOG</div>' +
-      list(debugLines, "No matching error log lines recorded.") +
+      '<div style="margin-top:12px;font-size:11px;color:#888;line-height:1.45;">Full log is on the Debug page.</div>' +
     '</div>';
 }
 
@@ -16247,6 +16215,9 @@ function isIgnoredEngineWatchLine(line = "") {
        or unreachable third-party endpoint here must not page the user
        with the full-screen ENGINE ERROR overlay on plain page load. */
     text.includes("fetchapiliveeuroseasongames failed") ||
+    text.includes("findincrowdeurogame") ||
+    text.includes("byeventid season failed") ||
+    text.includes("incrowd euro live poll failed") ||
     text.includes("directeuroleague timeout") ||
     text.includes("directeurocup timeout") ||
     text.includes("directespn timeout") ||
@@ -17493,7 +17464,7 @@ function parseMarketRangeMeta(val) {
 
   const raw = String(val).trim();
   const normalizedRaw = normalizeDashes(raw);
-  const normalizeLine = (num) => Math.round(Number(num) * 2) / 2;
+  const normalizeLine = (num) => Number(num);
   const finitePositive = (num) => Number.isFinite(num) && num > 0;
 
   // Signed endpoints are supported so handicap ranges such as -6.5--2.5
@@ -17794,7 +17765,7 @@ function auditFinalGradeSentinel(confidence, pick) {
 function parseHandicapLine(val) {
   const meta = parseMarketRangeMeta(val);
   if (!meta || meta.invalid || !Number.isFinite(meta.mid)) return null;
-  return Math.round(Number(meta.mid) * 2) / 2;
+  return Number(meta.mid);
 }
 
 /* SECTION 205 — raw-market-input-map */
@@ -17904,12 +17875,15 @@ function parseGames(id) {
   if (parts.length > 10) return { err: "maximum 10 values allowed" };
 
   const out = [];
+  const _tokRe = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
+  const _allowZero = /(?:q[1-4]|1h|2h|h1|h2)/i.test(String(id || "")) && !/ft/i.test(String(id || ""));
   for (let i = 0; i < parts.length; i++) {
-    const v = parseFloat(parts[i]);
-    if (isNaN(v)) return { err: '"' + parts[i] + '" at position ' + (i + 1) + " is not a number" };
-
-    if (v <= 0)
-      return { err: "value at position " + (i + 1) + " must be greater than 0 (" + v + ")" };
+    const tok = String(parts[i]).trim();
+    if (!_tokRe.test(tok)) return { err: '"' + parts[i] + '" at position ' + (i + 1) + " is not a strict number" };
+    const v = Number(tok);
+    if (!Number.isFinite(v)) return { err: '"' + parts[i] + '" at position ' + (i + 1) + " is not a number" };
+    if (v < 0 || (!_allowZero && v === 0))
+      return { err: "value at position " + (i + 1) + " out of domain (" + v + ")" };
     if (v > 300) return { err: "value at position " + (i + 1) + " is too high (" + v + ")" };
     out.push(v);
   }
@@ -18045,7 +18019,7 @@ function weightedRecentAverageByDate(
 }
 
 /* SECTION 208 — date-aware-or-fallback-average */
-function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, league, recencyWeights = null, scope = "overall") {
+function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, league, recencyWeights = null, scope = "overall", metric = null) {
   const raw = Array.isArray(series) ? series.map(Number) : [];
   if (!raw.some((v) => isFinite(v))) return NaN;
   const _ctx = contextData || null;
@@ -18055,19 +18029,20 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
     const scoped = sideObj[scope] || {};
     const _mk = String(marketKey || "ft").toLowerCase();
     const _isFt = _mk === "ft" || _mk === "full";
-    dates =
-      scoped[marketKey + "ScoredDates"] ||
-      scoped[marketKey + "ScoredDates10"] ||
-      scoped[marketKey + "AllowedDates"] ||
-      scoped[marketKey + "AllowedDates10"] ||
-      (scope === "overall"
-        ? (sideObj.overall?.[marketKey + "ScoredDates10"] ||
-           sideObj.overall?.[marketKey + "AllowedDates10"] ||
-           (_isFt ? sideObj.overall?.ftScoredDates10 : null))
-        : null) ||
-      null;
+    const _metric = String(metric || "").toLowerCase();
+    if (_metric === "allowed") {
+      dates = scoped[marketKey + "AllowedDates"] || scoped[marketKey + "AllowedDates10"] ||
+        (scope === "overall" ? sideObj.overall?.[marketKey + "AllowedDates10"] : null) || null;
+    } else if (_metric === "scored") {
+      dates = scoped[marketKey + "ScoredDates"] || scoped[marketKey + "ScoredDates10"] ||
+        (scope === "overall" ? sideObj.overall?.[marketKey + "ScoredDates10"] : null) ||
+        (_isFt ? sideObj.overall?.ftScoredDates10 : null) || null;
+    } else {
+      dates = scoped[marketKey + "ScoredDates"] || scoped[marketKey + "ScoredDates10"] ||
+        (scope === "overall" ? sideObj.overall?.[marketKey + "ScoredDates10"] : null) || null;
+    }
   }
-  if (!dates || !dates.length) dates = getStashedSeriesDates(side, marketKey);
+  if (!dates || !dates.length) dates = getStashedSeriesDates(side, marketKey, metric);
   let asOf = null;
   try {
     if (typeof resolvePredictionAsOf === "function") {
@@ -19654,6 +19629,10 @@ async function pollLiveGameClocks() {
   for (const [league, eventIds] of byLeague) {
     /* EuroLeague / EuroCup: Incrowd live clock + settle (not ESPN scoreboard). */
     if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
+      const _uiLeague = (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
+      if (!isIncrowdEuroAutoFetchLeague(_uiLeague)) {
+        continue;
+      }
       try {
         if (typeof pollIncrowdEuroLiveForLeague === "function") {
           const _euroChanged = await pollIncrowdEuroLiveForLeague(league, eventIds, _liveClockSignal);
@@ -21270,7 +21249,6 @@ function renderConfigsPanel() {
   const totalCombos =
     TUNING_GRID.h2hFactors.length *
     TUNING_GRID.recencyProfiles.length *
-    TUNING_GRID.paceDampenings.length *
     TUNING_GRID.edgeMults.length *
     TUNING_GRID.injuryMults.length;
 
@@ -25144,9 +25122,7 @@ function clipProjectionToBaseline(proj, baseline, leagueVolLimit) {
   return Math.abs(delta) <= cap ? Number(proj) : b + Math.sign(delta) * cap;
 }
 /* SECTION 242 — passthrough-projection-mean */
-function passThroughProjectionMean(proj) {
-  return proj;
-}
+
 
 /* SECTION 243 — volatility-ratio-for-series */
 function getVolatilityRatioForSeries(series, leagueVolLimit) {
@@ -25519,17 +25495,31 @@ function validateLines(league, ftLine, h1Line, aLine, bLine) {
 
 /* SECTION 254 — validate-lines-from-extracted */
 function validateLinesFromExtracted(league, lines = {}) {
-  return validateLines(league, lines.ftLine, lines.h1Line, lines.aLine, lines.bLine);
+  const errors = validateLines(league, lines.ftLine, lines.h1Line, lines.aLine, lines.bLine);
+  const bands = getLineSanityBands(league);
+  const extra = [
+    ["h2Line", "h1", "2H Total"],
+    ["q1Line", "h1", "Q1 Total"],
+    ["q2Line", "h1", "Q2 Total"],
+    ["q3Line", "h1", "Q3 Total"],
+    ["q4Line", "h1", "Q4 Total"],
+    ["handicapLine", "team", "Handicap"],
+    ["handicapH1Line", "team", "1H Handicap"],
+    ["handicapH2Line", "team", "2H Handicap"],
+  ];
+  extra.forEach(([key, band, label]) => {
+    const v = lines[key];
+    if (v == null || !isFinite(v)) return;
+    const lohi = band === "h1" ? [bands.h1[0] * 0.45, bands.h1[1]] : bands[band] || bands.team;
+    const lo = band === "h1" && /Q/.test(label) ? bands.h1[0] * 0.35 : lohi[0];
+    const hi = /Q/.test(label) ? bands.h1[1] * 0.7 : lohi[1];
+    if (v < lo || v > hi) errors.push(label + " (" + v + ") outside expected range");
+  });
+  return errors;
 }
 
 /* SECTION 255 — resolve-overall-series */
-function resolveOverallSeries(manualSeries, fetchedSeries, limit) {
-  const n = Math.max(2, Math.min(Number(limit) || 25, 25));
-  const manual = Array.isArray(manualSeries) ? manualSeries : [];
-  if (manual.length >= 2) return manual.slice(0, n);
-  const fetched = Array.isArray(fetchedSeries) ? fetchedSeries : [];
-  return fetched.slice(0, n);
-}
+
 
 /* SECTION 256 — get-overall-series */
 function getOverallSeries(side, limit, contextData = null, manualOverride = null) {
@@ -25765,7 +25755,7 @@ function selectLock(markets) {
       !!m?.hasH2H,
       !!m?.trap,
       league,
-      m?.newSignals || m?.confidenceSignals || {},
+      { ...(m?.newSignals || m?.confidenceSignals || {}), marketKey: m?.marketKey || "ft" },
     );
 
     try {
@@ -25973,6 +25963,12 @@ function detectMarginTrap(edge, referenceScale, league, marketKey, combinedStdDe
 
 /* SECTION 269 — compute-lineup-quality */
 function computeLineupQuality(roster, injuryMeta) {
+  try {
+    const _ctx = typeof AppState !== "undefined" ? AppState.context && AppState.context.data : null;
+    const _as = typeof resolvePredictionAsOf === "function" ? resolvePredictionAsOf(null, _ctx) : null;
+    const _replay = !!(typeof AppState !== "undefined" && (AppState.replayMode || AppState.ui && AppState.ui.replayMode));
+    if (_as || _replay) return 1.0;
+  } catch (_e) {}
   let score = 1.0;
   // BUGFIX (audit item #13/#14): scoringMult must be a haircut (<=1), never a boost. Clamp
   // it here too (not just at the source in fetchInjuryMeta) so injImpact can never go
@@ -25982,16 +25978,9 @@ function computeLineupQuality(roster, injuryMeta) {
     : 1;
   const injImpact = 1 - _clampedScoringMult;
   score -= Math.min(0.25, injImpact);
-  if (Array.isArray(roster) && roster.length) {
-    const withPM = roster.filter(
-      (p) => p?.plusMinus !== null && p?.plusMinus !== undefined && isFinite(Number(p.plusMinus)),
-    );
-    if (withPM.length) {
-      const avgPM = withPM.reduce((s, p) => s + Number(p.plusMinus), 0) / withPM.length;
-      const rosterFactor = clampNumber((avgPM + 5) / 10, 0.5, 1.0);
-      score *= rosterFactor;
-    }
-  }
+  // Roster plus/minus is descriptive, not a validated player-value estimator.
+  // It is deliberately excluded from live lineup quality until a versioned,
+  // snapshot-safe player model exists. This prevents raw +/- from changing picks.
   return Math.max(0.3, Math.min(1.0, score));
 }
 
@@ -26098,6 +26087,23 @@ function buildConfidenceFeatures(pickOrArgs) {
   };
 }
 
+/* SECTION 274A — confidence-market-family
+   Confidence coefficients are fitted and served by market family.
+   TOTAL = FT/H1/H2 totals, TEAM = team totals, Q = quarter totals,
+   MARGIN = winner/handicap. No family may silently consume another family model. */
+function getConfidenceMarketFamily(marketKey) {
+  const mk = String(marketKey || "ft").toLowerCase();
+  if (mk === "team_a" || mk === "team_b") return "TEAM";
+  if (/^q[1-4]$/.test(mk)) return "Q";
+  if (mk === "winner" || mk === "handicap" || mk === "handicap_h1" || mk === "handicap_h2") return "MARGIN";
+  return "TOTAL";
+}
+function getConfidenceModelScopeKey(league, marketKey) {
+  const lk = String(league || "global").toLowerCase();
+  const family = getConfidenceMarketFamily(marketKey);
+  return lk + "::" + family;
+}
+
 /* SECTION 275 — get-confidence-win-probability */
 function getConfidenceWinProbability(
   grade,
@@ -26123,18 +26129,18 @@ function getConfidenceWinProbability(
           _resolvedScope = "version_mismatch";
         }
       } catch (_ve) {}
-      const leagueGroup =
-        league === "nba" ? "nba" : league === "ncaa" || league === "ncaaw" ? "ncaa" : "other";
-
-      if (_resolvedScope !== "version_mismatch" && models[league]) {
-        coeff = models[league];
-        _resolvedScope = league;
-      } else if (_resolvedScope !== "version_mismatch" && models[leagueGroup]) {
-        coeff = models[leagueGroup];
-        _resolvedScope = leagueGroup;
+      const _familyScope = getConfidenceModelScopeKey(league, newSignals.marketKey || "ft");
+      const _family = getConfidenceMarketFamily(newSignals.marketKey || "ft");
+      const _globalFamilyScope = "global::" + _family;
+      if (_resolvedScope !== "version_mismatch" && models[_familyScope]) {
+        coeff = models[_familyScope];
+        _resolvedScope = _familyScope;
+      } else if (_resolvedScope !== "version_mismatch" && models[_globalFamilyScope]) {
+        coeff = models[_globalFamilyScope];
+        _resolvedScope = _globalFamilyScope;
       } else {
-        coeff = models["global"] || {};
-        _resolvedScope = "global";
+        coeff = {};
+        _resolvedScope = "family_unfitted:" + _family;
       }
     }
   } catch (e) {
@@ -26197,19 +26203,17 @@ function getConfidenceWinProbability(
     league: league,
   });
   const _unfitted = !(coeff && (coeff.edgePct != null || coeff._fitted === true));
+  const _ALLOWED_CONF_KEYS = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
+  const _cleanCoeff = {};
+  _ALLOWED_CONF_KEYS.forEach((k) => { if (coeff && Number.isFinite(Number(coeff[k]))) _cleanCoeff[k] = Number(coeff[k]); });
+  coeff = _cleanCoeff;
   const logOdds =
     (coeff.intercept ?? (_unfitted ? 0 : -0.2)) +
     (coeff.edgePct ?? (_unfitted ? 0 : 0.5)) * _feat.edgePct +
     (coeff.volRatio ?? (_unfitted ? 0 : -0.3)) * _feat.volRatio +
     (coeff.sampleFull ?? (_unfitted ? 0 : 0.2)) * _feat.sampleFull +
     (coeff.h2h ?? (_unfitted ? 0 : 0.1)) * _feat.h2h +
-    (coeff.trap ?? (_unfitted ? 0 : -0.5)) * _feat.trap +
-    (coeff.lineupQuality ?? 0) * (_lineupQualityVal - 1.0) +
-    (coeff.paceGapRisk ?? 0) * (newSignals.paceGapRisk ? 1 : 0) +
-    (coeff.blowoutRisk ?? 0) * (_blowoutRiskFlag ? 1 : 0) +
-    (coeff.siblingAgree ?? 0) * _siblingAgree +
-    (coeff.defensiveFloor ?? 0) * (newSignals.defensiveFloorFlag ? _defFloorSideMult : 0) +
-    (coeff.quarterFormAgree ?? 0) * _quarterFormAgree;
+    (coeff.trap ?? (_unfitted ? 0 : -0.5)) * _feat.trap;
 
   let _calibratedLogOdds = Math.min(10, Math.max(-10, logOdds));
   try {
@@ -26238,7 +26242,7 @@ function getConfidenceWinProbability(
 }
 
 /* SECTION 276 — confidence-coeff-fitted */
-function isConfidenceCoeffFitted(league) {
+function isConfidenceCoeffFitted(league, marketKey = "ft") {
   try {
     const stored = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
     if (!stored) return false;
@@ -26246,20 +26250,9 @@ function isConfidenceCoeffFitted(league) {
     const _mv = models.modelVersion || models._modelVersion;
     const _cur = typeof getCurrentModelVersion === "function" ? getCurrentModelVersion() : null;
     if (_mv && _cur && String(_mv) !== String(_cur)) return false;
-    const leagueGroup =
-      league === "nba" ? "nba" : league === "ncaa" || league === "ncaaw" ? "ncaa" : "other";
-    let _resolvedScope = "global";
-    let coeff;
-    if (models[league]) {
-      coeff = models[league];
-      _resolvedScope = league;
-    } else if (models[leagueGroup]) {
-      coeff = models[leagueGroup];
-      _resolvedScope = leagueGroup;
-    } else {
-      coeff = models["global"];
-      _resolvedScope = "global";
-    }
+    const _family = getConfidenceMarketFamily(marketKey);
+    const _resolvedScope = getConfidenceModelScopeKey(league, marketKey);
+    const coeff = models[_resolvedScope] || models["global::" + _family];
     const _requiredCoeffKeys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
     const _keysFitted = !!(coeff && _requiredCoeffKeys.every((k) => Number.isFinite(coeff[k])));
     if (!_keysFitted) return false;
@@ -26278,47 +26271,10 @@ function isConfidenceCoeffFitted(league) {
 }
 
 /* SECTION 277 — confidence-model-fitted */
-function isConfidenceModelFitted(league) {
-
-  try {
-    const stored = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
-    if (!stored) return false;
-    const models = JSON.parse(stored);
-    const _mv = models.modelVersion || models._modelVersion;
-    const _cur = typeof getCurrentModelVersion === "function" ? getCurrentModelVersion() : null;
-    if (_mv && _cur && String(_mv) !== String(_cur)) return false;
-    
-    if (typeof isConfidenceCoeffFitted === "function") {
-      return isConfidenceCoeffFitted(league);
-    }
-    
-    const leagueGroup =
-      league === "nba" ? "nba" : league === "ncaa" || league === "ncaaw" ? "ncaa" : "other";
-    let _resolvedScope = "global";
-    let coeff;
-    if (models[league]) {
-      coeff = models[league];
-      _resolvedScope = league;
-    } else if (models[leagueGroup]) {
-      coeff = models[leagueGroup];
-      _resolvedScope = leagueGroup;
-    } else {
-      coeff = models["global"];
-      _resolvedScope = "global";
-    }
-    const keys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
-    if (!keys.every(function (k) { return Number.isFinite(coeff && coeff[k]); })) return false;
-    let _coeffN = 0;
-    try {
-      const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
-      _coeffN = Number(nMap[_resolvedScope] || 0); /* FIX item 11: scoped N must not silently fall back to global N — a scoped coeff evaluated with global N could be treated as sufficiently trained when it is not */
-    } catch (_e) {
-      _coeffN = 0;
-    }
-    return _coeffN >= 40;
-  } catch (_e) {
-    return false;
-  }
+function isConfidenceModelFitted(league, marketKey = "ft") {
+  return typeof isConfidenceCoeffFitted === "function"
+    ? isConfidenceCoeffFitted(league, marketKey)
+    : false;
 }
 
 /* SECTION 278 — resolve-confidence-grade */
@@ -26340,7 +26296,7 @@ function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKe
 <script>
 
 /* SECTION 278A — confidence-model-provenance */
-function getConfidenceModelProvenance(league) {
+function getConfidenceModelProvenance(league, marketKey = "ft") {
   const result = {
     modelType: "fallback",
     fallbackReason: "confidence_model_unavailable",
@@ -26363,18 +26319,11 @@ function getConfidenceModelProvenance(league) {
       return result;
     }
     const lk = String(league || "").toLowerCase();
-    const leagueGroup = lk === "nba" ? "nba" : (lk === "ncaa" || lk === "ncaaw" ? "ncaa" : "other");
-    let coeff = null;
-    if (models[lk]) {
-      coeff = models[lk];
-      result.resolvedScope = lk;
-    } else if (models[leagueGroup]) {
-      coeff = models[leagueGroup];
-      result.resolvedScope = leagueGroup;
-    } else {
-      coeff = models.global;
-      result.resolvedScope = "global";
-    }
+    const family = getConfidenceMarketFamily(marketKey);
+    const familyScope = getConfidenceModelScopeKey(lk, marketKey);
+    const globalFamilyScope = "global::" + family;
+    let coeff = models[familyScope] || models[globalFamilyScope] || null;
+    result.resolvedScope = models[familyScope] ? familyScope : globalFamilyScope;
     const keys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
     if (!coeff || !keys.every((k) => Number.isFinite(coeff[k]))) {
       result.fallbackReason = "coefficients_unfitted";
@@ -26448,18 +26397,7 @@ function getConfidenceGrade(params) {
     hasH2H,
     !!trap,
     league,
-    {
-      paceGapRisk,
-      blowoutGap,
-      lineupQuality,
-      siblingEdge,
-      q4Edge,
-      q2Edge,
-      defensiveFloorFlag,
-      quarterFormAgreement,
-      pickEdge: edge,
-      pickSide: _pickSide,
-    },
+    {},
   );
   const _rawLogisticWinProb = Number.isFinite(winProb) ? Number(winProb) : null;
 
@@ -26471,12 +26409,9 @@ function getConfidenceGrade(params) {
       params = params || {};
       params._distributionWinProbDiagnostic = _distProb; 
       if (Number.isFinite(winProb)) {
-        
         winProb = blendConfidenceAndDistribution(_distProb, winProb);
-      } else {
-        
-        winProb = _distProb;
       }
+      // unfitted model: keep distribution diagnostic only — do not grade from it
       engineDebug("Distribution-blend winProb (primary=confidence model)", {
         league,
         marketKey: params?.marketKey,
@@ -26540,6 +26475,13 @@ function getConfidenceGrade(params) {
     return "NaN";
   }
 
+  if (!Number.isFinite(_rawLogisticWinProb)) {
+    if (params && typeof params === "object") {
+      params._modelType = "fallback";
+      params._confidenceDisplayGrade = "NaN";
+    }
+    return "NaN";
+  }
   const _gradeCapMeta = {};
   try {
     const _fitted = typeof isConfidenceModelFitted === "function" ? isConfidenceModelFitted(league) : false;
@@ -26589,6 +26531,7 @@ function getMarginConfidenceGrade(params) {
     hasH2H,
     !!trap,
     league,
+    { marketKey: params?.marketKey || "winner" },
   );
   // injuryFetchFailed honored after distribution blend (0.62 cap).
 
@@ -26613,9 +26556,11 @@ function getMarginConfidenceGrade(params) {
         if (Number.isFinite(winProb)) {
           winProb = blendConfidenceAndDistribution(_distProb, winProb);
         } else {
-          winProb = _distProb;
+          // A distribution estimate is diagnostic only. Without a fitted confidence
+          // model this path must remain NO PLAY rather than silently grading on it.
+          winProb = NaN;
         }
-        engineDebug("Margin distribution-blend winProb (primary=confidence model)", {
+        engineDebug("Margin distribution-blend winProb (confidence model required)", {
           league,
           marketKey: params?.marketKey,
           distributionWinProb: _distProb,
@@ -26633,6 +26578,7 @@ function getMarginConfidenceGrade(params) {
   if (params && typeof params === "object") {
     const _marginLogisticWinProb = getConfidenceWinProbability(
       null, marginEdgePct, volRatio, sampleTier, hasH2H, !!trap, league,
+      { marketKey: params?.marketKey || "winner" },
     );
     const _marginVolLimit = Number(
       isFinite(volLimitPts) && volLimitPts > 0
@@ -26716,7 +26662,7 @@ function anchorProjection(proj, sampleSize, leagueBase, league = "") {
   if (n >= 10) return proj;
   let blendFactor = n / 10;
   try {
-    const w = (typeof getParam === "function" ? getParam("anchorBlendWeight", league) : null);
+    const w = null;
     if (Number.isFinite(Number(w)) && Number(w) > 0) {
       // Tunable scales how quickly sample evidence dominates the league anchor.
       blendFactor = Math.max(0, Math.min(1, (n / 10) * Number(w)));
@@ -26741,14 +26687,6 @@ function readLooseSeries(id) {
     }
     out.push(value);
     if (out.length === 10) break;
-  }
-  if (out.length >= 6) {
-    let increasing = true;
-    for (let i = 1; i < out.length; i++) if (!(out[i] > out[i-1])) { increasing = false; break; }
-    if (increasing) {
-      out.reverse();
-      try { window.__BB_SERIES_AUTO_REVERSED = "series #" + id + " auto-reversed to recent-first"; } catch (_) {}
-    }
   }
   return out;
 }
@@ -26995,12 +26933,11 @@ function computeIntelligencePack(league, lines = {}, parsedInput = null, marketK
   const backToBack =
     (Number.isFinite(restDaysA) && restDaysA < 1) ||
     (Number.isFinite(restDaysB) && restDaysB < 1);
-  const travelMilesResult = computeTravelMilesForCurrentFixture(league);
   return {
     restDaysA,
     restDaysB,
-    travelMiles: Number.isFinite(travelMilesResult) ? travelMilesResult : 0, // confidence-only (not a market intel signal input)
-    travelMilesKnown: Number.isFinite(travelMilesResult),
+    travelMiles: null,
+    travelMilesKnown: false,
     backToBack,
     marketScale: String(marketKey || "ft").toLowerCase() === "ft" ? 1 : 0.5,
     previousGapDaysA: ctxA.previousGapDays,
@@ -27140,19 +27077,21 @@ function applyAvailabilityLayer() {
   }
 }
 /* SECTION 296 — intelligence-layer-to-picks */
-function applyIntelligenceLayerToPicks(picks, intelligencePack, league) {
+function annotateIntelligenceDiagnostics(picks, intelligencePack, league) {
   if (!Array.isArray(picks) || !picks.length || !intelligencePack) return;
   picks.forEach((p) => {
     if (!p || p.pick === "NO PLAY") return;
     const restA = Number(intelligencePack.restDaysA);
     const restB = Number(intelligencePack.restDaysB);
     const travel = Number(intelligencePack.travelMiles || 0);
-    if ((Number.isFinite(restA) && restA < 1) || (Number.isFinite(restB) && restB < 1)) {
-      p.intelligenceAdjusted = true;
-      p.intelligenceNote = null;
-    } else if (travel > 1000) {
-      p.intelligenceNote = null;
-    }
+    p.intelligenceAdjusted = false;
+    p.intelligenceNote = null;
+    p.intelligenceDiagnostics = {
+      restDaysA: Number.isFinite(restA) ? restA : null,
+      restDaysB: Number.isFinite(restB) ? restB : null,
+      travelMiles: Number.isFinite(travel) ? travel : null,
+      appliedToProjection: false,
+    };
   });
 }
 
@@ -28234,7 +28173,7 @@ function stripOTFromScores(scoreA, scoreB, linesA, linesB, regulationPeriods) {
      FT-family KEEP OT. Period series use linescores (regulation) by construction. */
   try {
     const st = (new Error()).stack || "";
-    if (/computeFTProjection|getOverallSeries|buildGlobalModelState|ssFinalFtPoints/i.test(st)) {
+    if (/computeFTProjection|getOverallSeries|resolveFtSeries|ssFinalFtPoints/i.test(st)) {
       console.error("[BB OT POLICY] stripOTFromScores invoked from FT path — refused");
       if (typeof reportSoftFailure === "function") reportSoftFailure("OT-policy-FT-path", "stripOTFromScores");
       return { scoreA: scoreA, scoreB: scoreB, refused: true };
@@ -28791,16 +28730,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         lastGameState: summaries.find(Boolean)?.venueState || null,
         venueReliable,
 
-        sos: (() => {
-          const cache = window._espnStandingsCache?.[leagueKey]?.data;
-          if (!cache) return null;
-          const oppPcts = unique
-            .slice(0, 10)
-            .map((g) => cache[g.oppId]?.pct)
-            .filter((v) => isFinite(v) && v > 0);
-          if (oppPcts.length < 3) return null;
-          return parseFloat((oppPcts.reduce((a, b) => a + b, 0) / oppPcts.length).toFixed(3));
-        })(),
+        sos: null,
       }
     : null;
 }
@@ -29388,7 +29318,7 @@ async function findIncrowdEuroGameByEventId(league, eventId, opts) {
       const hit = matchIncrowdGameByEventId(games, eid);
       if (hit) return hit;
     } catch (e) {
-      logDebug("findIncrowdEuroGame ByEventId season failed", { code, error: String(e && e.message || e) });
+      if (typeof engineDebug === "function") engineDebug("findIncrowdEuroGame ByEventId season failed", { code, error: String(e && e.message || e) });
     }
   }
   /* Fallback: api-live.euroleague.net (IDs differ — match identifier/code) */
@@ -30119,15 +30049,15 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       );
     }
 
-    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates);
-    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates);
-    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates);
-    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates);
-    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates);
-    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates);
+    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates, "scored");
+    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates, "scored");
+    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates, "scored");
+    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates, "scored");
+    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates, "scored");
+    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates, "scored");
     ["q1", "q2", "q3", "q4"].forEach((qk) => {
-      if (aStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("A", qk, aStats[qk + "ScoredDates"]);
-      if (bStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("B", qk, bStats[qk + "ScoredDates"]);
+      if (aStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("A", qk, aStats[qk + "ScoredDates"], "scored");
+      if (bStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("B", qk, bStats[qk + "ScoredDates"], "scored");
     });
 
     if (!aStats && !bStats)
@@ -31485,15 +31415,15 @@ async function fetchKblCore(league, teamAName, teamBName) {
       );
     }
 
-    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates);
-    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates);
-    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates);
-    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates);
-    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates);
-    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates);
+    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates, "scored");
+    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates, "scored");
+    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates, "scored");
+    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates, "scored");
+    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates, "scored");
+    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates, "scored");
     ["q1", "q2", "q3", "q4"].forEach((qk) => {
-      if (aStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("A", qk, aStats[qk + "ScoredDates"]);
-      if (bStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("B", qk, bStats[qk + "ScoredDates"]);
+      if (aStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("A", qk, aStats[qk + "ScoredDates"], "scored");
+      if (bStats?.[qk + "ScoredDates"]?.length) stashSeriesDates("B", qk, bStats[qk + "ScoredDates"], "scored");
     });
 
     if (!aStats && !bStats) throw new Error("No recent KBL schedule data found for these teams.");
@@ -32189,17 +32119,17 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       );
     }
 
-    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates);
-    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates);
-    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates);
-    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates);
-    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates);
-    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates);
+    if (aStats?.ftScoredDates?.length) stashSeriesDates("A", "ft", aStats.ftScoredDates, "scored");
+    if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates, "scored");
+    if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates, "scored");
+    if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates, "scored");
+    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates, "scored");
+    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates, "scored");
     ["q1", "q2", "q3", "q4"].forEach((qk) => {
       if (aStats?.[qk + "ScoredDates"]?.length)
-        stashSeriesDates("A", qk, aStats[qk + "ScoredDates"]);
+        stashSeriesDates("A", qk, aStats[qk + "ScoredDates"], "scored");
       if (bStats?.[qk + "ScoredDates"]?.length)
-        stashSeriesDates("B", qk, bStats[qk + "ScoredDates"]);
+        stashSeriesDates("B", qk, bStats[qk + "ScoredDates"], "scored");
     });
 
     if (!aStats && !bStats)
@@ -32458,7 +32388,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
               pos: a.position?.abbreviation || "G",
               tsPercent: tsa > 0 ? parseFloat((pts / (2 * tsa)).toFixed(3)) : null,
               minPG: _fs("avgMinutes") || _fs("minutes") || null,
-              plusMinus: _fs("plusMinus") || null,
+              plusMinus: (function(){ const _pm = _fs("plusMinus"); return Number.isFinite(_pm) ? _pm : null; })(),
             };
           })
           .sort((a, b) => b.ppg - a.ppg)
@@ -32468,13 +32398,14 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       }
     }
 
-    // Manual predictions do not fetch or parse injury/availability data.
-    const [rostA, rostB] = await Promise.all([
+    const [rostA, rostB, injALive, injBLive] = await Promise.all([
       fetchRoster(teamAId),
       fetchRoster(teamBId),
+      fetchInjuryMeta(espnBase, teamAId, aAvg, league),
+      fetchInjuryMeta(espnBase, teamBId, bAvg, league),
     ]);
-    AppState.injuries.A = defaultInjuryMeta();
-    AppState.injuries.B = defaultInjuryMeta();
+    AppState.injuries.A = injALive || defaultInjuryMeta();
+    AppState.injuries.B = injBLive || defaultInjuryMeta();
 
     AppState.context.data = {
       league,
@@ -32867,8 +32798,15 @@ function getManualVenueSeriesForSide(side, marketKey, metric, parsed) {
 function normalizeAsOfCutoff(predictionDate) {
   if (predictionDate == null || predictionDate === "") return null;
   if (/^\d{4}-\d{2}-\d{2}$/.test(String(predictionDate))) {
-    const d = new Date(String(predictionDate) + "T23:59:59.999");
-    return d.getTime();
+    try {
+      const fm = typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null;
+      const kick = fm && (fm.startTime || fm.tipoff || fm.gameDateTime || fm.commenceTime || fm.dateTime);
+      if (kick) {
+        const kt = Date.parse(kick);
+        if (Number.isFinite(kt)) return kt;
+      }
+    } catch (_k) {}
+    return null;
   }
   const t = Date.parse(predictionDate);
   return Number.isFinite(t) ? t : null;
@@ -32922,12 +32860,15 @@ function resolvePredictionAsOf(explicit, contextData) {
     if (contextData) {
       const fm = contextData.fixtureMeta || {};
       const v =
+        contextData.predictionDate ||
+        fm.predictionDate ||
+        contextData.asOf ||
+        fm.asOf ||
+        fm.startTime ||
+        fm.tipoff ||
+        fm.gameDateTime ||
         fm.eventDate ||
         contextData.eventDate ||
-        contextData.predictionDate ||
-        contextData.asOf ||
-        fm.predictionDate ||
-        fm.asOf ||
         fm.date ||
         null;
       if (v) return v;
@@ -32936,7 +32877,7 @@ function resolvePredictionAsOf(explicit, contextData) {
   try {
     if (typeof AppState !== "undefined") {
       const m = AppState.meta || (AppState.context && AppState.context.meta) || {};
-      if (m.eventDate || m.predictionDate || m.asOf) return m.eventDate || m.predictionDate || m.asOf;
+      if (m.predictionDate || m.asOf || m.eventDate) return m.predictionDate || m.asOf || m.eventDate;
       if (AppState.eventDate) return AppState.eventDate;
     }
   } catch (_e2) {}
@@ -33199,14 +33140,24 @@ function getManualAllowedSeries(side, marketKey, parsed, contextRoot = null) {
 /* SECTION 312 — get-h2h-series */
 function getH2HSeries(side, marketKey, parsed, contextRoot = null) {
   if (!parsed) return [];
-  if (side === "A" && marketKey === "ft") return safeArr(parsed.aFTH2H) || [];
-  if (side === "B" && marketKey === "ft") return safeArr(parsed.bFTH2H) || [];
-  if (side === "A" && marketKey === "h1") return safeArr(parsed.a1HH2H) || [];
-  if (side === "B" && marketKey === "h1") return safeArr(parsed.b1HH2H) || [];
+  let _asOfOn = false;
+  let _asOfVal = null;
+  try {
+    const _ctx = contextRoot || (typeof AppState !== "undefined" ? AppState.context && AppState.context.data : null);
+    const _as = typeof resolvePredictionAsOf === "function" ? resolvePredictionAsOf(null, _ctx) : null;
+    _asOfVal = _as;
+    _asOfOn = !!_as;
+  } catch (_e) {}
+  if (!_asOfOn) {
+    if (side === "A" && marketKey === "ft") return safeArr(parsed.aFTH2H) || [];
+    if (side === "B" && marketKey === "ft") return safeArr(parsed.bFTH2H) || [];
+    if (side === "A" && marketKey === "h1") return safeArr(parsed.a1HH2H) || [];
+    if (side === "B" && marketKey === "h1") return safeArr(parsed.b1HH2H) || [];
+  }
 
   if (marketKey === "h2") {
     const parsedH2Key = side === "A" ? "a2HH2H" : "b2HH2H";
-    if (parsed && Array.isArray(parsed[parsedH2Key]) && parsed[parsedH2Key].length >= 2) {
+    if (!_asOfOn && parsed && Array.isArray(parsed[parsedH2Key]) && parsed[parsedH2Key].length >= 2) {
       return safeArr(parsed[parsedH2Key]).slice(0, 10);
     }
     const _h2hRoot = contextRoot || (parsed && parsed.h2hGames ? parsed : null);
@@ -33243,7 +33194,7 @@ function getH2HSeries(side, marketKey, parsed, contextRoot = null) {
   }
   if (marketKey.startsWith("q")) {
     const pKey = side.toLowerCase() + marketKey.toUpperCase() + "H2H";
-    if (parsed[pKey] && parsed[pKey].length) return safeArr(parsed[pKey]);
+    if (!_asOfOn && parsed[pKey] && parsed[pKey].length) return safeArr(parsed[pKey]);
   }
   return [];
 }
@@ -33569,10 +33520,10 @@ function computeFTProjection({
   }
 
   const sampleSize = Math.min(finiteCount(aFTS), finiteCount(bFTS));
-  const aOverallAvg = getDateAwareOrFallbackAverage(aFTS, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null);
-  const bOverallAvg = getDateAwareOrFallbackAverage(bFTS, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null);
-  const aVenueAvg = getDateAwareOrFallbackAverage(aVenueFTS, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue");
-  const bVenueAvg = getDateAwareOrFallbackAverage(bVenueFTS, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue");
+  const aOverallAvg = getDateAwareOrFallbackAverage(aFTS, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "overall", "scored");
+  const bOverallAvg = getDateAwareOrFallbackAverage(bFTS, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "overall", "scored");
+  const aVenueAvg = getDateAwareOrFallbackAverage(aVenueFTS, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue", "scored");
+  const bVenueAvg = getDateAwareOrFallbackAverage(bVenueFTS, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue", "scored");
   const aScoredBlendFT = computeVenueBlend(aOverallAvg, aVenueAvg, aVenueFTS.length);
   const bScoredBlendFT = computeVenueBlend(bOverallAvg, bVenueAvg, bVenueFTS.length);
   const aBlendedScored = aScoredBlendFT.value;
@@ -33582,10 +33533,10 @@ function computeFTProjection({
   const _pointsOnlyPrior = !_hasNamedPace || !_hasNamedRating;
   let aS_pre = anchorProjectionForMarket(aBlendedScored, sampleSize, leagueBase, league, _pointsOnlyPrior);
   let bS_pre = anchorProjectionForMarket(bBlendedScored, sampleSize, leagueBase, league, _pointsOnlyPrior);
-  const aAllowedOverall = getDateAwareOrFallbackAverage(aFTA, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null);
-  const bAllowedOverall = getDateAwareOrFallbackAverage(bFTA, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null);
-  const aAllowedVenue = getDateAwareOrFallbackAverage(aVenueFTA, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue");
-  const bAllowedVenue = getDateAwareOrFallbackAverage(bVenueFTA, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue");
+  const aAllowedOverall = getDateAwareOrFallbackAverage(aFTA, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "overall", "allowed");
+  const bAllowedOverall = getDateAwareOrFallbackAverage(bFTA, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "overall", "allowed");
+  const aAllowedVenue = getDateAwareOrFallbackAverage(aVenueFTA, "A", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue", "allowed");
+  const bAllowedVenue = getDateAwareOrFallbackAverage(bVenueFTA, "B", "ft", _ctxRoot, league, config?.recencyWeights ?? null, "venue", "allowed");
   const aAllowedBlendFT = computeVenueBlend(aAllowedOverall, aAllowedVenue, aVenueFTA.length);
   const bAllowedBlendFT = computeVenueBlend(bAllowedOverall, bAllowedVenue, bVenueFTA.length);
   let aAllowed = aAllowedBlendFT.value;
@@ -33679,8 +33630,8 @@ function computeFTProjection({
   let _owEffA = _ow;
   let _twEffB = _tw;
   let _owEffB = _ow;
-  const aS_points = isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _twEffA + bAllowed * _owEffA : aS_pre;
-  const bS_points = isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _twEffB + aAllowed * _owEffB : bS_pre;
+  const aS_points = isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _twEffA + bAllowed * _owEffA : NaN;
+  const bS_points = isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _twEffB + aAllowed * _owEffB : NaN;
 
   if (isEspnLeague && hasRealRatings && hasRealPace) {
     const _betaO = Math.min(1.5, Math.max(0.25, Number((typeof getParam === "function" ? getParam("advBetaOffense", league) : null) ?? 1.0)));
@@ -33770,15 +33721,9 @@ function computeFTProjection({
       ? clampNumber(_ftTotalSd / volLimit, 0.5, 2.5)
       : Math.max(_aVolRatio || 0, _bVolRatio || 0);
 
-  const _sosEligible =
-    typeof isEspnAutoFetchLeague === "function" &&
-    isEspnAutoFetchLeague(league) &&
-    !!ctxA?.standingsCached && !!ctxB?.standingsCached;
-  const _ftSosAvg = _sosEligible ? meanFromList([ctxA?.sos, ctxB?.sos]) : NaN;
-
-  let _ftVolRatio = isFinite(_ftSosAvg)
-    ? clampNumber(_ftVolRatioRaw + (_ftSosAvg - 0.5) * 0.5, 0, 2.5)
-    : _ftVolRatioRaw;
+  // Current standings/SOS are never used in historical or live projection math.
+  // Volatility is derived only from the dated scoring series above.
+  let _ftVolRatio = _ftVolRatioRaw;
   if (_missingDefenseA || _missingDefenseB) {
     _ftVolRatio = clampNumber(_ftVolRatio * 1.15, 0, 2.5);
   }
@@ -33955,7 +33900,7 @@ function computeFTProjection({
     ftEdge,
     aEdge,
     bEdge,
-    ftFullModel: ftSampleTier === "full",
+    ftFullModel: ftSampleTier === "full" && !(_missingDefenseA || _missingDefenseB) && (!_pointsOnlyPrior ? !!usedAdvanced : true),
     teamFullModel: ftSampleTier === "full",
     ftProjectionOnly: !ftHasH2H && ftSampleTier === "thin",
     blowoutGap: (Number.isFinite(projAFT) && Number.isFinite(projBFT) ? Math.abs(projAFT - projBFT) : NaN) ,
@@ -34052,8 +33997,8 @@ function compute1HProjection({
 
   const aScoredBlend1 = computeVenueBlend(_dateAwareAvgA1, getDateAwareOrFallbackAverage(aVenueH1S, "A", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "venue"), aVenueH1S.length);
   const bScoredBlend1 = computeVenueBlend(_dateAwareAvgB1, getDateAwareOrFallbackAverage(bVenueH1S, "B", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "venue"), bVenueH1S.length);
-  const aAllowedBlend1 = computeVenueBlend(getDateAwareOrFallbackAverage(aA1, "A", "h1", _ctxRoot, league, config?.recencyWeights ?? null), getDateAwareOrFallbackAverage(aVenueH1A, "A", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "venue"), aVenueH1A.length);
-  const bAllowedBlend1 = computeVenueBlend(getDateAwareOrFallbackAverage(bA1, "B", "h1", _ctxRoot, league, config?.recencyWeights ?? null), getDateAwareOrFallbackAverage(bVenueH1A, "B", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "venue"), bVenueH1A.length);
+  const aAllowedBlend1 = computeVenueBlend(getDateAwareOrFallbackAverage(aA1, "A", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "overall", "allowed"), getDateAwareOrFallbackAverage(aVenueH1A, "A", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "venue"), aVenueH1A.length);
+  const bAllowedBlend1 = computeVenueBlend(getDateAwareOrFallbackAverage(bA1, "B", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "overall", "allowed"), getDateAwareOrFallbackAverage(bVenueH1A, "B", "h1", _ctxRoot, league, config?.recencyWeights ?? null, "venue"), bVenueH1A.length);
   const aVenueDiag1 = combineVenueDiag(aScoredBlend1.diag, aAllowedBlend1.diag);
   const bVenueDiag1 = combineVenueDiag(bScoredBlend1.diag, bAllowedBlend1.diag);
 
@@ -34104,9 +34049,9 @@ function compute1HProjection({
   let _tw1EffB = _tw1;
   let _ow1EffB = _ow1;
   const projA1H_points =
-    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw1EffA + bAllowed * _ow1EffA : aS_pre;
+    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw1EffA + bAllowed * _ow1EffA : NaN;
   const projB1H_points =
-    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw1EffB + aAllowed * _ow1EffB : bS_pre;
+    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw1EffB + aAllowed * _ow1EffB : NaN;
 
   projA1H = projA1H_points;
   projB1H = projB1H_points;
@@ -34132,15 +34077,18 @@ function compute1HProjection({
     (isFinite(_aTotalSd1) ? _aTotalSd1 * _aTotalSd1 : 0) +
       (isFinite(_bTotalSd1) ? _bTotalSd1 * _bTotalSd1 : 0),
   );
-  const combinedVol =
+  let combinedVol =
     isFinite(_h1TotalSd) && isFinite(volLimit) && volLimit > 0
       ? clampNumber(_h1TotalSd / volLimit, 0.5, 2.5)
       : Math.max(aVol1 || 0, bVol1 || 0);
+  if (_missingDefenseA1 || _missingDefenseB1) combinedVol = clampNumber(combinedVol * 1.15, 0.5, 2.5);
 
   const aH2H = getH2HSeries("A", "h1", parsed, _ctxRoot);
   const bH2H = getH2HSeries("B", "h1", parsed, _ctxRoot);
   const h1HasH2H =
     maybeReadH2HEnabled("h1", _ctxRoot?.h2hToggleSnapshot) && finiteCount(aH2H) >= 2 && finiteCount(bH2H) >= 2;
+  const _preH2H_A1 = projA1H;
+  const _preH2H_B1 = projB1H;
   if (h1HasH2H) {
     const massacreH2H = getMassacreH2HSeries(
       "h1",
@@ -34252,8 +34200,8 @@ function compute1HProjection({
       h1Proj = isFinite(projA1H) && isFinite(projB1H) ? projA1H + projB1H : NaN;
     }
   }
-  projA1H = clipProjectionToBaseline(projA1H, aS_pre * (injMultA || 1), volLimit);
-  projB1H = clipProjectionToBaseline(projB1H, bS_pre * (injMultB || 1), volLimit);
+  projA1H = clipProjectionToBaseline(projA1H, _preH2H_A1, volLimit);
+  projB1H = clipProjectionToBaseline(projB1H, _preH2H_B1, volLimit);
   h1Proj = isFinite(projA1H) && isFinite(projB1H) ? projA1H + projB1H : NaN;
 
   const h1Edge =
@@ -34266,7 +34214,7 @@ function compute1HProjection({
     h1SampleTier,
     h1HasH2H,
     h1ProjectionOnly: !h1HasH2H && h1SampleTier === "thin",
-    h1FullModel: h1SampleTier === "full",
+    h1FullModel: h1SampleTier === "full" && !(_missingDefenseA1 || _missingDefenseB1),
     paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
     defensiveFloorFlag:
       (isFinite(aAllowed) && aAllowed <= leagueBase1H * 0.92) ||
@@ -34388,9 +34336,9 @@ function compute2HProjection({
   let _tw2EffB = _tw2;
   let _ow2EffB = _ow2;
   const projA2H_points =
-    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw2EffA + bAllowed * _ow2EffA : aS_pre;
+    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw2EffA + bAllowed * _ow2EffA : NaN;
   const projB2H_points =
-    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw2EffB + aAllowed * _ow2EffB : bS_pre;
+    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw2EffB + aAllowed * _ow2EffB : NaN;
 
   projA2H = projA2H_points;
   projB2H = projB2H_points;
@@ -34416,10 +34364,11 @@ function compute2HProjection({
     (isFinite(_aTotalSd2) ? _aTotalSd2 * _aTotalSd2 : 0) +
       (isFinite(_bTotalSd2) ? _bTotalSd2 * _bTotalSd2 : 0),
   );
-  const combinedVol2 =
+  let combinedVol2 =
     isFinite(_h2TotalSd) && isFinite(volLimit) && volLimit > 0
       ? clampNumber(_h2TotalSd / volLimit, 0.5, 2.5)
       : Math.max(aVol2 || 0, bVol2 || 0);
+  if (_missingDefenseA2 || _missingDefenseB2) combinedVol2 = clampNumber(combinedVol2 * 1.15, 0.5, 2.5);
 
   const aH2H = getH2HSeries("A", "h2", parsed, _ctxRoot2H);
   const bH2H = getH2HSeries("B", "h2", parsed, _ctxRoot2H);
@@ -34427,6 +34376,8 @@ function compute2HProjection({
     maybeReadH2HEnabled("h2", _ctxRoot2H?.h2hToggleSnapshot) &&
     finiteCount(aH2H) >= 2 &&
     finiteCount(bH2H) >= 2;
+  const _preH2H_A2 = projA2H;
+  const _preH2H_B2 = projB2H;
   if (h2HasH2H) {
     const massacreH2H = getMassacreH2HSeries(
       "h2",
@@ -34538,8 +34489,8 @@ function compute2HProjection({
       h2Proj = isFinite(projA2H) && isFinite(projB2H) ? projA2H + projB2H : NaN;
     }
   }
-  projA2H = clipProjectionToBaseline(projA2H, aS_pre * (injMultA || 1), volLimit);
-  projB2H = clipProjectionToBaseline(projB2H, bS_pre * (injMultB || 1), volLimit);
+  projA2H = clipProjectionToBaseline(projA2H, _preH2H_A2, volLimit);
+  projB2H = clipProjectionToBaseline(projB2H, _preH2H_B2, volLimit);
   h2Proj = isFinite(projA2H) && isFinite(projB2H) ? projA2H + projB2H : NaN;
 
   const h2Edge =
@@ -34556,7 +34507,7 @@ function compute2HProjection({
     h2hWeightApplied: typeof hw !== "undefined" && isFinite(hw) ? hw : 0,
     h2hContribution: typeof _h2H2HContribution !== "undefined" ? _h2H2HContribution : 0,
     h2ProjectionOnly: !h2HasH2H && h2SampleTier === "thin",
-    h2FullModel: h2SampleTier === "full",
+    h2FullModel: h2SampleTier === "full" && !(_missingDefenseA2 || _missingDefenseB2),
     paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
     defensiveFloorFlag:
       (isFinite(aAllowed) && aAllowed <= leagueBase2H * 0.92) ||
@@ -34700,7 +34651,7 @@ function getH2HSeasonDecayWeight(dateStr, league) {
 }
 
 /* SECTION 323 — massacre-h2h-series */
-function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null) {
+function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null, recencyWeightsOverride = null) {
   const _h2hRoot =
     contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {};
   let games = Array.isArray(_h2hRoot.h2hGames) ? [..._h2hRoot.h2hGames] : [];
@@ -34737,6 +34688,7 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
 
   games.sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
   const weights =
+    (Array.isArray(recencyWeightsOverride) && recencyWeightsOverride.length ? recencyWeightsOverride : null) ||
     (typeof getParam === "function"
       ?
         getParam("recencyWeights", _h2hRoot.league || "", marketKey || "ft")
@@ -34747,7 +34699,8 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
   const rawB = [];
   const decayWeights = [];
 
-  games.slice(0, weights.length).forEach((g) => {
+  games.forEach((g) => {
+    if (rawA.length >= (weights.length || 10)) return;
     const teamAIdStr = String(
       fixtureMeta?.teamAId ||
         fixtureMeta?.selectedTeamAId ||
@@ -34883,9 +34836,11 @@ function calibrateConfidenceModel() {
   const _chronoSorted = allPicks
     .slice()
     .sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0));
-  const _calSplitIdx = Math.floor(_chronoSorted.length * 0.8);
-  const fitPicks = _chronoSorted.slice(0, _calSplitIdx);
-  const calPicks = _chronoSorted.slice(_calSplitIdx);
+  const _trainEnd = Math.floor(_chronoSorted.length * 0.6);
+  const _calEnd = Math.floor(_chronoSorted.length * 0.8);
+  const fitPicks = _chronoSorted.slice(0, _trainEnd);
+  const calPicks = _chronoSorted.slice(_trainEnd, _calEnd);
+  const testPicks = _chronoSorted.slice(_calEnd);
   const _biasBucketOf = (edgePctVal) => Math.max(0, Math.min(4, Math.floor(Math.abs(Number(edgePctVal) || 0) / 5)));
   const _settledBucketCounts = [0, 0, 0, 0, 0];
   fitPicks.forEach((p) => _settledBucketCounts[_biasBucketOf(p.edgePct)]++);
@@ -34989,33 +34944,36 @@ function calibrateConfidenceModel() {
 
   const models = {};
   const modelSampleSizes = {};
+  const _families = ["TOTAL", "TEAM", "Q", "MARGIN"];
+  const _scopeForPick = (p) => getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
+  const _globalFamilyScope = (family) => "global::" + family;
 
-  const globalData = fitPicks.map((p) => ({
-    f: buildF(p),
-    y: p.resultStatus === "win" ? 1 : 0,
-    w: p._biasWeight,
-  }));
-  const globalModel = runGD(globalData);
-  if (globalModel) {
-    models["global"] = globalModel;
-    modelSampleSizes["global"] = globalData.length;
-  }
-  [...new Set(fitPicks.map((p) => p.league).filter(Boolean))].forEach((league) => {
-    const leaguePicks = fitPicks.filter((p) => p.league === league);
-    const ld = leaguePicks.map((p) => ({
-      f: buildF(p),
-      y: p.resultStatus === "win" ? 1 : 0,
-      w: p._biasWeight,
-    }));
-    const lm = runGD(ld);
-
-    if (lm && globalModel) {
-      models[league] = empiricalBayesShrink(lm, ld.length, globalModel, 40);
-      modelSampleSizes[league] = ld.length;
-    } else if (lm) {
-      models[league] = lm;
-      modelSampleSizes[league] = ld.length;
+  _families.forEach((family) => {
+    const familyPicks = fitPicks.filter((p) => getConfidenceMarketFamily(p.marketKey || "ft") === family);
+    const data = familyPicks.map((p) => ({ f: buildF(p), y: p.resultStatus === "win" ? 1 : 0, w: p._biasWeight }));
+    const m = runGD(data);
+    if (m) {
+      models[_globalFamilyScope(family)] = m;
+      modelSampleSizes[_globalFamilyScope(family)] = data.length;
     }
+  });
+
+  [...new Set(fitPicks.map((p) => String(p.league || "").toLowerCase()).filter(Boolean))].forEach((league) => {
+    _families.forEach((family) => {
+      const familyPicks = fitPicks.filter((p) => String(p.league || "").toLowerCase() === league && getConfidenceMarketFamily(p.marketKey || "ft") === family);
+      const ld = familyPicks.map((p) => ({ f: buildF(p), y: p.resultStatus === "win" ? 1 : 0, w: p._biasWeight }));
+      const lm = runGD(ld);
+      const base = models[_globalFamilyScope(family)];
+      if (lm && base) {
+        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TEAM" ? "team_a" : family === "Q" ? "q1" : "winner");
+        models[key] = empiricalBayesShrink(lm, ld.length, base, 40);
+        modelSampleSizes[key] = ld.length;
+      } else if (lm) {
+        const key = league + "::" + family;
+        models[key] = lm;
+        modelSampleSizes[key] = ld.length;
+      }
+    });
   });
 
   const _rawLogOdds = (coeff, p) => {
@@ -35032,7 +34990,9 @@ function calibrateConfidenceModel() {
   /* FIX item 28: score a pick's win probability using the PROPOSED coefficients for its own
      scope (falling back to the proposed global model), not the live model in localStorage. */
   const _proposedWinProb = (p) => {
-    const coeff = (p.league && models[p.league]) || models.global;
+    const family = getConfidenceMarketFamily(p.marketKey || "ft");
+    const scope = getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
+    const coeff = models[scope] || models[_globalFamilyScope(family)];
     if (!coeff) return null;
     const lo = clampNumber(_rawLogOdds(coeff, p), -20, 20);
     return 1 / (1 + Math.exp(-lo));
@@ -35143,11 +35103,15 @@ function calibrateConfidenceModel() {
   };
   const plattCalib = {};
   Object.keys(models).forEach((scope) => {
-    let scopeCalRows;
-    if (scope === "global") {
-      scopeCalRows = calPicks;
-    } else {
-      scopeCalRows = calPicks.filter((p) => p.league === scope);
+    let scopeCalRows = calPicks;
+    if (scope.indexOf("::") > -1) {
+      const parts = scope.split("::");
+      const scopeLeague = parts[0];
+      const family = parts[1];
+      scopeCalRows = calPicks.filter((p) =>
+        (scopeLeague === "global" || String(p.league || "").toLowerCase() === scopeLeague) &&
+        getConfidenceMarketFamily(p.marketKey || "ft") === family
+      );
     }
     plattCalib[scope] = fitPlattScaling(models[scope], scopeCalRows);
   });
@@ -35160,8 +35124,21 @@ function calibrateConfidenceModel() {
      monitor and was never actually evaluating model predictions; that gap is what item 26
      originally flagged, and it is fixed here where the model fitting actually happens. */
   try {
-    const evalRows = calPicks
-      .map((p) => ({ prob: _proposedWinProb(p), y: p.resultStatus === "win" ? 1 : 0 }))
+    const _applyPlatt = (p) => {
+      let prob = _proposedWinProb(p);
+      if (!Number.isFinite(prob)) return NaN;
+      const scope = p.league && plattCalib[p.league] ? p.league : "global";
+      const pl = plattCalib[scope];
+      if (pl && Number.isFinite(pl.a) && Number.isFinite(pl.b)) {
+        const raw = Math.min(1 - 1e-9, Math.max(1e-9, prob));
+        const logit = Math.log(raw / (1 - raw));
+        const lo = pl.a * logit + pl.b;
+        prob = 1 / (1 + Math.exp(-Math.min(20, Math.max(-20, lo))));
+      }
+      return prob;
+    };
+    const evalRows = (testPicks && testPicks.length ? testPicks : calPicks)
+      .map((p) => ({ prob: _applyPlatt(p), y: p.resultStatus === "win" ? 1 : 0 }))
       .filter((r) => Number.isFinite(r.prob));
     if (evalRows.length >= 15) {
       let brierSum = 0,
@@ -36943,6 +36920,7 @@ async function runEngine() {
 
     let verifiedFtConfig = getVerifiedConfig(league, "ft");
     let verifiedH1Config = getVerifiedConfig(league, "h1");
+    let verifiedH2Config = getVerifiedConfig(league, "h2");
 
     const _runFTWeights =
       window.__phase2FTRecencyWeights || getLeagueRecencyDefaults(currentLeagueForRun);
@@ -37029,12 +37007,16 @@ async function runEngine() {
 
     let ftConfigOverride = {};
     let h1ConfigOverride = {};
+    let h2ConfigOverride = {};
 
     if (verifiedFtConfig && verifiedFtConfig.configKey) {
       ftConfigOverride = buildConfigFromVerifiedKey(verifiedFtConfig.configKey);
     }
     if (verifiedH1Config && verifiedH1Config.configKey) {
       h1ConfigOverride = buildConfigFromVerifiedKey(verifiedH1Config.configKey);
+    }
+    if (verifiedH2Config && verifiedH2Config.configKey) {
+      h2ConfigOverride = buildConfigFromVerifiedKey(verifiedH2Config.configKey);
     }
 
     MODEL_TUNING.recencyWeights = ftConfigOverride.recencyProfile || _runFTWeights;
@@ -37156,7 +37138,7 @@ async function runEngine() {
       lines: finalLines,
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      config: { teamWeight: _safeH2W.teamWeight, oppWeight: _safeH2W.oppWeight, recencyWeights: _runH2Weights, intel: computeIntelligencePack(league, finalLines, parsed) },
+      config: { ...h2ConfigOverride, teamWeight: _safeH2W.teamWeight, oppWeight: _safeH2W.oppWeight, recencyWeights: h2ConfigOverride.recencyProfile || _runH2Weights, intel: computeIntelligencePack(league, finalLines, parsed), h2hFactor: h2ConfigOverride.h2hFactor },
       contextData: AppState.context?.data || null, 
     });
     MODEL_TUNING.recencyWeights = _runFTWeights;
@@ -37530,6 +37512,7 @@ async function runEngine() {
 
     const lqA = computeLineupQuality(AppState.context.data?.A?.roster, g_injA);
     const lqB = computeLineupQuality(AppState.context.data?.B?.roster, g_injB);
+    void lqA; void lqB;
     const _lqiShared = (lqA + lqB) / 2;
 
     const ftVolatilityForConf =
@@ -37816,7 +37799,7 @@ async function runEngine() {
 
     const projDiff = ftCalc.projAFT - ftCalc.projBFT;
 
-    const _coeffFitted = isConfidenceCoeffFitted(league);
+    const _coeffFitted = isConfidenceCoeffFitted(league, marketKey);
 
     const winnerMarginInputs = getMarginConfidenceInputs(
       winnerEdge,
@@ -38019,10 +38002,10 @@ async function runEngine() {
         h2Method: h2Calc.h2Method,
         h2hWeightApplied: h2Calc.h2hWeightApplied,
         h2hContribution: h2Calc.h2hContribution,
-        modelType: getConfidenceModelProvenance(league).modelType,
-        fallbackReason: getConfidenceModelProvenance(league).fallbackReason,
-        settledResults: getConfidenceModelProvenance(league).settledResults,
-        requiredResults: getConfidenceModelProvenance(league).requiredResults,
+        modelType: getConfidenceModelProvenance(league, marketKey).modelType,
+        fallbackReason: getConfidenceModelProvenance(league, marketKey).fallbackReason,
+        settledResults: getConfidenceModelProvenance(league, marketKey).settledResults,
+        requiredResults: getConfidenceModelProvenance(league, marketKey).requiredResults,
         volatility: h2VolatilityForConf,
         volLimit: getMarketVolLimit(league, "h2"),
         coeffFitted: _coeffFitted,
@@ -38343,6 +38326,24 @@ async function runEngine() {
     const isManualLeagueRun = !isNbaOrNcaa;
 
     // Final defensive barrier: output, tracker and display can only receive assigned markets.
+        picks.forEach((p) => {
+      if (!p) return;
+      const proj = Number(p.projection);
+      const edge = Number(p.edge);
+      const missingDef = !!(p.missingDefense || (p.modelStatus && p.modelStatus.defenseComplete === false));
+      if (p.pick && p.pick !== "NO PLAY" && (!Number.isFinite(proj) || !Number.isFinite(edge) || missingDef)) {
+        if (typeof forcePickNoPlayWithNote === "function") forcePickNoPlayWithNote(p, missingDef ? "missing defense" : "market integrity gate");
+        else { p.pick = "NO PLAY"; p.noPlayReason = "market integrity gate"; }
+        p.confidence = "NaN";
+      }
+      p.modelStatus = {
+        fullModel: !!p.fullModel && !missingDef,
+        defenseComplete: !missingDef,
+        hardBlockReason: p.noPlayReason || null,
+        statusVersion: "model-status-v2",
+      };
+      p.fullModel = p.modelStatus.fullModel;
+    });
     const finalPicks = picks.filter((p) => marketAllowedForLeague(p && p.marketKey));
 
     const mktOrderMap = isWnbaRun
@@ -38419,7 +38420,7 @@ async function runEngine() {
     /* SECTION 346 — run-engine-soft-tracker */
     applySoftTrackerInfluenceToPicks(finalPicksForDisplay, fixtureMeta, phase2Activation);
     const intelligencePack = computeIntelligencePack(league, finalLines, parsed);
-    applyIntelligenceLayerToPicks(finalPicksForDisplay, intelligencePack, league);
+    annotateIntelligenceDiagnostics(finalPicksForDisplay, intelligencePack, league);
 
     // Distribution is diagnostic only here. Never overwrite primary production p.winProbability.
     // Authoritative winProbability is set below from confidence-model path (+ explicit blend).
@@ -38462,7 +38463,7 @@ async function runEngine() {
       // states which probability model was actually available.
       finalPicksForDisplay.forEach((p) => {
         if (!p) return;
-        const _modelProv = getConfidenceModelProvenance(p.league || league);
+        const _modelProv = getConfidenceModelProvenance(p.league || league, p.marketKey || "ft");
         p.modelType = _modelProv.modelType;
         p.fallbackReason = _modelProv.fallbackReason;
         p.settledResults = _modelProv.settledResults;
@@ -38532,7 +38533,7 @@ async function runEngine() {
               if (Number.isFinite(_lockWinProb)) {
                 _lockWinProb = blendConfidenceAndDistribution(_lockDistProb, _lockWinProb);
               } else {
-                _lockWinProb = _lockDistProb; // only when primary missing
+                _lockWinProb = NaN;
               }
               p.distributionWinProbability = _lockDistProb;
             }
@@ -38549,7 +38550,7 @@ async function runEngine() {
           // Injury-feed failures / empty feed cap winProbability at 0.62 before grading.
           p.winProbability = _lockWinProb;
           if (!p.confidenceTrace || typeof p.confidenceTrace !== "object") p.confidenceTrace = {};
-          const _modelProv = getConfidenceModelProvenance(p.league || league);
+          const _modelProv = getConfidenceModelProvenance(p.league || league, p.marketKey || "ft");
           p.confidenceTrace.modelType = _modelProv.modelType;
           p.confidenceTrace.fallbackReason = _modelProv.fallbackReason;
           p.confidenceTrace.settledResults = _modelProv.settledResults;
@@ -38640,7 +38641,7 @@ async function runEngine() {
       const warnings = [];
       const rows = Array.isArray(picks) ? picks : [];
       const finite = (v) => Number.isFinite(Number(v));
-      const prov = getConfidenceModelProvenance(leagueKey);
+      const prov = getConfidenceModelProvenance(leagueKey, marketKey || "ft");
       if (!meta || !meta.homeTeam || !meta.awayTeam) {
         errors.push("teams/events not identified");
       }
@@ -38842,7 +38843,7 @@ async function runEngine() {
         volatilityBlock: ftCalc.volatilityBlock,
         trap: ftTrap,
         h1Trap: h1Trap,
-        coeffFitted: isConfidenceCoeffFitted(league),
+        coeffFitted: isConfidenceCoeffFitted(league, marketKey || "ft"),
 
         aVol: ftCalc.aVol,
         bVol: ftCalc.bVol,
@@ -39606,9 +39607,9 @@ async function runEngine() {
                 fullModel: !!row.fullModel,
                 trap: !!row.trap,
                 hasH2H: !!row.hasH2H,
-                modelType: row.modelType || getConfidenceModelProvenance(row.league || league).modelType,
-                fallbackReason: row.fallbackReason || getConfidenceModelProvenance(row.league || league).fallbackReason,
-                settledResults: Number.isFinite(Number(row.settledResults)) ? Number(row.settledResults) : getConfidenceModelProvenance(row.league || league).settledResults,
+                modelType: row.modelType || getConfidenceModelProvenance(row.league || league, row.marketKey || "ft").modelType,
+                fallbackReason: row.fallbackReason || getConfidenceModelProvenance(row.league || league, row.marketKey || "ft").fallbackReason,
+                settledResults: Number.isFinite(Number(row.settledResults)) ? Number(row.settledResults) : getConfidenceModelProvenance(row.league || league, row.marketKey || "ft").settledResults,
                 requiredResults: Number.isFinite(Number(row.requiredResults)) ? Number(row.requiredResults) : 40,
                 marketKey: key,
                 finalGrade: (typeof auditFinalGradeSentinel === "function"
@@ -46425,7 +46426,7 @@ const EngineAuditor = (function () {
       "getManualSeries", "getH2HSeries",
     ]);
     const READERS = new Set([
-      "resolveOverallSeries", "getPeriodAdvancedSeries", "readLooseSeries",
+      "getPeriodAdvancedSeries", "readLooseSeries",
       "buildLooseParsedState", "getManualAllowedSeries",
     ]);
     const FILTERS = new Set([
