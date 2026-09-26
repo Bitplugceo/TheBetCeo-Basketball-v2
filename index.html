@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -32936,22 +32935,16 @@ function getPickExplanationFactors(p, isLock) {
   const side = getPickSideFromText(p.pick);
   const isNoPlayRow = !p.pick || p.pick === "NO PLAY" || p.pick === "NaN";
   if (isNoPlayRow) {
-    factors.push("🚫 NO PLAY reason: " + humanizeNoPlayReason(p));
+    factors.push(humanizeNoPlayReason(p));
+    const _projVal = Number(p.proj != null ? p.proj : p.projection);
     const _edgeVal = Number.isFinite(Number(p.edge)) ? Number(p.edge) : Number(p.displayEdge);
     const _lineVal = Number.isFinite(Number(p.line)) ? Number(p.line) : Number(p.displayLineUsed);
-    if (Number.isFinite(_edgeVal) && Number.isFinite(_lineVal)) {
-      factors.push(
-        "Raw model edge before the gate: " +
-          (_edgeVal > 0 ? "+" : "") +
-          Number(_edgeVal).toFixed(1) +
-          " pts vs the " +
-          displayLine(_lineVal) +
-          " line."
-      );
-    }
-    if (p.fallbackReason) {
-      factors.push("Confidence path: " + String(p.fallbackReason).replace(/_/g, " ") + ".");
-    }
+    const bits = [];
+    if (Number.isFinite(_projVal)) bits.push("Projection " + ((_projVal > 0 && String(p.marketKey||"").indexOf("handicap")>=0) ? "+" : "") + Number(_projVal).toFixed(1));
+    if (Number.isFinite(_edgeVal)) bits.push("Edge " + (_edgeVal > 0 ? "+" : "") + Number(_edgeVal).toFixed(1));
+    if (Number.isFinite(_lineVal)) bits.push("vs " + displayLine(_lineVal));
+    if (bits.length) factors.push(bits.join("  ·  "));
+    return factors;
   }
 
   const edgeVal = isFinite(p.edge) ? p.edge : p.displayEdge;
@@ -38330,12 +38323,14 @@ async function runEngine() {
     // Final defensive barrier: output, tracker and display can only receive assigned markets.
         picks.forEach((p) => {
       if (!p) return;
-      const proj = Number(p.projection);
+      const proj = Number(p.proj != null ? p.proj : p.projection);
       const edge = Number(p.edge);
       const missingDef = !!(p.missingDefense || (p.modelStatus && p.modelStatus.defenseComplete === false));
-      if (p.pick && p.pick !== "NO PLAY" && (!Number.isFinite(proj) || !Number.isFinite(edge) || missingDef)) {
-        if (typeof forcePickNoPlayWithNote === "function") forcePickNoPlayWithNote(p, missingDef ? "missing defense" : "market integrity gate");
-        else { p.pick = "NO PLAY"; p.noPlayReason = "market integrity gate"; }
+      // Winner/margin rows may display "—" and still carry a finite edge; do not wipe the board.
+      const needsNumericProj = String(p.marketKey || "") !== "winner";
+      if (p.pick && p.pick !== "NO PLAY" && ((needsNumericProj && !Number.isFinite(proj)) || !Number.isFinite(edge) || missingDef)) {
+        if (typeof forcePickNoPlayWithNote === "function") forcePickNoPlayWithNote(p, missingDef ? "missing defense" : "non-finite projection/edge");
+        else { p.pick = "NO PLAY"; p.noPlayReason = "non-finite projection/edge"; }
         p.confidence = "NaN";
       }
       p.modelStatus = {
@@ -38699,8 +38694,19 @@ async function runEngine() {
     window.__lastPredictionIntegrity = _finalIntegrity;
     if (typeof engineDebug === "function") engineDebug("FINAL PREDICTION INTEGRITY", _finalIntegrity);
     if (!_finalIntegrity.ok) {
+      const hitKeys = {};
+      (_finalIntegrity.errors || []).forEach(function (e) {
+        const k = String(e || "").split(":")[0].trim();
+        if (k) hitKeys[k] = true;
+      });
       finalPicksForDisplay.forEach((p) => {
         if (!p) return;
+        const mine = !!hitKeys[String(p.marketKey || "")];
+        if (!mine) {
+          p.validationStatus = "WARNING";
+          p.validationErrors = _finalIntegrity.errors.slice();
+          return;
+        }
         forcePickNoPlayWithNote(p, "Validation error: " + _finalIntegrity.errors.join(" | "));
         p.displayPick = "NO PLAY";
         p.bufferedPickText = "NO PLAY";
