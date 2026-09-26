@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -6592,7 +6591,11 @@ function extractH2HFromPastedEvents() {
       });
       return;
     }
-    window.__h2hEntryCache = newEntries.slice(0, 5);
+    /* FIX (visibility audit): previously hard-capped to 5, which silently hid games
+       the engine had already fetched and would otherwise have used. newEntries is
+       already bounded upstream (h2hMatches.slice(0, 10), 2022+ only) — keep all of it
+       so the input field always matches what the model actually sees. */
+    window.__h2hEntryCache = newEntries.slice(0, H2H_MAX_GAMES);
 
     const merged = window.__h2hEntryCache;
     const h2hA = merged.map((e) => e.aFT);
@@ -6635,7 +6638,13 @@ function extractH2HFromPastedEvents() {
       }
       syncAllH2HCheckboxes(false);
 
-      document.getElementById("h2hAutoTag").style.display = "inline";
+      {
+        const _h2hTagEl = document.getElementById("h2hAutoTag");
+        if (_h2hTagEl) {
+          _h2hTagEl.style.display = "inline";
+          _h2hTagEl.textContent = `✅ Auto-filled (${h2hA.length} game${h2hA.length === 1 ? "" : "s"}, 2022+)`;
+        }
+      }
       engineDebug("Pasted JSON H2H auto-filled (merged)", { games: h2hA.length });
     }
   } else {
@@ -27750,6 +27759,13 @@ async function fetchNbaSummerGameRefsViaScoreboard(base, teamId) {
  * Undated / unparseable dates are kept (filter only when a real pre-2022 timestamp exists).
  */
 const BB_GAME_HISTORY_MIN_TS = new Date(2022, 0, 1).getTime();
+
+/** FIX (visibility audit): single source of truth for how many H2H meetings the engine
+ * will use/display. This MUST match the model's own "full sample" definition (see the
+ * sampleTier labels: full = 10 games) so the input fields never hide games the math is
+ * actually using. Every H2H auto-fill path below reads/writes at most this many games —
+ * never a smaller, silently-truncated number. */
+const H2H_MAX_GAMES = 10;
 function isGameOnOrAfter2022(dateLike) {
   if (dateLike == null || dateLike === "") return true;
   let ts = NaN;
@@ -29644,7 +29660,11 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       const tA = String(teamAId);
       const h2hA = [];
       const h2hB = [];
-      for (const g of h2hGames.slice(0, 5)) {
+      /* FIX (visibility audit): was slice(0, 5) — silently discarded qualifying 2022+
+         meetings beyond the 5th even though buildEuroleagueH2H() had already fetched
+         them. Now shows/uses everything up to H2H_MAX_GAMES (the model's own "full
+         sample" size), so the field always matches what's actually used. */
+      for (const g of h2hGames.slice(0, H2H_MAX_GAMES)) {
         if (normalizeId(g.teamAId) === tA) {
           h2hA.push(g.scoreA);
           h2hB.push(g.scoreB);
@@ -29658,14 +29678,20 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       document.getElementById("bFTH2H").value = h2hB.join(",");
       syncH2HCheckbox("ft", false);
       queueH2HCheckboxSync(false);
-      document.getElementById("h2hAutoTag").style.display = "inline";
+      {
+        const _h2hTagEl = document.getElementById("h2hAutoTag");
+        if (_h2hTagEl) {
+          _h2hTagEl.style.display = "inline";
+          _h2hTagEl.textContent = `✅ Auto-filled (${h2hA.length} game${h2hA.length === 1 ? "" : "s"}, 2022+)`;
+        }
+      }
 
       const h2hA1H = h2hGames
-        .slice(0, 5)
+        .slice(0, H2H_MAX_GAMES)
         .map((g) => (normalizeId(g.teamAId) === tA ? g.h1A : g.h1B))
         .filter((v) => v > 0);
       const h2hB1H = h2hGames
-        .slice(0, 5)
+        .slice(0, H2H_MAX_GAMES)
         .map((g) => (normalizeId(g.teamAId) === tA ? g.h1B : g.h1A))
         .filter((v) => v > 0);
       if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
@@ -29677,11 +29703,11 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       for (let q = 1; q <= 4; q++) {
         const key = "q" + q;
         const h2hAQ = h2hGames
-          .slice(0, 5)
+          .slice(0, H2H_MAX_GAMES)
           .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "A"] : g[key + "B"]))
           .filter((v) => v > 0);
         const h2hBQ = h2hGames
-          .slice(0, 5)
+          .slice(0, H2H_MAX_GAMES)
           .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "B"] : g[key + "A"]))
           .filter((v) => v > 0);
         if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
@@ -29691,7 +29717,7 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
         }
       }
       queueH2HCheckboxSync(false);
-      messages.push("H2H: " + Math.min(h2hGames.length, 5) + " 2022+ games ✅");
+      messages.push("H2H: " + Math.min(h2hGames.length, H2H_MAX_GAMES) + " 2022+ games ✅");
     } else if (h2hGames.length === 1) {
       clearH2HFields();
       const tA = String(teamAId);
@@ -31011,7 +31037,9 @@ async function fetchKblCore(league, teamAName, teamBName) {
       const tA = String(teamAId);
       const h2hA = [];
       const h2hB = [];
-      for (const g of h2hGames.slice(0, 5)) {
+      /* FIX (visibility audit): was slice(0, 5) — same truncation bug as the other
+         leagues' H2H auto-fill; use the shared H2H_MAX_GAMES cap instead. */
+      for (const g of h2hGames.slice(0, H2H_MAX_GAMES)) {
         if (String(g.teamAId) === tA) {
           h2hA.push(g.scoreA);
           h2hB.push(g.scoreB);
@@ -31025,14 +31053,20 @@ async function fetchKblCore(league, teamAName, teamBName) {
       document.getElementById("bFTH2H").value = h2hB.join(",");
       syncH2HCheckbox("ft", false);
       queueH2HCheckboxSync(false);
-      document.getElementById("h2hAutoTag").style.display = "inline";
+      {
+        const _h2hTagEl = document.getElementById("h2hAutoTag");
+        if (_h2hTagEl) {
+          _h2hTagEl.style.display = "inline";
+          _h2hTagEl.textContent = `✅ Auto-filled (${h2hA.length} game${h2hA.length === 1 ? "" : "s"}, 2022+)`;
+        }
+      }
 
       const h2hA1H = h2hGames
-        .slice(0, 5)
+        .slice(0, H2H_MAX_GAMES)
         .map((g) => (String(g.teamAId) === tA ? g.h1A : g.h1B))
         .filter((v) => v > 0);
       const h2hB1H = h2hGames
-        .slice(0, 5)
+        .slice(0, H2H_MAX_GAMES)
         .map((g) => (String(g.teamAId) === tA ? g.h1B : g.h1A))
         .filter((v) => v > 0);
       if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
@@ -31044,11 +31078,11 @@ async function fetchKblCore(league, teamAName, teamBName) {
       for (let q = 1; q <= 4; q++) {
         const key = "q" + q;
         const h2hAQ = h2hGames
-          .slice(0, 5)
+          .slice(0, H2H_MAX_GAMES)
           .map((g) => (String(g.teamAId) === tA ? g[key + "A"] : g[key + "B"]))
           .filter((v) => v > 0);
         const h2hBQ = h2hGames
-          .slice(0, 5)
+          .slice(0, H2H_MAX_GAMES)
           .map((g) => (String(g.teamAId) === tA ? g[key + "B"] : g[key + "A"]))
           .filter((v) => v > 0);
         if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
@@ -31060,7 +31094,7 @@ async function fetchKblCore(league, teamAName, teamBName) {
           }
         }
       }
-      messages.push("H2H: " + Math.min(5, h2hGames.length) + " games ✅");
+      messages.push("H2H: " + Math.min(H2H_MAX_GAMES, h2hGames.length) + " games ✅");
     } else {
       messages.push("H2H: insufficient ❌");
     }
@@ -31780,7 +31814,10 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       const tA = String(teamAId);
       const h2hA = [],
         h2hB = [];
-      for (const g of h2hGames.slice(0, 5)) {
+      /* FIX (visibility audit): was slice(0, 5) — fetchH2HCore() already gathers up to
+         H2H_MAX_GAMES qualifying 2022+ meetings; showing fewer than that hid real data
+         the model was (or should have been) using. */
+      for (const g of h2hGames.slice(0, H2H_MAX_GAMES)) {
         if (normalizeId(g.teamAId) === tA) {
           h2hA.push(g.scoreA);
           h2hB.push(g.scoreB);
@@ -31794,14 +31831,20 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       document.getElementById("bFTH2H").value = h2hB.join(",");
       syncH2HCheckbox("ft", false);
       queueH2HCheckboxSync(false);
-      document.getElementById("h2hAutoTag").style.display = "inline";
+      {
+        const _h2hTagEl = document.getElementById("h2hAutoTag");
+        if (_h2hTagEl) {
+          _h2hTagEl.style.display = "inline";
+          _h2hTagEl.textContent = `✅ Auto-filled (${h2hA.length} game${h2hA.length === 1 ? "" : "s"}, 2022+)`;
+        }
+      }
 
       const h2hA1H = h2hGames
-        .slice(0, 5)
+        .slice(0, H2H_MAX_GAMES)
         .map((g) => (normalizeId(g.teamAId) === tA ? g.h1A : g.h1B))
         .filter((v) => v > 0);
       const h2hB1H = h2hGames
-        .slice(0, 5)
+        .slice(0, H2H_MAX_GAMES)
         .map((g) => (normalizeId(g.teamAId) === tA ? g.h1B : g.h1A))
         .filter((v) => v > 0);
       if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
@@ -31814,11 +31857,11 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       for (let q = 1; q <= 4; q++) {
         const key = "q" + q;
         const h2hAQ = h2hGames
-          .slice(0, 5)
+          .slice(0, H2H_MAX_GAMES)
           .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "A"] : g[key + "B"]))
           .filter((v) => v > 0);
         const h2hBQ = h2hGames
-          .slice(0, 5)
+          .slice(0, H2H_MAX_GAMES)
           .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "B"] : g[key + "A"]))
           .filter((v) => v > 0);
         if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
@@ -31828,7 +31871,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         }
       }
       queueH2HCheckboxSync(false);
-      messages.push(`H2H: ${Math.min(h2hGames.length, 5)} 2022+ games ✅`);
+      messages.push(`H2H: ${Math.min(h2hGames.length, H2H_MAX_GAMES)} 2022+ games ✅`);
     } else if (h2hGames.length === 1) {
       clearH2HFields();
       const tA = String(teamAId);
@@ -32997,6 +33040,95 @@ function buildPickExplanationDetails(p, isLock) {
   const factors = getPickExplanationFactors(p, isLock);
   if (!factors.length) {
     body.innerHTML = `<div class="why-pick-note">No additional factor detail available for this pick.</div>`;
+  } else {
+    body.innerHTML = `<ul class="why-pick-list">${factors.map((f) => `<li>${safeText(f)}</li>`).join("")}</ul>`;
+  }
+  wrap.appendChild(body);
+  return wrap;
+}
+
+/* FIX (no-play transparency): NO PLAY rows previously only had a hover title (useless
+   on mobile) and no expandable detail. This mirrors buildPickExplanationDetails() above
+   so tapping "NO PLAY" behaves exactly like tapping an actual pick — it shows the real
+   gate reason the engine already computed (p.noPlayReason / p.whyPick / p.note), plus
+   the same supporting context factors (sample size, H2H usage, raw edge, tracker
+   influence) so the user can see *why* the model declined to grade this market instead
+   of just being told "NO PLAY" with no explanation. This does NOT fabricate a grade —
+   NaN/NO PLAY stays exactly as strict as before; it only exposes the reasoning. */
+function getNoPlayReasonText(p) {
+  const raw = String((p && (p.noPlayReason || p.whyPick || p.note)) || "").trim();
+  return raw || "No qualifying edge, or not enough recent/H2H data to grade this market with confidence.";
+}
+
+function getNoPlayExplanationFactors(p) {
+  const factors = [];
+  if (!p) return factors;
+
+  factors.push("🚫 " + getNoPlayReasonText(p));
+
+  const tierLabel =
+    {
+      full: "Full sample (10 games)",
+      thin: "Thin sample (5–9 games)",
+      insufficient: "Insufficient sample",
+    }[p.sampleTier] || null;
+  if (tierLabel) factors.push(`Sample size: ${tierLabel}.`);
+
+  factors.push(
+    p.hasH2H
+      ? "Head-to-head history: included in the blend."
+      : "Head-to-head history: not used (too few qualifying 2022+ H2H games).",
+  );
+
+  const edgeVal = isFinite(p.edge) ? p.edge : p.displayEdge;
+  const lineVal = isFinite(p.line) ? p.line : p.displayLineUsed;
+  if (isFinite(edgeVal) && isFinite(lineVal) && lineVal > 0) {
+    factors.push(
+      `Raw model edge before the gate: ${formatEdge(edgeVal, lineVal)} pts vs the ${displayLine(lineVal)} line.`,
+    );
+  }
+
+  if (p.highEdgeFlag) {
+    factors.push(
+      `⚠ Edge was ${p.highEdgeMultiple}x the normal threshold for this market — flagged rather than auto-played.`,
+    );
+  }
+
+  if (p.trap || p.trapKind) {
+    if (p.trapKind === "line_trap" || (p.trapLabel && String(p.trapLabel).indexOf("Line moved") === 0)) {
+      factors.push("🚨 Market trap signal: " + (p.trapLabel || "line moved against this side."));
+    } else if (p.trap) {
+      factors.push("⚠ Vol-risk caution (not a confirmed trap): moderate edge with elevated volatility.");
+    }
+  }
+
+  const tsi = p.trackerSoftInfluence;
+  if (tsi && tsi.applied && tsi.action && tsi.action !== "keep") {
+    const actionLabel =
+      {
+        boost: "Tracker history boosted this grade",
+        downgrade: "Tracker history downgraded this grade",
+        no_play: "Tracker history blocked this pick",
+        lock_restrict: "Tracker history restricted this pick from being the Lock",
+      }[tsi.action] || "Tracker influence: " + tsi.action;
+    factors.push(`📊 ${actionLabel}${tsi.reasons?.length ? " — " + tsi.reasons.join(", ") : ""}.`);
+  }
+
+  return factors;
+}
+
+function buildNoPlayExplanationDetails(p) {
+  const wrap = document.createElement("details");
+  wrap.className = "why-pick-details";
+  const summary = document.createElement("summary");
+  summary.textContent = "ℹ️ Why NO PLAY";
+  wrap.appendChild(summary);
+
+  const body = document.createElement("div");
+  body.className = "why-pick-body";
+  const factors = getNoPlayExplanationFactors(p);
+  if (!factors.length) {
+    body.innerHTML = `<div class="why-pick-note">No additional factor detail available for this market.</div>`;
   } else {
     body.innerHTML = `<ul class="why-pick-list">${factors.map((f) => `<li>${safeText(f)}</li>`).join("")}</ul>`;
   }
@@ -35967,14 +36099,33 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
 
     const tdPred = document.createElement("td");
     if (isNoPlay) {
+      /* FIX (no-play transparency): tapping "NO PLAY" now opens the same kind of
+         "Why …" detail panel as an actual pick, instead of only a desktop hover
+         title (which does nothing on mobile). */
       tdPred.className = "pred-noplay";
       tdPred.style.whiteSpace = "nowrap";
       tdPred.style.fontSize = "11px";
 
-      tdPred.textContent = p.note ? "NO PLAY \u24d8" : "NO PLAY";
-      if (p.note) tdPred.title = p.note;
+      const predContainer = document.createElement("div");
+      predContainer.style.display = "inline-block";
 
-      tdPred.style.opacity = "0.55";
+      const predSpan = document.createElement("span");
+      predSpan.textContent = "NO PLAY \u24d8";
+      predSpan.style.cursor = "pointer";
+      predSpan.style.opacity = "0.55";
+      if (p.note) predSpan.title = p.note;
+
+      const noPlayDetails = buildNoPlayExplanationDetails(p);
+      noPlayDetails.open = false;
+
+      predSpan.addEventListener("click", function (e) {
+        e.stopPropagation();
+        noPlayDetails.open = !noPlayDetails.open;
+      });
+
+      predContainer.appendChild(predSpan);
+      predContainer.appendChild(noPlayDetails);
+      tdPred.appendChild(predContainer);
     } else {
       tdPred.className = getPredictionClass(p.pick);
       tdPred.style.whiteSpace = "nowrap";
