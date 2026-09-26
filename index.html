@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -17796,7 +17797,9 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
     const _metric = String(metric || "").toLowerCase();
     if (_metric === "allowed") {
       dates = scoped[marketKey + "AllowedDates"] || scoped[marketKey + "AllowedDates10"] ||
-        (scope === "overall" ? sideObj.overall?.[marketKey + "AllowedDates10"] : null) || null;
+        (scope === "overall" ? sideObj.overall?.[marketKey + "AllowedDates10"] : null) ||
+        scoped[marketKey + "ScoredDates"] || scoped[marketKey + "ScoredDates10"] ||
+        (scope === "overall" ? sideObj.overall?.[marketKey + "ScoredDates10"] : null) || null;
     } else if (_metric === "scored") {
       dates = scoped[marketKey + "ScoredDates"] || scoped[marketKey + "ScoredDates10"] ||
         (scope === "overall" ? sideObj.overall?.[marketKey + "ScoredDates10"] : null) ||
@@ -32430,6 +32433,12 @@ function getResolvedVenueSeries(side, marketKey, metric, contextRoot = null, par
   const dateKey = market + (metricKey === "allowed" ? "AllowedDates10" : "ScoredDates10");
   let values = Array.isArray(ctxVenue[valueKey]) ? ctxVenue[valueKey] : [];
   let dates = Array.isArray(ctxVenue[dateKey]) ? ctxVenue[dateKey] : [];
+  // Scored and allowed venue observations come from the same games; if an
+  // adapter omitted allowed dates, reuse the paired scored dates.
+  if (metricKey === "allowed" && !dates.length) {
+    const pairedScoredDates = ctxVenue[market + "ScoredDates10"] || ctxVenue[market + "ScoredDates"];
+    dates = Array.isArray(pairedScoredDates) ? pairedScoredDates : [];
+  }
 
   if (!values.length) {
     values = getManualVenueSeriesForSide(side, market, metricKey, parsed, root);
@@ -32590,6 +32599,11 @@ function getFetchedSeries(side, scope, marketKey, metric, contextData = null) {
   const suffix = metric === "allowed" ? "Allowed10" : "Scored10";
   let arr = ctx?.[prefix + suffix];
   let dates = ctx?.[prefix + (metric === "allowed" ? "AllowedDates10" : "ScoredDates10")];
+  // Allowed values share the same game dates as their paired scored values.
+  // Some fetch adapters omit AllowedDates10, so use the paired scored dates.
+  if (metric === "allowed" && (!Array.isArray(dates) || !dates.length)) {
+    dates = ctx?.[prefix + "ScoredDates10"] || ctx?.[prefix + "ScoredDates"];
+  }
   if (!Array.isArray(arr)) {
     const altArr = metric === "allowed"
       ? ctx?.[prefix + "Allowed"] 
@@ -32792,7 +32806,15 @@ function getManualAllowedSeries(side, marketKey, parsed, contextRoot = null) {
       : null;
     if (!asOf) return vals;
     const scoped = root?.[side]?.overall || {};
-    const dates = scoped[marketKey + "AllowedDates10"] || getStashedSeriesDates(side, marketKey, "allowed");
+    // Scored and allowed values are paired observations from the same games.
+    // When an ingestion path omits the duplicate allowed-date array, reuse the
+    // paired scored dates rather than failing the entire defensive series closed.
+    const dates = scoped[marketKey + "AllowedDates10"] ||
+      scoped[marketKey + "AllowedDates"] ||
+      scoped[marketKey + "ScoredDates10"] ||
+      scoped[marketKey + "ScoredDates"] ||
+      getStashedSeriesDates(side, marketKey, "allowed") ||
+      getStashedSeriesDates(side, marketKey, "scored");
     return filterNumericSeriesWithParallelDates(vals, dates, asOf);
   };
 
