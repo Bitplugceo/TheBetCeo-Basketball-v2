@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -36210,6 +36211,18 @@ function extractInputs(league) {
 }
 
 /* SECTION 337 — validate-extracted-inputs */
+/* FORENSIC-FIX-2026-09-26: the rich per-event canonical ledger (overallAligned /
+   completeOverall / overallGameRows) is only ever built by the SofaScore JSON-paste path
+   (ssProcessTeamEvents -> updateTeamUIFromStats). The ESPN auto-fetch pipeline
+   (fetchScheduleCore/fetchESPNCore, which covers NBA/WNBA/NCAA/NCAAW/G-League/Summer
+   League/Aus NBL), the Incrowd EuroLeague/EuroCup pipeline (fetchEuroleagueCore), and the
+   Korea KBL pipeline (fetchKblCore) never populate AppState.context.data[side].inputIntegrity
+   — they write straight to the FT/H1/H2/Q input fields instead. Requiring the SofaScore-only
+   ledger from those three pipelines made every auto-fetch league fail "Input Integrity" on
+   every run, regardless of league or how much real data came back. This validator now applies
+   the strict per-event ledger check only when that ledger actually exists, and otherwise falls
+   back to validating the series those pipelines *do* guarantee (the parsed FT scored/allowed
+   arrays that feed the engine, plus any event-id ledger the fetch happened to record). */
 function validateInputIntegrityForRun(extracted, league) {
   const errors = [];
   const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || {};
@@ -36218,20 +36231,47 @@ function validateInputIntegrityForRun(extracted, league) {
     const integ = ctx.inputIntegrity;
     const source = getResolvedInputSource(side, root);
     if (source !== "manual") {
-      if (!integ || !integ.overallAligned) errors.push("Team " + side + ": fetched event alignment failed.");
-      if (!integ || Number(integ.completeOverall || 0) < 8) errors.push("Team " + side + ": fewer than 8 complete aligned games are available.");
       const rows = Array.isArray(integ?.overallGameRows) ? integ.overallGameRows : (Array.isArray(ctx?.overall?.gameRows10) ? ctx.overall.gameRows10 : []);
-      const rowIds = new Set();
-      rows.forEach((r) => { if (r?.eventId) rowIds.add(String(r.eventId)); });
-      if (!rows.length || rowIds.size !== rows.length) errors.push("Team " + side + ": canonical game-row event IDs are missing or duplicated.");
-      const fourPeriod = Number(LEAGUE_FETCH_RULES?.[league]?.regulationPeriods || 4) > 2;
-      const rowComplete = rows.every((r) => {
-        const nums = fourPeriod
-          ? [r.myFT,r.oppFT,r.q1,r.q2,r.q3,r.q4,r.oppQ1,r.oppQ2,r.oppQ3,r.oppQ4,r.h1,r.oh1,r.h2,r.oh2]
-          : [r.myFT,r.oppFT,r.h1,r.oh1,r.h2,r.oh2];
-        return r?.eventId && nums.every(Number.isFinite);
-      });
-      if (!rowComplete) errors.push("Team " + side + ": at least one canonical game row is incomplete.");
+      const hasCanonicalLedger = !!(integ && rows.length);
+      if (hasCanonicalLedger) {
+        // SofaScore paste path: full per-event ledger is available — keep the strict checks.
+        if (!integ.overallAligned) errors.push("Team " + side + ": fetched event alignment failed.");
+        if (Number(integ.completeOverall || 0) < 8) errors.push("Team " + side + ": fewer than 8 complete aligned games are available.");
+        const rowIds = new Set();
+        rows.forEach((r) => { if (r?.eventId) rowIds.add(String(r.eventId)); });
+        if (!rows.length || rowIds.size !== rows.length) errors.push("Team " + side + ": canonical game-row event IDs are missing or duplicated.");
+        const fourPeriod = Number(LEAGUE_FETCH_RULES?.[league]?.regulationPeriods || 4) > 2;
+        const rowComplete = rows.every((r) => {
+          const nums = fourPeriod
+            ? [r.myFT,r.oppFT,r.q1,r.q2,r.q3,r.q4,r.oppQ1,r.oppQ2,r.oppQ3,r.oppQ4,r.h1,r.oh1,r.h2,r.oh2]
+            : [r.myFT,r.oppFT,r.h1,r.oh1,r.h2,r.oh2];
+          return r?.eventId && nums.every(Number.isFinite);
+        });
+        if (!rowComplete) errors.push("Team " + side + ": at least one canonical game row is incomplete.");
+      } else {
+        // ESPN / Incrowd EuroLeague-EuroCup / Korea KBL auto-fetch: no per-event ledger is
+        // built by design. Validate against the actual FT series the engine will consume.
+        const pre = side === "A" ? "a" : "b";
+        const scored = Array.isArray(extracted?.parsed?.[pre + "FTScored"]) ? extracted.parsed[pre + "FTScored"] : [];
+        const allowed = Array.isArray(extracted?.parsed?.[pre + "FTAllowed"]) ? extracted.parsed[pre + "FTAllowed"] : [];
+        if (!scored.length || !allowed.length || scored.length !== allowed.length) {
+          errors.push("Team " + side + ": fetched event alignment failed.");
+        }
+        if (Math.min(scored.length, allowed.length) < 8) {
+          errors.push("Team " + side + ": fewer than 8 complete aligned games are available.");
+        }
+        // Best-effort dedupe against whatever event-id ledger the fetch pipeline recorded.
+        // ESPN/Incrowd populate overall.eventIds; KBL doesn't touch AppState.context.data at
+        // all, so there is simply nothing to check in that case and this is skipped.
+        const idSource = Array.isArray(ctx?.overall?.eventIds10)
+          ? ctx.overall.eventIds10
+          : (Array.isArray(ctx?.overall?.eventIds) ? ctx.overall.eventIds : []);
+        const ids = idSource.filter(Boolean).map(String);
+        if (ids.length) {
+          const idSet = new Set(ids);
+          if (idSet.size !== ids.length) errors.push("Team " + side + ": canonical game-row event IDs are missing or duplicated.");
+        }
+      }
     }
   });
   // Manual series: when period-level data are supplied together, require equal lengths and
