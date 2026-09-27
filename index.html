@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7530,51 +7529,11 @@ const TUNER_LAST_APPLIED_KEY = "BB_TUNER_LAST_APPLIED_V2";
 const TUNER_APPLY_HISTORY_KEY = "BB_TUNER_APPLY_HISTORY_V2";
 const CONFIG_EVALUATION_STATE_KEY = "BB_CONFIG_EVALUATION_STATE_V2";
 
-function getTunerScopeKey(league) {
-  return String(league || "global").toLowerCase();
-}
 
-function getTunerConfigSnapshot(league, marketKey) {
-  const keys = [
-    "teamWeightBase",
-    "h2hFactor",
-    "h2hMaxWeight",
-    "h2hLookbackSeasons",
-    "venueMinGames",
-    "venueStrongGames",
-    "venueModerateWeight",
-    "venueStrongWeight",
-    "underEdgeFactor",
-    "injuryOppBoostFactor",
-    "edgeFTPointThreshold",
-    "edgeH1PointThreshold",
-    "edgeH2PointThreshold",
-    "edgeTeamPointThreshold",
-    "edgeQPointThreshold",
-    "confidenceAThresh",
-    "confidenceBThresh",
-    "confidenceCThresh",
-    "teamVolScale",
-    "quarterVolScale",
-    "recencyWeights",
-    "edgeMult",
-    "injuryMult",
-    "h2hTierInsufficientPenalty",
-    "h2hTierThinPenalty",
-    "h2hDivergenceThreshold",
-    "h2hDivergenceSlope",
-    "h2hInjuryRiskSlope",
-    "h2hVolRiskSlope",
-    "h2hBlowoutGapThreshold",
-    "h2hBlowoutRisk",
-    "h2hPaceRisk"];
-  const out = {};
-  keys.forEach((key) => {
-    const value = typeof getTunableParam === "function" ? getTunableParam(key, league, marketKey) : null;
-    out[key] = Array.isArray(value) ? value.slice() : value;
-  });
-  return out;
-}
+
+
+
+
 
 function getConfigFingerprintSafe(league) {
   try {
@@ -7586,268 +7545,44 @@ function getConfigFingerprintSafe(league) {
   }
 }
 
-function getStoredTunerProposalRaw(league) {
-  try {
-    const key = "BB_TUNER_PROPOSAL_" + getTunerScopeKey(league);
-    const raw = localStorage.getItem(key);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (e) {
-    engineDebug("getStoredTunerProposalRaw failed", { league, error: e?.message || String(e) });
-    return null;
-  }
-}
 
-function markTunerProposalFreshness(proposal, storageKeyOverride = null) {
-  if (!proposal || typeof proposal !== "object") return null;
-  if (proposal.applied) {
-    proposal.proposalStatus = "APPLIED";
-    return proposal;
-  }
 
-  const league = proposal.league || null;
-  const currentSample =
-    proposal.marketKey && proposal.marketKey !== "multi"
-      ? getTotalSettledCountForLeagueMarket(league, proposal.marketKey)
-      : getTotalSettledCountForLeague(league);
-  const currentFingerprint = getConfigFingerprintSafe(league);
 
-  const staleBySample =
-    Number.isFinite(Number(proposal.sampleCount)) &&
-    currentSample > Number(proposal.sampleCount);
-  const staleByConfig =
-    proposal.baseConfigVersion &&
-    currentFingerprint &&
-    String(proposal.baseConfigVersion) !== String(currentFingerprint);
 
-  if (staleBySample || staleByConfig) {
-    proposal.proposalStatus = "STALE";
-    proposal.staleReason = staleBySample
-      ? "New settled samples arrived after this proposal was created."
-      : "The active base configuration changed after this proposal was created.";
-    try {
-      localStorage.setItem(
-        storageKeyOverride || ("BB_TUNER_PROPOSAL_" + getTunerScopeKey(league)),
-        JSON.stringify(proposal),
-      );
-    } catch (e) {
-      engineDebug("markTunerProposalFreshness failed to persist STALE state", {
-        league,
-        error: e?.message || String(e),
-      });
-    }
-    return proposal;
-  }
 
-  proposal.proposalStatus = "PROPOSAL_READY";
-  return proposal;
-}
 
-function getStoredTunerProposal(league) {
-  const parsed = markTunerProposalFreshness(getStoredTunerProposalRaw(league));
-  if (!parsed || parsed.applied || !Array.isArray(parsed.promotions) || !parsed.promotions.length) {
-    return null;
-  }
-  return parsed;
-}
 
-function getTunerProposalStatus(league) {
-  const parsed = markTunerProposalFreshness(getStoredTunerProposalRaw(league));
-  if (!parsed) return null;
-  return parsed.proposalStatus || (parsed.applied ? "APPLIED" : "PROPOSAL_READY");
-}
 
-function getGridProposalStorageKey(league, marketKey) {
-  return (
-    "BB_TUNER_GRID_PROPOSAL_" +
-    getTunerScopeKey(league) +
-    "_" +
-    String(marketKey || "ft").toLowerCase()
-  );
-}
 
-function getStoredGridProposalRaw(league, marketKey) {
-  try {
-    const raw = localStorage.getItem(getGridProposalStorageKey(league, marketKey));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : null;
-  } catch (e) {
-    engineDebug("getStoredGridProposalRaw failed", {
-      league,
-      marketKey,
-      error: e?.message || String(e),
-    });
-    return null;
-  }
-}
 
-function getStoredGridProposal(league, marketKey) {
-  const key = getGridProposalStorageKey(league, marketKey);
-  const parsed = markTunerProposalFreshness(getStoredGridProposalRaw(league, marketKey), key);
-  if (!parsed || parsed.applied || !Array.isArray(parsed.promotions) || !parsed.promotions.length) {
-    return null;
-  }
-  return parsed;
-}
 
-function persistGridProposalRecord(proposal) {
-  if (!proposal || !proposal.proposalId) return false;
-  try {
-    localStorage.setItem(
-      getGridProposalStorageKey(proposal.league, proposal.marketKey),
-      JSON.stringify(proposal),
-    );
-    return true;
-  } catch (e) {
-    engineDebug("persistGridProposalRecord failed", {
-      league: proposal.league,
-      marketKey: proposal.marketKey,
-      proposalId: proposal.proposalId,
-      error: e?.message || String(e),
-    });
-    return false;
-  }
-}
 
-function recordTunerAppliedHistory(record) {
-  try {
-    const key = TUNER_APPLY_HISTORY_KEY;
-    const raw = localStorage.getItem(key);
-    let history = raw ? JSON.parse(raw) : [];
-    if (!Array.isArray(history)) history = [];
-    history.push(record);
-    if (history.length > 200) history = history.slice(-200);
-    localStorage.setItem(key, JSON.stringify(history));
-    return true;
-  } catch (e) {
-    engineDebug("recordTunerAppliedHistory failed", { error: e?.message || String(e) });
-    return false;
-  }
-}
 
-function getTunerLastApplied(league, paramKey) {
-  try {
-    const map = JSON.parse(localStorage.getItem(TUNER_LAST_APPLIED_KEY) || "{}");
-    const scope = getTunerScopeKey(league);
-    const row = map[scope] || {};
-    return paramKey ? row[paramKey] || null : row;
-  } catch (e) {
-    engineDebug("getTunerLastApplied failed", { league, paramKey, error: e?.message || String(e) });
-    return null;
-  }
-}
 
-function persistTunerLastApplied(league, appliedRecord) {
-  const key = TUNER_LAST_APPLIED_KEY;
-  try {
-    const map = JSON.parse(localStorage.getItem(key) || "{}");
-    const scope = getTunerScopeKey(league);
-    if (!map[scope]) map[scope] = {};
-    (appliedRecord.parameters || []).forEach((p) => {
-      map[scope][p.key] = {
-        appliedAt: appliedRecord.appliedAt,
-        proposalId: appliedRecord.proposalId,
-        previousValue: p.previousValue,
-        newValue: p.newValue,
-        sampleCount: appliedRecord.sampleCount,
-        marketKey: appliedRecord.marketKey || null,
-        scope: appliedRecord.scope,
-      };
-    });
-    localStorage.setItem(key, JSON.stringify(map));
-    return true;
-  } catch (e) {
-    engineDebug("persistTunerLastApplied failed", { league, error: e?.message || String(e) });
-    return false;
-  }
-}
 
-function createTunerProposalRecord({
-  league = null,
-  marketKey = "multi",
-  promotions = [],
-  sampleCount = 0,
-  requiredSample = TUNER_REQUIRED_SAMPLE,
-  reason = "",
-  provenance = "config-evaluation",
-  currentConfig = null,
-  proposedConfig = null,
-}) {
-  const scope = getTunerScopeKey(league);
-  const createdAt = new Date().toISOString();
-  const candidateConfigHash = djb2Hash(JSON.stringify(proposedConfig || promotions || {}));
-  const proposalId =
-    "TUNER-" +
-    scope +
-    "-" +
-    String(marketKey || "multi").toLowerCase() +
-    "-" +
-    candidateConfigHash +
-    "-" +
-    Date.now().toString(36);
 
-  return {
-    proposalVersion: TUNER_PROPOSAL_VERSION,
-    proposalId,
-    scope,
-    league: league || null,
-    marketKey: marketKey || "multi",
-    sampleCount: Number(sampleCount) || 0,
-    requiredSample: Number(requiredSample) || TUNER_REQUIRED_SAMPLE,
-    currentConfig: currentConfig || getTunerConfigSnapshot(league, marketKey),
-    proposedConfig: proposedConfig || {},
-    candidateConfigHash,
-    baseConfigVersion: getConfigFingerprintSafe(league),
-    promotions: Array.isArray(promotions) ? promotions : [],
-    reason: reason || "Configuration evaluation produced a candidate.",
-    provenance,
-    createdAt,
-    ts: createdAt,
-    applied: false,
-    proposalStatus: "PROPOSAL_READY",
-  };
-}
 
-function persistTunerProposalRecord(proposal) {
-  if (!proposal || !proposal.proposalId) return false;
-  try {
-    localStorage.setItem(
-      "BB_TUNER_PROPOSAL_" + getTunerScopeKey(proposal.league),
-      JSON.stringify(proposal),
-    );
-    const meta = {
-      proposalId: proposal.proposalId,
-      proposalVersion: proposal.proposalVersion,
-      scope: proposal.scope,
-      league: proposal.league || null,
-      marketKey: proposal.marketKey || "multi",
-      sampleCount: proposal.sampleCount,
-      requiredSample: proposal.requiredSample,
-      baseConfigVersion: proposal.baseConfigVersion,
-      candidateConfigHash: proposal.candidateConfigHash,
-      currentConfig: proposal.currentConfig || null,
-      proposedConfig: proposal.proposedConfig || null,
-      reason: proposal.reason || "",
-      provenance: proposal.provenance || "",
-      createdAt: proposal.createdAt,
-      proposalStatus: proposal.proposalStatus || "PROPOSAL_READY",
-    };
-    const metaMap = JSON.parse(localStorage.getItem(TUNER_PROPOSAL_META_KEY) || "{}");
-    metaMap[getTunerScopeKey(proposal.league)] = meta;
-    localStorage.setItem(TUNER_PROPOSAL_META_KEY, JSON.stringify(metaMap));
-    return true;
-  } catch (e) {
-    engineDebug("persistTunerProposalRecord failed", {
-      league: proposal.league,
-      marketKey: proposal.marketKey,
-      proposalId: proposal.proposalId,
-      error: e?.message || String(e),
-    });
-    return false;
-  }
-}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /* SECTION 117 — apply-tuner-proposal */
 function validateTunableParamValue(key, value) {
@@ -7883,230 +7618,13 @@ function validateTunableParamValue(key, value) {
   return { ok: true, value };
 }
 
-function applyTunerProposal(league, proposalOverride = null, proposalStorageKey = null) {
-  const scopeKey = getTunerScopeKey(league);
-  const rawProposal = proposalOverride || getStoredTunerProposalRaw(league);
-  if (!rawProposal) return { ok: false, reason: "No proposal stored" };
 
-  if (rawProposal.applied) {
-    return { ok: true, alreadyApplied: true, proposalId: rawProposal.proposalId || null };
-  }
 
-  const proposal = markTunerProposalFreshness(rawProposal, proposalStorageKey);
-  if (!proposal) return { ok: false, reason: "Invalid proposal" };
-  if (proposal.proposalStatus === "STALE") {
-    engineDebug("Tuner proposal apply blocked: proposal is STALE", {
-      league: scopeKey,
-      marketKey: proposal.marketKey,
-      proposalId: proposal.proposalId,
-      sampleCount: proposal.sampleCount,
-      requiredSample: proposal.requiredSample,
-      reason: proposal.staleReason,
-    });
-    return { ok: false, reason: proposal.staleReason || "Proposal is stale" };
-  }
-  if (!Array.isArray(proposal.promotions) || !proposal.promotions.length) {
-    return { ok: false, reason: "Proposal contains no promotions" };
-  }
 
-  const scopeLeague = proposal.league || null;
-  const validated = [];
-  for (const p of proposal.promotions) {
-    const key = String(p?.key || "");
-    const validation = validateTunableParamValue(key, p?.val);
-    if (!validation.ok) {
-      engineDebug("Tuner proposal validation failed", {
-        league: scopeKey,
-        proposalId: proposal.proposalId,
-        key,
-        value: p?.val,
-        reason: validation.reason,
-      });
-      return { ok: false, reason: validation.reason };
-    }
-    const entry = TUNABLE_PARAM_REGISTRY[key];
-    if (scopeLeague && entry.scope !== "global") {
-      return {
-        ok: false,
-        reason: key + " cannot be applied as a league override",
-      };
-    }
-    validated.push({ key, value: validation.value, oldValue: getTunableParam(key, scopeLeague) });
-  }
+window.applyTunerProposalFromUI = function () { return false; };
 
-  const registrySnapshot = {};
-  Object.keys(TUNABLE_PARAM_REGISTRY).forEach((key) => {
-    const e = TUNABLE_PARAM_REGISTRY[key];
-    registrySnapshot[key] = {
-      value: Array.isArray(e.value) ? e.value.slice() : e.value,
-      lastVerifiedAt: e.lastVerifiedAt || null,
-    };
-  });
-  const leagueSnapshot = JSON.parse(JSON.stringify(g_tunableParamLeagueOverrides || {}));
-
-  const appliedAt = new Date().toISOString();
-  const appliedRecord = {
-    proposalId: proposal.proposalId || null,
-    proposalVersion: proposal.proposalVersion || TUNER_PROPOSAL_VERSION,
-    scope: scopeLeague ? "league" : "global",
-    league: scopeLeague,
-    marketKey: proposal.marketKey || "multi",
-    sampleCount: Number(proposal.sampleCount) || 0,
-    requiredSample: Number(proposal.requiredSample) || TUNER_REQUIRED_SAMPLE,
-    appliedAt,
-    parameters: validated.map((p) => ({
-      key: p.key,
-      previousValue: Array.isArray(p.oldValue) ? p.oldValue.slice() : p.oldValue,
-      newValue: Array.isArray(p.value) ? p.value.slice() : p.value,
-    })),
-    reason: proposal.reason || "",
-    provenance: proposal.provenance || "",
-    candidateConfigHash: proposal.candidateConfigHash || null,
-    baseConfigVersion: proposal.baseConfigVersion || null,
-  };
-
-  const rollback = () => {
-    Object.keys(TUNABLE_PARAM_REGISTRY).forEach((key) => {
-      const snap = registrySnapshot[key];
-      TUNABLE_PARAM_REGISTRY[key].value = Array.isArray(snap.value) ? snap.value.slice() : snap.value;
-      TUNABLE_PARAM_REGISTRY[key].lastVerifiedAt = snap.lastVerifiedAt;
-    });
-    g_tunableParamLeagueOverrides = JSON.parse(JSON.stringify(leagueSnapshot));
-    try {
-      saveTunableParamRegistryOverrides();
-      saveTunableParamLeagueOverrides();
-    } catch (_e) {}
-  };
-
-  try {
-    // Stage all values in memory first. No individual setTunableParam() writes are allowed
-    // during this transaction because a partial localStorage write would create a mixed config.
-    validated.forEach((p) => {
-      if (scopeLeague) {
-        if (!g_tunableParamLeagueOverrides[scopeLeague]) {
-          g_tunableParamLeagueOverrides[scopeLeague] = {};
-        }
-        g_tunableParamLeagueOverrides[scopeLeague][p.key] = {
-          value: Array.isArray(p.value) ? p.value.slice() : p.value,
-          lastVerifiedAt: appliedAt,
-        };
-      } else {
-        TUNABLE_PARAM_REGISTRY[p.key].value = Array.isArray(p.value) ? p.value.slice() : p.value;
-        TUNABLE_PARAM_REGISTRY[p.key].lastVerifiedAt = appliedAt;
-      }
-    });
-
-    if (!saveTunableParamRegistryOverrides() || !saveTunableParamLeagueOverrides()) {
-      throw new Error("Failed to persist tunable parameter state");
-    }
-
-    // Read-after-write verification through the same authoritative effective-value path.
-    for (const p of validated) {
-      const readback = getTunableParam(p.key, scopeLeague, proposal.marketKey || null);
-      const a = Array.isArray(p.value) ? JSON.stringify(p.value) : Number(p.value);
-      const b = Array.isArray(readback) ? JSON.stringify(readback) : Number(readback);
-      if (String(a) !== String(b)) {
-        throw new Error("Tunable parameter readback mismatch for " + p.key);
-      }
-    }
-
-    // History is part of the transaction. If it cannot be recorded, roll the config back.
-    if (!recordTunerAppliedHistory(appliedRecord)) {
-      throw new Error("Failed to persist tuner application history");
-    }
-    if (!persistTunerLastApplied(scopeLeague, appliedRecord)) {
-      throw new Error("Failed to persist tuner last-applied metadata");
-    }
-
-    proposal.applied = true;
-    proposal.appliedAt = appliedAt;
-    proposal.appliedRecord = appliedRecord;
-    proposal.proposalStatus = "APPLIED";
-    proposal.versionApplied = proposal.proposalVersion || TUNER_PROPOSAL_VERSION;
-    localStorage.setItem(
-      proposalStorageKey || ("BB_TUNER_PROPOSAL_" + scopeKey),
-      JSON.stringify(proposal),
-    );
-
-    try {
-      const canaries = JSON.parse(localStorage.getItem("BB_TUNER_CANARIES") || "{}");
-      canaries[scopeKey] = {
-        league: scopeLeague,
-        promotions: proposal.promotions.map((p) => ({ ...p })),
-        nAtApply: appliedRecord.sampleCount,
-        canaryWindow: 20,
-        appliedAt,
-        resolved: false,
-        proposalId: proposal.proposalId || null,
-      };
-      localStorage.setItem("BB_TUNER_CANARIES", JSON.stringify(canaries));
-    } catch (e) {
-      engineDebug("Tuner canary registration failed after atomic apply", {
-        error: e?.message || String(e),
-        proposalId: proposal.proposalId,
-      });
-    }
-
-    engineDebug("Tuner proposal manually applied atomically", appliedRecord);
-
-    try {
-      setConfigEvaluationState(
-        proposal.league,
-        proposal.marketKey || "multi",
-        {
-          status: "APPLIED",
-          sampleCount: appliedRecord.sampleCount,
-          requiredSample: appliedRecord.requiredSample,
-          proposalId: proposal.proposalId || null,
-          reason: "Proposal applied explicitly by the user.",
-          appliedAt,
-        },
-      );
-    } catch (_stateErr) {}
-
-    return { ok: true, appliedRecord };
-  } catch (e) {
-    rollback();
-    engineDebug("applyTunerProposal rolled back", {
-      league: scopeKey,
-      proposalId: proposal.proposalId,
-      error: e?.message || String(e),
-      stack: e?.stack || "no stack",
-    });
-    return { ok: false, reason: e?.message || String(e) };
-  }
-}
-
-window.applyTunerProposalFromUI = function (league) {
-  const scopeKey = league || "global";
-  const proposal = getStoredTunerProposalRaw(league);
-  if (!proposal) {
-    if (typeof renderConfigsPanel === "function") renderConfigsPanel();
-    return;
-  }
-  if (
-    !confirm(
-      "Apply the pending tuning proposal for " +
-        scopeKey +
-        "? This will overwrite the current tunable parameter values for the proposal scope.",
-    )
-  )
-    return;
-
-  const result = applyTunerProposal(league);
-  if (!result.ok) {
-    engineDebug("Tuner proposal Apply failed", {
-      league: scopeKey,
-      proposalId: proposal.proposalId || null,
-      error: result.reason,
-    });
-    alert("Apply failed: " + result.reason);
-    return;
-  }
-  if (typeof renderConfigsPanel === "function") renderConfigsPanel();
-};
-
-window.applyGridProposalFromUI = function (league, marketKey) {
+window.applyGridProposalFromUI = function () { return false; };
+window.__removed_applyGridProposalFromUI = function (league, marketKey) {
   const proposal = getStoredGridProposalRaw(league, marketKey);
   if (!proposal) return;
   const status = markTunerProposalFreshness(proposal, getGridProposalStorageKey(league, marketKey));
@@ -8144,157 +7662,27 @@ window.applyGridProposalFromUI = function (league, marketKey) {
   if (typeof renderConfigsPanel === "function") renderConfigsPanel();
 };
 
-function getStoredConstantProposal(constantName) {
-  try {
-    const raw = localStorage.getItem("BB_CONST_PROPOSAL_" + constantName);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || parsed.applied) return null;
-    return parsed;
-  } catch (e) {
-    engineDebug("getStoredConstantProposal failed", {
-      constantName,
-      error: e?.message || String(e),
-    });
-    return null;
-  }
-}
 
-/* SECTION 118 — apply-engine-constant-proposal */
-function applyEngineConstantProposal(constantName) {
-  const proposal = getStoredConstantProposal(constantName);
-  if (!proposal) return false;
-  setTunableConstant(constantName, proposal.proposedValue, proposal.netDelta, proposal.sampleCount);
-  try {
-    proposal.applied = true;
-    proposal.appliedAt = new Date().toISOString();
-    localStorage.setItem("BB_CONST_PROPOSAL_" + constantName, JSON.stringify(proposal));
-  } catch (e) {
-    engineDebug(
-      "applyEngineConstantProposal failed to mark proposal applied: " + (e?.message || String(e)),
-      { error: e },
-    );
-  }
-  engineDebug("Engine constant proposal manually applied via Configs panel", {
-    constantName,
-    value: proposal.proposedValue,
-  });
-  return true;
-}
 
-window.applyTunerProposalFromUI = function (league) {
-  const scopeKey = league || "global";
-  if (
-    !confirm(
-      "Apply the pending tuning proposal for " +
-        scopeKey +
-        "? This will overwrite the current tunable parameter values.",
-    )
-  )
-    return;
-  if (applyTunerProposal(league)) {
-    if (typeof renderConfigsPanel === "function") renderConfigsPanel();
-  }
-};
 
-function getPhase2ProposalStorageKey(siloKey, league) {
-  return "BB_PHASE2_PROPOSAL_" + String(siloKey || "") + "_" + String(league || "").toLowerCase();
-}
-function getStoredPhase2Proposal(siloKey, league) {
-  try {
-    const raw = localStorage.getItem(getPhase2ProposalStorageKey(siloKey, league));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return null;
-    if (!parsed.config || typeof parsed.config !== "object") return null;
-    if (!parsed.ts) parsed.ts = Date.now();
-    parsed.config.bestConfig = parsed.config.bestConfig || parsed.config.recencyWeights || "—";
-    parsed.config.score = parsed.config.score != null ? parsed.config.score : "—";
-    parsed.config.improvement = parsed.config.improvement != null ? parsed.config.improvement : "—";
-    parsed.config.sampleSize = parsed.config.sampleSize || 0;
-    return parsed;
-  } catch (e) {
-    if (typeof engineDebug === "function") {
-      engineDebug("getStoredPhase2Proposal failed", { error: e?.message || String(e), siloKey, league });
-    }
-    return null;
-  }
-}
-function storePhase2Proposal(siloKey, league, config) {
-  try {
-    const payload = {
-      ts: Date.now(),
-      siloKey: siloKey,
-      league: league,
-      config: config || {},
-    };
-    localStorage.setItem(getPhase2ProposalStorageKey(siloKey, league), JSON.stringify(payload));
-    return payload;
-  } catch (e) {
-    if (typeof engineDebug === "function") {
-      engineDebug("storePhase2Proposal failed", { error: e?.message || String(e) });
-    }
-    return null;
-  }
-}
-function applyPhase2SimulatorProposalFromUI(siloKey, league) {
-  const proposal = getStoredPhase2Proposal(siloKey, league);
-  if (!proposal) {
-    alert("No recency-weight proposal stored for " + siloKey + " / " + league);
-    return false;
-  }
-  if (
-    !confirm(
-      "Apply recency-weight proposal for " +
-        String(league || "").toUpperCase() +
-        " into " +
-        siloKey +
-        "?",
-    )
-  ) {
-    return false;
-  }
-  try {
-    const store = JSON.parse(localStorage.getItem(siloKey) || "{}") || {};
-    const prev = store[league] && typeof store[league] === "object" ? store[league] : {};
-    store[league] = Object.assign({}, prev, {
-      verified: true,
-      recencyWeights: proposal.config.recencyWeights || prev.recencyWeights || null,
-      bestConfig: proposal.config.bestConfig || prev.bestConfig || null,
-      score: proposal.config.score,
-      improvement: proposal.config.improvement,
-      sampleSize: proposal.config.sampleSize || 0,
-      appliedAt: new Date().toISOString(),
-      source: "phase2-ui",
-    });
-    localStorage.setItem(siloKey, JSON.stringify(store));
-    localStorage.removeItem(getPhase2ProposalStorageKey(siloKey, league));
-    if (typeof engineDebug === "function") {
-      engineDebug("Phase2 proposal applied", { siloKey, league });
-    }
-    if (typeof renderConfigsPanel === "function") renderConfigsPanel();
-    if (typeof window.updateLeagueDropdownIndicators === "function") {
-      window.updateLeagueDropdownIndicators();
-    }
-    return true;
-  } catch (e) {
-    if (typeof engineDebug === "function") {
-      engineDebug("applyPhase2SimulatorProposalFromUI failed", { error: e?.message || String(e) });
-    }
-    alert("Apply failed: " + (e && e.message ? e.message : String(e)));
-    return false;
-  }
-}
-window.getStoredPhase2Proposal = getStoredPhase2Proposal;
-window.storePhase2Proposal = storePhase2Proposal;
-window.applyPhase2SimulatorProposalFromUI = applyPhase2SimulatorProposalFromUI;
 
-window.applyConstantProposalFromUI = function (constantName) {
-  if (!confirm("Apply the pending proposal for " + constantName + "?")) return;
-  if (applyEngineConstantProposal(constantName)) {
-    if (typeof renderConfigsPanel === "function") renderConfigsPanel();
-  }
-};
+
+
+window.applyTunerProposalFromUI = function () { return false; };
+
+
+
+
+
+
+
+
+
+
+
+
+
+window.applyConstantProposalFromUI = function () { return false; };
 
 /* SECTION 119 — stored-confidence-model-proposal */
 const CONFIDENCE_REQUIRED_SAMPLE = 40; /* trainer only — do not block live grades */
@@ -8303,280 +7691,16 @@ const CONFIDENCE_CALIBRATION_VERSION = "confidence-cal-v3-family";
 const CONFIDENCE_PROPOSAL_META_KEY = "BB_CONFIDENCE_MODEL_PROPOSAL_META_V2";
 const CONFIDENCE_APPLY_HISTORY_KEY = "BB_CONFIDENCE_MODEL_APPLY_HISTORY_V2";
 
-function getConfidenceLiveFingerprint() {
-  try {
-    const raw = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
-    return djb2Hash(raw || "null");
-  } catch (_e) {
-    return "unknown";
-  }
-}
 
-function getStoredConfidenceModelProposal() {
-  try {
-    const coeffRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_PROPOSED");
-    if (!coeffRaw) return null;
-    const coeff = JSON.parse(coeffRaw);
-    if (!coeff || !Object.keys(coeff).length) return null;
 
-    let platt = {};
-    try {
-      platt = JSON.parse(localStorage.getItem("BB_PLATT_CALIB_PROPOSED") || "{}");
-    } catch (e) {
-      engineDebug("Platt calibration proposal load failed", { error: e?.message || String(e) });
-    }
 
-    let sampleSizes = {};
-    try {
-      sampleSizes = JSON.parse(
-        localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N_PROPOSED") ||
-          localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") ||
-          "{}",
-      );
-    } catch (e) {
-      engineDebug("Confidence coefficient sample-size load failed", {
-        error: e?.message || String(e),
-      });
-    }
 
-    let thresholds = null;
-    try {
-      const tRaw = localStorage.getItem("BB_CONFIDENCE_THRESHOLDS_PROPOSED");
-      if (tRaw) thresholds = JSON.parse(tRaw);
-    } catch (e) {
-      engineDebug("Confidence thresholds proposal load failed", { error: e?.message || String(e) });
-    }
 
-    let gradeWinRates = null;
-    try {
-      const gRaw = localStorage.getItem("BB_CONFIDENCE_GRADE_WIN_RATES_PROPOSED");
-      if (gRaw) gradeWinRates = JSON.parse(gRaw);
-    } catch (e) {
-      engineDebug("Grade win-rates proposal load failed", { error: e?.message || String(e) });
-    }
 
-    let meta = {};
-    try {
-      meta = JSON.parse(localStorage.getItem(CONFIDENCE_PROPOSAL_META_KEY) || "{}") || {};
-    } catch (e) {
-      engineDebug("Confidence proposal metadata load failed", { error: e?.message || String(e) });
-    }
 
-    const totalSettled = getAllSettledTrackedPicks().length;
-    const currentLiveHash = getConfidenceLiveFingerprint();
-    let proposalStatus = meta.status || "PROPOSAL_READY";
-    let staleReason = null;
 
-    if (meta.applied) {
-      proposalStatus = "APPLIED";
-    } else if (
-      (Number.isFinite(Number(meta.sampleCount)) && totalSettled > Number(meta.sampleCount)) ||
-      (meta.baseLiveHash && currentLiveHash !== "unknown" && String(meta.baseLiveHash) !== String(currentLiveHash))
-    ) {
-      proposalStatus = "STALE";
-      staleReason =
-        totalSettled > Number(meta.sampleCount)
-          ? "New settled results arrived after the calibration proposal was created."
-          : "The live confidence/calibration model changed after the proposal was created.";
-      try {
-        localStorage.setItem(
-          CONFIDENCE_PROPOSAL_META_KEY,
-          JSON.stringify({ ...meta, status: "STALE", staleReason }),
-        );
-      } catch (_e) {}
-    }
 
-    return {
-      coeff,
-      platt,
-      sampleSizes,
-      thresholds,
-      gradeWinRates,
-      scopes: Object.keys(coeff).filter((s) => s !== "modelVersion" && s !== "_modelVersion"),
-      proposalId: meta.proposalId || null,
-      proposalVersion: meta.proposalVersion || 2,
-      sampleCount: Number(meta.sampleCount || totalSettled),
-      requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
-      fitSampleCount: Number(meta.fitSampleCount || 0),
-      holdoutSampleCount: Number(meta.holdoutSampleCount || 0),
-      currentModelVersion: meta.currentModelVersion || "unknown",
-      proposedModelVersion: meta.proposedModelVersion || CONFIDENCE_CALIBRATION_VERSION,
-      baseLiveHash: meta.baseLiveHash || null,
-      createdAt: meta.createdAt || null,
-      appliedAt: meta.appliedAt || null,
-      status: proposalStatus,
-      staleReason,
-      provenance: meta.provenance || "calibrateConfidenceModel",
-    };
-  } catch (e) {
-    engineDebug("getStoredConfidenceModelProposal failed", { error: e?.message || String(e) });
-    return null;
-  }
-}
-
-/* SECTION 120 — apply-confidence-model-proposal */
-function applyConfidenceModelProposal() {
-  const proposal = getStoredConfidenceModelProposal();
-  if (!proposal) return { ok: false, reason: "No confidence model proposal stored" };
-  if (proposal.status === "APPLIED") return { ok: true, alreadyApplied: true, proposalId: proposal.proposalId };
-  if (proposal.status === "STALE") {
-    engineDebug("Confidence model Apply blocked: proposal is STALE", {
-      proposalId: proposal.proposalId,
-      sampleCount: proposal.sampleCount,
-      currentSampleCount: getAllSettledTrackedPicks().length,
-      reason: proposal.staleReason,
-    });
-    return { ok: false, reason: proposal.staleReason || "Confidence model proposal is stale" };
-  }
-
-  const proposedSampleSizes = proposal.sampleSizes || {};
-  const insufficientScopes = proposal.scopes.filter(
-    (scope) => Number(proposedSampleSizes[scope] || 0) < CONFIDENCE_REQUIRED_SAMPLE,
-  );
-  if (insufficientScopes.length) {
-    const reason =
-      "Confidence Apply blocked: scoped sample below " +
-      CONFIDENCE_REQUIRED_SAMPLE +
-      " for " +
-      insufficientScopes.join(", ");
-    engineDebug(reason, { proposalId: proposal.proposalId, sampleSizes: proposedSampleSizes });
-    return { ok: false, reason };
-  }
-
-  const oldKeys = [
-    "BB_CONFIDENCE_MODEL_LIVE",
-    "BB_CONFIDENCE_MODEL_COEFF",
-    "BB_PLATT_CALIB",
-    "BB_CONFIDENCE_MODEL_COEFF_N",
-    "BB_CONFIDENCE_THRESHOLDS",
-    "BB_CONFIDENCE_GRADE_WIN_RATES"];
-  const snapshot = {};
-  oldKeys.forEach((key) => {
-    snapshot[key] = localStorage.getItem(key);
-  });
-
-  const appliedAt = new Date().toISOString();
-  const liveBundle = {
-    coeff: proposal.coeff,
-    platt: proposal.platt,
-    sampleSizes: proposedSampleSizes,
-    thresholds: proposal.thresholds && typeof proposal.thresholds === "object" ? proposal.thresholds : null,
-    gradeWinRates: proposal.gradeWinRates && typeof proposal.gradeWinRates === "object" ? proposal.gradeWinRates : null,
-    appliedAt,
-    scopes: proposal.scopes || null,
-    modelVersion: proposal.proposedModelVersion || CONFIDENCE_CALIBRATION_VERSION,
-    calibrationVersion: CONFIDENCE_CALIBRATION_VERSION,
-    proposalId: proposal.proposalId || null,
-    featureSchemaHash: typeof getFeatureSchemaHash === "function" ? getFeatureSchemaHash() : null,
-  };
-
-  try {
-    localStorage.setItem("BB_CONFIDENCE_MODEL_LIVE", JSON.stringify(liveBundle));
-    // Legacy mirrors are retained for migration/export only. Live serving reads the bundle above.
-    localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF", JSON.stringify({ ...proposal.coeff, modelVersion: liveBundle.modelVersion }));
-    localStorage.setItem("BB_PLATT_CALIB", JSON.stringify(proposal.platt));
-    localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF_N", JSON.stringify(proposedSampleSizes));
-    if (liveBundle.thresholds) {
-      localStorage.setItem("BB_CONFIDENCE_THRESHOLDS", JSON.stringify(liveBundle.thresholds));
-    }
-    if (liveBundle.gradeWinRates) {
-      localStorage.setItem("BB_CONFIDENCE_GRADE_WIN_RATES", JSON.stringify(liveBundle.gradeWinRates));
-    }
-
-    const readback = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
-    if (!readback || JSON.stringify(JSON.parse(readback)) !== JSON.stringify(liveBundle)) {
-      throw new Error("Confidence live bundle readback verification failed");
-    }
-
-    const history = (() => {
-      try {
-        const parsed = JSON.parse(localStorage.getItem(CONFIDENCE_APPLY_HISTORY_KEY) || "[]");
-        return Array.isArray(parsed) ? parsed : [];
-      } catch (_e) {
-        return [];
-      }
-    })();
-    history.push({
-      proposalId: proposal.proposalId || null,
-      appliedAt,
-      sampleCount: proposal.sampleCount,
-      requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
-      scopes: proposal.scopes,
-      sampleSizes: proposedSampleSizes,
-      previousLiveHash: proposal.baseLiveHash || null,
-      newLiveHash: djb2Hash(JSON.stringify(liveBundle)),
-      currentModelVersion: proposal.currentModelVersion,
-      proposedModelVersion: proposal.proposedModelVersion,
-      platt: proposal.platt || {},
-      provenance: proposal.provenance,
-    });
-    localStorage.setItem(CONFIDENCE_APPLY_HISTORY_KEY, JSON.stringify(history.slice(-100)));
-
-    const metaRaw = localStorage.getItem(CONFIDENCE_PROPOSAL_META_KEY);
-    const meta = metaRaw ? JSON.parse(metaRaw) : {};
-    localStorage.setItem(
-      CONFIDENCE_PROPOSAL_META_KEY,
-      JSON.stringify({
-        ...meta,
-        proposalId: proposal.proposalId,
-        status: "APPLIED",
-        applied: true,
-        appliedAt,
-        appliedSampleCount: proposal.sampleCount,
-      }),
-    );
-
-    // Keep the proposed bundle as an auditable copy. The metadata status is APPLIED, so
-    // the UI never treats this historical proposal as pending.
-    engineDebug(
-      "Confidence model + Platt + thresholds applied atomically",
-      {
-        proposalId: proposal.proposalId,
-        scopes: proposal.scopes,
-        sampleSizes: proposedSampleSizes,
-        requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
-        currentModelVersion: proposal.currentModelVersion,
-        proposedModelVersion: proposal.proposedModelVersion,
-      },
-    );
-    return { ok: true, appliedAt, proposalId: proposal.proposalId };
-  } catch (e) {
-    oldKeys.forEach((key) => {
-      try {
-        const value = snapshot[key];
-        if (value === null || value === undefined) localStorage.removeItem(key);
-        else localStorage.setItem(key, value);
-      } catch (_restoreErr) {}
-    });
-    engineDebug("applyConfidenceModelProposal rolled back", {
-      proposalId: proposal.proposalId,
-      error: e?.message || String(e),
-      stack: e?.stack || "no stack",
-    });
-    return { ok: false, reason: e?.message || String(e) };
-  }
-}
-
-window.applyConfidenceModelProposalFromUI = function () {
-  const proposal = getStoredConfidenceModelProposal();
-  if (!proposal) return;
-  if (proposal.status === "STALE") {
-    alert("The confidence model proposal is stale. Re-run calibration before Apply.");
-    return;
-  }
-  if (
-    !confirm(
-      "Apply pending confidence model atomically (coeffs + N + Platt + grade thresholds)? This overwrites live grading for every new pick.",
-    )
-  )
-    return;
-  const result = applyConfidenceModelProposal();
-  if (!result.ok) {
-    alert("Apply failed: " + result.reason);
-    return;
-  }
-  if (typeof renderConfigsPanel === "function") renderConfigsPanel();
-};
+window.applyConfidenceModelProposalFromUI = function () { return false; };
 
 
 let _forensicReplayParamOverrides = null;
@@ -9184,17 +8308,8 @@ const TUNABLE_CONSTANTS_GRID = {
   UNDER_EDGE_FACTOR: [1.0, 1.1, 1.2, 1.3, 1.4],
 };
 
-function getLearnedConstantsStore() {
-  try {
-    const raw = localStorage.getItem("BB_LEARNED_CONSTANTS");
-    return raw ? JSON.parse(raw) : {};
-  } catch (e) {
-    engineDebug("getLearnedConstantsStore failed to read: " + (e?.message || String(e)), {
-      error: e,
-    });
-    return {};
-  }
-}
+
+
 
 /* SECTION 138 — get-tunable-constant */
 function getTunableConstant(constantName, defaultValue) {
@@ -9287,150 +8402,8 @@ function selectBestConstantValue(constantName, minSamples = 60) {
   return qualified.length ? qualified[0] : null;
 }
 
-/* SECTION 140 — calibrate-engine-constants */
-function calibrateEngineConstants() {
-  const settled = getLearningTrackedPicks().filter(
-    (p) =>
-      p.snapshot &&
-      p.actualScore != null &&
-      (p.resultStatus === "win" || p.resultStatus === "loss"),
-  );
-  if (settled.length < 75) return;
 
-  settled.forEach((pick) => {
-    if (!["ft", "team_a", "team_b"].includes(pick.marketKey)) return;
-    const { parsed, lines, league, injMultA, injMultB } = pick.snapshot;
-    const _calibContextData = pick.snapshot?.contextData || pick.snapshot?.context || null;
-    if (!(injMultA < 1 || injMultB < 1)) return;
-    const numericActual = typeof actualForMarket === "function" ? actualForMarket(pick) : (typeof parseFinalScore === "function" ? parseFinalScore(pick.actualScore).total : parseFloat(pick.actualScore));
-    if (!isFinite(numericActual)) return;
 
-    TUNABLE_CONSTANTS_GRID.INJURY_OPPONENT_BOOST_FACTOR.forEach((candidate) => {
-      try {
-        const calc = computeFTProjection({
-          league,
-          parsed,
-          lines,
-          injMultA,
-          injMultB,
-          contextData: _calibContextData,
-          config: { injuryOppBoostFactor: candidate },
-        });
-        let edge, lineVal, marketKeyForPick;
-        if (pick.marketKey === "ft") {
-          edge = calc.ftEdge;
-          lineVal = lines.ftLine;
-          marketKeyForPick = "ft";
-        } else if (pick.marketKey === "team_a") {
-          edge = calc.aEdge;
-          lineVal = lines.aLine;
-          marketKeyForPick = "team_a";
-        } else {
-          edge = calc.bEdge;
-          lineVal = lines.bLine;
-          marketKeyForPick = "team_b";
-        }
-        const decision = getPick(edge, lineVal, league, marketKeyForPick, {});
-        const baselineWon = pick.resultStatus === "win";
-        const baselineLost = pick.resultStatus === "loss";
-        const candidatePlayed = decision !== "NO PLAY";
-        let delta = 0;
-        if (!candidatePlayed && baselineLost) delta = +1;
-        else if (!candidatePlayed && baselineWon) delta = -1;
-        else if (candidatePlayed) {
-          const candSide = getPickSideFromText(decision);
-          let candidateWon = false;
-          let candidatePush = false;
-          if (isFinite(numericActual) && isFinite(lineVal) && numericActual === lineVal) {
-            candidatePush = true;
-          } else if (candSide === "over") candidateWon = numericActual > lineVal;
-          else if (candSide === "under") candidateWon = numericActual < lineVal;
-          const candidateLost = candidatePlayed && !candidateWon && !candidatePush;
-          if (candSide !== pick.side) {
-            if (candidateWon && baselineLost) delta = +2;
-            else if (candidateLost && baselineWon) delta = -2;
-            else if (candidateWon && baselineWon) delta = 0;
-            else if (candidateLost && baselineLost) delta = 0;
-          } else {
-            delta = 0;
-          }
-        }
-        if (delta !== 0)
-          updateConstantCandidateScore("INJURY_OPPONENT_BOOST_FACTOR", candidate, delta);
-      } catch (e) {
-        engineDebug("INJURY_OPPONENT_BOOST_FACTOR candidate scoring failed", {
-          error: e?.message || String(e),
-        });
-      }
-    });
-  });
-
-  settled.forEach((pick) => {
-    if (
-      pick.side !== "under" ||
-      !isFinite(pick.rawEdge ?? pick.edge) ||
-      !isFinite(pick.lineAtPick ?? pick.line)
-    )
-      return;
-    const numericActual = typeof actualForMarket === "function" ? actualForMarket(pick) : (typeof parseFinalScore === "function" ? parseFinalScore(pick.actualScore).total : parseFloat(pick.actualScore));
-    if (!isFinite(numericActual)) return;
-    const edge = Number(pick.rawEdge ?? pick.edge);
-    const lineVal = Number(pick.lineAtPick ?? pick.line);
-
-    TUNABLE_CONSTANTS_GRID.UNDER_EDGE_FACTOR.forEach((candidate) => {
-      const decision = getPick(edge, lineVal, pick.league, pick.marketKey, {
-        underEdgeFactorOverride: candidate,
-      });
-      if (decision === "NO PLAY") return;
-      const wouldWin = numericActual < lineVal;
-      const isWin = pick.resultStatus === "win";
-      const delta = wouldWin ? (isWin ? 0 : 1) : isWin ? -1 : 0;
-      if (delta !== 0) updateConstantCandidateScore("UNDER_EDGE_FACTOR", candidate, delta);
-    });
-  });
-
-  ["INJURY_OPPONENT_BOOST_FACTOR", "UNDER_EDGE_FACTOR"].forEach((constantName) => {
-    const best = selectBestConstantValue(constantName, 60);
-
-    const _gridSizeForConstant = (TUNABLE_CONSTANTS_GRID[constantName] || []).length || 1;
-    const _correctedConstantMultiplier =
-      2 * Math.sqrt(1 + Math.log(Math.max(2, _gridSizeForConstant)));
-
-    const isSignificant =
-      best &&
-      isFinite(best.netDelta) &&
-      isFinite(best.count) &&
-      best.count > 0 &&
-      best.netDelta > 0 &&
-      Math.abs(best.netDelta) > _correctedConstantMultiplier * Math.sqrt(best.count);
-    if (best && isSignificant) {
-      try {
-        localStorage.setItem(
-          "BB_CONST_PROPOSAL_" + constantName,
-          JSON.stringify({
-            constantName,
-            proposedValue: best.value,
-            netDelta: best.netDelta,
-            sampleCount: best.count,
-            ts: new Date().toISOString(),
-            applied: false,
-          }),
-        );
-      } catch (e) {
-        engineDebug(
-          "calibrateEngineConstants failed to persist proposal: " + (e?.message || String(e)),
-          { constantName, error: e },
-        );
-      }
-      engineDebug("Engine constant proposed (not auto-applied — review in Configs panel)", {
-        constantName,
-        proposedValue: best.value,
-        netDelta: best.netDelta,
-        sampleCount: best.count,
-      });
-    }
-  });
-}
 
 /* SECTION 141 — candidate-score-key */
 function getCandidateScoreKey(config) {
@@ -9497,7 +8470,7 @@ function updateCandidateScore(league, marketKey, config, delta, winProbability, 
 
 /* SECTION 143 — settled-count-league-market */
 function getTotalSettledCountForLeagueMarket(league, marketKey) {
-  const all = getLearningTrackedPicks();
+  const all = getAllTrackedPicksForReport();
   const lk = String(league || "").toLowerCase();
   const mk = String(marketKey || "").toLowerCase();
   return all.filter(
@@ -9670,195 +8643,7 @@ function setConfigEvaluationState(league, marketKey, patch = {}) {
   return record;
 }
 
-function refreshConfigGridEvaluationState(league, marketKey, opts = {}) {
-  const sampleCount = getTotalSettledCountForLeagueMarket(league, marketKey);
-  const requiredSample = TUNER_REQUIRED_SAMPLE;
-
-  if (sampleCount < requiredSample) {
-    return setConfigEvaluationState(league, marketKey, {
-      status: "INSUFFICIENT_SAMPLE",
-      sampleCount,
-      requiredSample,
-      reason: "Waiting for " + requiredSample + " settled eligible picks.",
-      evaluationStatus: "INSUFFICIENT_SAMPLE",
-      proposalStatus: null,
-    });
-  }
-
-  if (opts.evaluating) {
-    return setConfigEvaluationState(league, marketKey, {
-      status: "EVALUATING",
-      sampleCount,
-      requiredSample,
-      reason: "Configuration grid evaluation is running.",
-      evaluationStatus: "EVALUATING",
-    });
-  }
-
-  let best = null;
-  try {
-    best = selectBestConfig(league, marketKey);
-  } catch (e) {
-    return setConfigEvaluationState(league, marketKey, {
-      status: "FAILED",
-      sampleCount,
-      requiredSample,
-      reason: e?.message || String(e),
-      evaluationStatus: "FAILED",
-    });
-  }
-
-  const currentConfig = getTunerConfigSnapshot(league, marketKey);
-  if (!best) {
-    return setConfigEvaluationState(league, marketKey, {
-      status: "NO_CHANGE",
-      sampleCount,
-      requiredSample,
-      reason: "No candidate currently improves the existing configuration under the current grid-selection methodology.",
-      currentConfig,
-      evaluatedSampleCount: sampleCount,
-      evaluationStatus: "NO_CHANGE",
-      proposalStatus: null,
-    });
-  }
-
-  const proposalConfig = decodeTuningGridConfigKey(best.configKey);
-  const promotions = [];
-  const promotionKeys = {
-    h2hFactor: proposalConfig.h2hFactor,
-    recencyWeights: proposalConfig.recencyProfile,
-    edgeMult: proposalConfig.edgeMult,
-    injuryMult: proposalConfig.injuryMult,
-  };
-  Object.entries(promotionKeys).forEach(([key, val]) => {
-    if (val === undefined || val === null) return;
-    const current = getTunableParam(key, league, marketKey);
-    const same = Array.isArray(val) && Array.isArray(current)
-      ? JSON.stringify(val) === JSON.stringify(current)
-      : Number.isFinite(Number(val)) && Number.isFinite(Number(current))
-        ? Number(val) === Number(current)
-        : String(val) === String(current);
-    if (!same) {
-      promotions.push({
-        key,
-        old: Array.isArray(current) ? current.slice() : current,
-        val: Array.isArray(val) ? val.slice() : val,
-        sampleCount,
-        candidateConfigHash: djb2Hash(best.configKey),
-      });
-    }
-  });
-
-  if (!promotions.length || !(Number(best.netDelta) > 0)) {
-    return setConfigEvaluationState(league, marketKey, {
-      status: "NO_CHANGE",
-      sampleCount,
-      requiredSample,
-      reason: "Grid candidate exists, but it does not produce a positive change from the active configuration.",
-      currentConfig,
-      candidateConfig: proposalConfig,
-      candidateConfigHash: djb2Hash(best.configKey),
-      evaluatedSampleCount: sampleCount,
-      evaluationStatus: "NO_CHANGE",
-      proposalStatus: null,
-    });
-  }
-
-  if (opts.createProposal !== false) {
-    const existing = getStoredGridProposalRaw(league, marketKey);
-    const existingSame =
-      existing &&
-      !existing.applied &&
-      existing.proposalStatus !== "STALE" &&
-      Number(existing.sampleCount) === Number(sampleCount) &&
-      String(existing.marketKey || "").toLowerCase() === String(marketKey || "").toLowerCase() &&
-      String(existing.candidateConfigHash || "") === String(djb2Hash(best.configKey));
-
-    if (!existingSame) {
-      const proposal = createTunerProposalRecord({
-        league,
-        marketKey,
-        promotions,
-        sampleCount,
-        requiredSample,
-        currentConfig,
-        proposedConfig: proposalConfig,
-        reason:
-          "The existing configuration-grid selection produced a positive net delta over the authoritative settled sample; Apply remains manual.",
-        provenance: "retrospective_config_grid",
-      });
-      if (!persistGridProposalRecord(proposal)) {
-        return setConfigEvaluationState(league, marketKey, {
-          status: "FAILED",
-          sampleCount,
-          requiredSample,
-          reason: "Candidate was found but proposal persistence failed.",
-          currentConfig,
-          candidateConfig: proposalConfig,
-          candidateConfigHash: proposal.candidateConfigHash,
-          evaluatedSampleCount: sampleCount,
-          evaluationStatus: "FAILED",
-        });
-      }
-    }
-  }
-
-  const proposal = getStoredGridProposal(league, marketKey);
-  return setConfigEvaluationState(league, marketKey, {
-    status: proposal?.proposalStatus === "STALE" ? "STALE" : "PROPOSAL_READY",
-    sampleCount,
-    requiredSample,
-    proposalId: proposal?.proposalId || null,
-    reason: proposal?.reason || "Candidate configuration is ready for explicit review.",
-    currentConfig,
-    candidateConfig: proposalConfig,
-    candidateConfigHash: djb2Hash(best.configKey),
-    evaluatedSampleCount: sampleCount,
-    evaluationStatus: "PROPOSAL_READY",
-    proposalStatus: proposal?.proposalStatus || "PROPOSAL_READY",
-    createdAt: proposal?.createdAt || new Date().toISOString(),
-  });
-}
-
-function getTunerEligibilityStateForCount(settledCount, requiredSample = TUNER_REQUIRED_SAMPLE) {
-  const n = Number(settledCount) || 0;
-  const r = Number(requiredSample) || TUNER_REQUIRED_SAMPLE;
-  return n < r ? "INSUFFICIENT_SAMPLE" : "ELIGIBLE";
-}
-
-window.__BB_RUN_TUNER_STATE_TESTS__ = function __BB_RUN_TUNER_STATE_TESTS__() {
-  const fails = [];
-  [
-    [0, "INSUFFICIENT_SAMPLE"],
-    [1, "INSUFFICIENT_SAMPLE"],
-    [24, "INSUFFICIENT_SAMPLE"],
-    [25, "ELIGIBLE"],
-    [26, "ELIGIBLE"],
-    [50, "ELIGIBLE"],
-    [100, "ELIGIBLE"]].forEach(([n, expected]) => {
-    const got = getTunerEligibilityStateForCount(n, 25);
-    if (got !== expected) fails.push(`threshold ${n}: expected ${expected}, got ${got}`);
-  });
-
-  [
-    ["h2hFactor", 0.5, true],
-    ["h2hFactor", 1.0, true],
-    ["h2hFactor", 0.49, false],
-    ["h2hMaxWeight", 0.05, true],
-    ["h2hMaxWeight", 0.5, true],
-    ["h2hMaxWeight", 0.04, false],
-    ["h2hTierInsufficientPenalty", 0.3, true],
-    ["h2hTierInsufficientPenalty", 0.9, true],
-    ["h2hTierInsufficientPenalty", 0.29, false]].forEach(([key, value, expected]) => {
-    const got = !!validateTunableParamValue(key, value).ok;
-    if (got !== expected) fails.push(`range ${key}=${value}: expected ${expected}, got ${got}`);
-  });
-
-  return { ok: fails.length === 0, fails };
-};
-
-window.getTunerEligibilityStateForCount = getTunerEligibilityStateForCount;
-window.getTunerProposalStatus = getTunerProposalStatus;
+function refreshConfigGridEvaluationState() { return null; }
 
 /* SECTION 144 — select-best-config */
 function selectBestConfig(league, marketKey) {
@@ -9983,39 +8768,8 @@ function testConfigurationSignificance(challengerRecord, baselineRecord, require
   return { significant: z >= requiredZ, z, requiredZ };
 }
 
-/* SECTION 148 — calculate-calibration-metrics */
-function calculateCalibrationMetrics(evaluationResults) {
-  const valid = evaluationResults.filter(
-    (r) =>
-      r &&
-      !r.isNoPlay &&
-      r.winProbability != null &&
-      Number.isFinite(Number(r.winProbability)) &&
-      (r.win || r.loss),
-  );
-  if (!valid.length) return { brier: 1.0, ece: 1.0 };
 
-  let brierSum = 0;
-  const bins = Array.from({ length: 10 }, () => ({ sp: 0, so: 0, n: 0 }));
 
-  valid.forEach((r) => {
-    const outcome = r.win ? 1 : 0;
-    const wp = Number(r.winProbability);
-    brierSum += Math.pow(wp - outcome, 2);
-
-    const bi = Math.min(9, Math.floor(wp * 10));
-    bins[bi].sp += wp;
-    bins[bi].so += outcome;
-    bins[bi].n++;
-  });
-
-  const brier = brierSum / valid.length;
-  const ece = bins
-    .filter((b) => b.n > 0)
-    .reduce((sum, b) => sum + (b.n / valid.length) * Math.abs(b.sp / b.n - b.so / b.n), 0);
-
-  return { brier, ece, count: valid.length };
-}
 
 /* SECTION 149 — record-market-ece */
 function recordMarketECE(league, marketKey, ece, n) {
@@ -10573,27 +9327,12 @@ function benjaminiHochbergFilter(candidates, alpha = 0.05) {
   return candidates.filter((c) => keep.has(c.id));
 }
 
-/* SECTION 162 — persist-tuner-eval-log */
-function persistTunerEvalLog(entry) {
-  try {
-    const key = "BB_TUNER_LOG";
-    let log = [];
-    try {
-      log = JSON.parse(localStorage.getItem(key) || "[]");
-    } catch (e) {
-      engineDebug("BB_TUNER_LOG load failed", { error: e?.message || String(e) });
-    }
-    log.push({ ...entry, ts: new Date().toISOString(), modelVersion: getCurrentModelVersion() });
-    if (log.length > 300) log = log.slice(-300);
-    localStorage.setItem(key, JSON.stringify(log));
-  } catch (e) {
-    engineDebug("persistTunerEvalLog failed", { error: e?.message || String(e) });
-  }
-}
+
+
 
 function _getCanaryHealth(league) {
   if (league) return checkModelHealth(league);
-  const allPicks = getLearningTrackedPicks().filter(
+  const allPicks = getAllTrackedPicksForReport().filter(
     (p) => p.resultStatus === "win" || p.resultStatus === "loss",
   );
   const MIN_N = 12;
@@ -10622,669 +9361,19 @@ function _getCanaryHealth(league) {
     driftThreshold: Number(driftThreshold.toFixed(3)),
   };
 }
-/* SECTION 163 — check-tuner-canaries */
-function checkTunerCanaries() {
-  let canaries = {};
-  try {
-    canaries = JSON.parse(localStorage.getItem("BB_TUNER_CANARIES") || "{}");
-  } catch (e) {
-    engineDebug("checkTunerCanaries failed to load canaries", { error: e?.message || String(e) });
-    return;
-  }
-  Object.keys(canaries).forEach((scopeKey) => {
-    const c = canaries[scopeKey];
-    if (!c || c.resolved) return;
-    const league = c.league || null;
-    const health = _getCanaryHealth(league);
-    if (!health) return;
-    const newSettledSinceApply = Math.max(0, health.n - (c.nAtApply || 0));
-    if (newSettledSinceApply < 8) return;
-    if (health.status === "degrading") {
-      c.promotions.forEach((p) => setTunableParam(p.key, p.old, league, new Date().toISOString()));
-      c.resolved = true;
-      c.outcome = "rolled_back";
-      c.resolvedAt = new Date().toISOString();
-      let rollbacks = [];
-      try {
-        rollbacks = JSON.parse(localStorage.getItem("BB_TUNER_ROLLBACKS") || "[]");
-      } catch (e) {
-        engineDebug("BB_TUNER_ROLLBACKS load failed", { error: e?.message || String(e), scopeKey });
-      }
-      rollbacks.push({ scopeKey, promotions: c.promotions, health, ts: c.resolvedAt });
-      try {
-        localStorage.setItem("BB_TUNER_ROLLBACKS", JSON.stringify(rollbacks.slice(-50)));
-      } catch (e) {
-        engineDebug("BB_TUNER_ROLLBACKS save failed", { error: e?.message || String(e), scopeKey });
-      }
-      engineDebug("Tuner canary auto-rolled-back due to win-rate drift", { scopeKey, health });
-    } else if (newSettledSinceApply >= (c.canaryWindow || 20)) {
-      c.resolved = true;
-      c.outcome = "promoted";
-      c.resolvedAt = new Date().toISOString();
-      engineDebug("Tuner canary window closed clean — proposal stays live", { scopeKey, health });
-    }
-  });
-  try {
-    localStorage.setItem("BB_TUNER_CANARIES", JSON.stringify(canaries));
-  } catch (e) {
-    engineDebug("Tuner canary save failed", { error: e?.message || String(e) });
-  }
-}
 
-/* SECTION 164 — coordinate-ascent-tuner */
-function runCoordinateAscentTuner(allPicks, targetLeague) {
-  checkTunerCanaries();
 
-  const settledUniverse = allPicks
-    .filter(
-      (p) =>
-        p &&
-        p.snapshot &&
-        p.actualScore != null &&
-        !p.isShadow &&
-        (!targetLeague || String(p.league).toLowerCase() === String(targetLeague).toLowerCase()) &&
-        (p.resultStatus === "win" ||
-          p.resultStatus === "loss"),
-    )
-    .sort((a, b) => getTrackedPickTimeMs(a) - getTrackedPickTimeMs(b));
 
-  let settled;
-  let _oosCutoffTs = null;
-  if (targetLeague) {
-    try {
-      const _stored = JSON.parse(
-        localStorage.getItem("BB_OOS_CUTOFF_" + String(targetLeague)) || "null",
-      );
-      if (_stored && isFinite(_stored.cutoffTs)) _oosCutoffTs = _stored.cutoffTs;
-    } catch (e) {
-      engineDebug("Tuner failed to read shared OOS cutoff", {
-        error: e?.message || String(e),
-        targetLeague,
-      });
-    }
-  }
-  if (_oosCutoffTs !== null) {
-    settled = settledUniverse.filter((p) => Date.parse(p.createdAt) < _oosCutoffTs);
-  } else {
-    try {
-      const _gStored = JSON.parse(localStorage.getItem("BB_OOS_CUTOFF_global") || "null");
-      if (_gStored && isFinite(_gStored.cutoffTs)) {
-        settled = settledUniverse.filter((p) => Date.parse(p.createdAt) < _gStored.cutoffTs);
-      } else {
-        const _tunerCutIdx = Math.floor(settledUniverse.length * 0.8);
-        settled = settledUniverse.slice(0, _tunerCutIdx);
-      }
-    } catch (_eCut) {
-      const _tunerCutIdx = Math.floor(settledUniverse.length * 0.8);
-      settled = settledUniverse.slice(0, _tunerCutIdx);
-    }
-  }
 
-  const minRequired = targetLeague ? 250 : 125;
-  if (settled.length < minRequired) {
-    engineDebug(
-      `Coordinate ascent tuner skipped for ${targetLeague || "global"}: needs ${minRequired} pre-OOS picks, has ${settled.length}`,
-    );
-    return null;
-  }
 
-  settled.sort((a, b) => getTrackedPickTimeMs(a) - getTrackedPickTimeMs(b));
 
-  const _tunerSeed =
-    Array.from(String(targetLeague || "global")).reduce(
-      (s, ch) => (s * 31 + ch.charCodeAt(0)) >>> 0,
-      7,
-    ) ^ settled.length;
-  const walkForwardFolds = buildWalkForwardFolds(settled, 4);
-  const trainPicks = walkForwardFolds[0].train;
-  const valPicks = walkForwardFolds[walkForwardFolds.length - 1].val;
-  const keysToTune = [
-    "teamWeightBase",
-    "h2hFactor",
-    "h2hMaxWeight",
-    "h2hLookbackSeasons",
-    "venueMinGames",
-    "venueStrongGames",
-    "venueModerateWeight",
-    "venueStrongWeight",
-    "underEdgeFactor",
-    "injuryOppBoostFactor",
-    "edgeFTPointThreshold",
-    "edgeH1PointThreshold",
-    "edgeTeamPointThreshold",
-    "edgeQPointThreshold",
-    "confidenceAThresh",
-    "confidenceBThresh",
-    "confidenceCThresh",
-    "teamVolScale",
-    "quarterVolScale",
-    "h2hTierInsufficientPenalty",
-    "h2hTierThinPenalty",
-    "h2hDivergenceThreshold",
-    "h2hDivergenceSlope",
-    "h2hInjuryRiskSlope",
-    "h2hVolRiskSlope",
-    "h2hBlowoutGapThreshold",
-    "h2hBlowoutRisk",
-    "h2hPaceRisk"];
 
-  const candidateGrids = {
-    teamWeightBase: [0.55, 0.6, 0.65, 0.7, 0.75],
 
-    h2hFactor: [0.75, 1.0],
-    h2hMaxWeight: [0.15, 0.2, 0.25, 0.3, 0.35, 0.4],
-    h2hLookbackSeasons: [2, 3, 4, 5],
-    venueMinGames: [4, 5, 6, 7, 8],
-    venueStrongGames: [8, 9, 10, 11, 12],
-    venueModerateWeight: [0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
-    venueStrongWeight: [0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
-    underEdgeFactor: [1.0, 1.1, 1.2, 1.3, 1.4],
-    injuryOppBoostFactor: [0.1, 0.15, 0.2, 0.25, 0.3],
-    edgeFTPointThreshold: [4.0, 5.0, 6.0, 7.0, 8.0],
-    edgeH1PointThreshold: [5.0, 6.0, 7.0, 8.0, 9.0],
-    edgeTeamPointThreshold: [6.0, 7.0, 8.0, 9.0, 10.0],
-    edgeQPointThreshold: [2.0, 3.0, 4.0, 5.0, 6.0],
-    confidenceAThresh: [0.6, 0.63, 0.66, 0.69, 0.72],
-    confidenceBThresh: [0.52, 0.55, 0.58, 0.61, 0.64],
-    confidenceCThresh: [0.45, 0.48, 0.51, 0.54, 0.57],
-    teamVolScale: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-    quarterVolScale: [0.25, 0.35, 0.45, 0.5, 0.6, 0.7],
-    h2hTierInsufficientPenalty: [0.35, 0.45, 0.55, 0.65, 0.75],
-    h2hTierThinPenalty: [0.65, 0.75, 0.85, 0.95, 1.0],
-    h2hDivergenceThreshold: [0.08, 0.12, 0.16, 0.2, 0.25],
-    h2hDivergenceSlope: [1.5, 2.0, 2.5, 3.0, 3.5],
-    h2hInjuryRiskSlope: [0.75, 1.0, 1.5, 2.0, 2.5],
-    h2hVolRiskSlope: [0.2, 0.3, 0.4, 0.6, 0.8],
-    h2hBlowoutGapThreshold: [10, 12, 15, 18, 22],
-    h2hBlowoutRisk: [0.1, 0.15, 0.2, 0.25, 0.3],
-    h2hPaceRisk: [0.08, 0.12, 0.15, 0.2, 0.25],
-  };
 
-  const currentParams = {};
-  keysToTune.forEach((key) => {
-    currentParams[key] = getParam(key, targetLeague);
-  });
 
-  let pass = 0;
-  let overallChanged = false;
-  const promotions = [];
 
-  const orderedKeys = seededShuffle(keysToTune, _tunerSeed);
-  const allTestedCandidates = [];
 
-  while (pass < 2) {
-    let passChanged = false;
 
-    for (const key of orderedKeys) {
-      const originalValue = currentParams[key];
-      const grid = candidateGrids[key] || [];
-      if (!grid.length) continue;
-
-      let bestValue = originalValue;
-      let bestTrainROI = -Infinity;
-      let bestTrainRecord = null;
-
-      const baselineTrainResults = trainPicks
-        .map((p) => evaluatePickWithParams(p, currentParams))
-        .filter(Boolean);
-      bestTrainRecord = buildRecordFromEval(baselineTrainResults);
-      bestTrainROI =
-        bestTrainRecord.staked > 0 ? bestTrainRecord.roiSum / bestTrainRecord.staked : 0;
-
-      for (const candidateVal of grid) {
-        const testParams = { ...currentParams, [key]: candidateVal };
-        const testResults = trainPicks
-          .map((p) => evaluatePickWithParams(p, testParams))
-          .filter(Boolean);
-        const record = buildRecordFromEval(testResults);
-        const roi = record.staked > 0 ? record.roiSum / record.staked : 0;
-
-        if (
-          roi > bestTrainROI ||
-          (roi === bestTrainROI && record.wins > (bestTrainRecord?.wins || 0))
-        ) {
-          bestTrainROI = roi;
-          bestValue = candidateVal;
-          bestTrainRecord = record;
-        }
-      }
-
-      if (bestValue !== originalValue) {
-        const baselineValParams = { ...currentParams };
-        const challengerValParams = { ...currentParams, [key]: bestValue };
-
-        let pooledBaseline = [],
-          pooledChallenger = [];
-        let baselineAllResults = [],
-          challengerAllResults = [];
-        walkForwardFolds.forEach((fold) => {
-          const baseFoldResults = fold.val.map((p) => evaluatePickWithParams(p, baselineValParams));
-          const chalFoldResults = fold.val.map((p) =>
-            evaluatePickWithParams(p, challengerValParams),
-          );
-          for (let i = 0; i < fold.val.length; i++) {
-            const b = baseFoldResults[i],
-              c = chalFoldResults[i];
-            if (!b && !c) continue;
-            const bRet = (!b || b.isNoPlay || b.push) ? 0 : (b.win ? 1 : 0);
-            const cRet = (!c || c.isNoPlay || c.push) ? 0 : (c.win ? 1 : 0);
-            pooledBaseline.push(bRet);
-            pooledChallenger.push(cRet);
-            if (b && !b.isNoPlay) baselineAllResults.push(b);
-            if (c && !c.isNoPlay) challengerAllResults.push(c);
-          }
-        });
-
-        const baselineValCalibration = calculateCalibrationMetrics(baselineAllResults);
-        const challengerValCalibration = calculateCalibrationMetrics(challengerAllResults);
-
-        const marketMetrics = getMetricForMarket(valPicks[0]?.snapshot?.marketKey);
-        const baselineRMSE = marketMetrics.projection ? computeRMSE(baselineAllResults) : null;
-        const challengerRMSE = marketMetrics.projection ? computeRMSE(challengerAllResults) : null;
-
-        const boot = pairedBootstrapTest(
-          pooledBaseline,
-          pooledChallenger,
-          2000,
-          _tunerSeed + key.length,
-        );
-
-        const calibrationOk =
-          challengerValCalibration.brier <= baselineValCalibration.brier + 0.002;
-        const rmseOk =
-          baselineRMSE === null || challengerRMSE === null || challengerRMSE <= baselineRMSE + 0.01;
-
-        allTestedCandidates.push({ id: `${key}:${pass}`, p: boot.p, key, pass });
-
-        if (boot.significant && calibrationOk && rmseOk) {
-          currentParams[key] = bestValue;
-          passChanged = true;
-          overallChanged = true;
-          const promo = {
-            id: `${key}:${pass}`,
-            key,
-            old: originalValue,
-            val: bestValue,
-            p: boot.p,
-            ciLow: boot.ciLow,
-            ciHigh: boot.ciHigh,
-            brier: challengerValCalibration.brier,
-            rmse: challengerRMSE,
-          };
-          promotions.push(promo);
-
-          logPromotionEvent(
-            targetLeague,
-            key,
-            originalValue,
-            bestValue,
-            boot,
-            challengerValCalibration.brier,
-          );
-
-          persistTunerEvalLog({
-            type: "promotion_candidate",
-            league: targetLeague || "global",
-            key,
-            old: originalValue,
-            val: bestValue,
-            seed: _tunerSeed,
-            foldCount: walkForwardFolds.length,
-            n: pooledBaseline.length,
-            bootstrap: boot,
-            baselineBrier: baselineValCalibration.brier,
-            challengerBrier: challengerValCalibration.brier,
-            baselineRMSE,
-            challengerRMSE,
-          });
-        }
-      }
-    }
-
-    if (!passChanged) break;
-    pass++;
-  }
-
-  const _bhUniverse = allTestedCandidates.map((c) => ({ id: c.id, p: c.p }));
-  const survivors = benjaminiHochbergFilter(_bhUniverse, 0.05);
-  const survivorIds = new Set(survivors.map((s) => s.id));
-  const finalPromotions = [];
-  promotions.forEach((p) => {
-    if (survivorIds.has(p.id)) {
-      finalPromotions.push(p);
-    } else {
-      currentParams[p.key] = p.old;
-      engineDebug("Promotion reverted by Benjamini-Hochberg FDR correction", {
-        key: p.key,
-        p: p.p,
-        totalTested: allTestedCandidates.length,
-      });
-    }
-  });
-
-  if (finalPromotions.length > 0) {
-    try {
-      const _scopeLeague = targetLeague || null;
-      // Proposal freshness is anchored to the authoritative settled denominator, not the
-      // training fold size used by walk-forward fitting.
-      const _sampleCount = getTotalSettledCountForLeague(_scopeLeague);
-      const _currentConfig = getTunerConfigSnapshot(_scopeLeague, "multi");
-      const _proposedConfig = { ..._currentConfig };
-      finalPromotions.forEach((p) => {
-        _proposedConfig[p.key] = Array.isArray(p.val) ? p.val.slice() : p.val;
-      });
-      const proposal = createTunerProposalRecord({
-        league: _scopeLeague,
-        marketKey: "multi",
-        promotions: finalPromotions.map((p) => ({
-          ...p,
-          key: p.key,
-          old: p.old,
-          val: p.val,
-        })),
-        sampleCount: _sampleCount,
-        requiredSample: TUNER_REQUIRED_SAMPLE,
-        currentConfig: _currentConfig,
-        proposedConfig: _proposedConfig,
-        reason: "Coordinate-ascent walk-forward evaluation produced statistically supported parameter changes.",
-        provenance: "coordinate_ascent_walk_forward",
-      });
-      proposal.seed = _tunerSeed;
-      proposal.foldCount = walkForwardFolds.length;
-      proposal.trainingSampleCount = settled.length;
-      proposal.totalHypothesesTested = allTestedCandidates.length;
-      if (!persistTunerProposalRecord(proposal)) {
-        throw new Error("Failed to persist coordinate-ascent proposal");
-      }
-    } catch (e) {
-      engineDebug(
-        "runCoordinateAscentTuner failed to persist proposal: " + (e?.message || String(e)),
-        { error: e },
-      );
-    }
-    engineDebug(
-      `Coordinate ascent proposed changes for ${targetLeague || "global"} (not auto-applied — review in Configs panel): ${finalPromotions.map((p) => `${p.key}: ${p.old}->${p.val} (bootstrap p=${p.p.toFixed(3)})`).join(", ")}`,
-    );
-    return { params: currentParams, promotions: finalPromotions };
-  }
-
-  return null;
-}
-
-/* SECTION 165 — retrospective-analysis */
-async function runRetrospectiveAnalysis(pick) {
-  if (!pick.snapshot || !pick.actualScore) {
-    engineDebug("Retrospective skipped: missing snapshot or actualScore");
-    return;
-  }
-  const { league, marketKey, snapshot, actualScore, resultStatus, side } = pick;
-  const isWin = resultStatus === "win";
-  if (!isWin && resultStatus !== "loss") return;
-
-  const _mktSettled = getTotalSettledCountForLeagueMarket(league, marketKey);
-  if (_mktSettled < TUNER_REQUIRED_SAMPLE) {
-    setConfigEvaluationState(league, marketKey, {
-      status: "INSUFFICIENT_SAMPLE",
-      sampleCount: _mktSettled,
-      requiredSample: TUNER_REQUIRED_SAMPLE,
-      reason: "Configuration grid requires at least 25 settled eligible picks.",
-      evaluationStatus: "INSUFFICIENT_SAMPLE",
-    });
-    engineDebug("Retrospective skipped: insufficient configuration sample", {
-      league,
-      marketKey,
-      have: _mktSettled,
-      threshold: TUNER_REQUIRED_SAMPLE,
-    });
-    return;
-  }
-
-  setConfigEvaluationState(league, marketKey, {
-    status: "EVALUATING",
-    sampleCount: _mktSettled,
-    requiredSample: TUNER_REQUIRED_SAMPLE,
-    reason: "Configuration grid evaluation is running.",
-    evaluationStatus: "EVALUATING",
-  });
-
-  const { parsed, lines, fixtureMeta, injMultA, injMultB, configSnapshot } = snapshot;
-  const numericActual = typeof actualForMarket === "function" ? actualForMarket({ marketKey: marketKey, actualScore: actualScore }) : (typeof parseFinalScore === "function" ? parseFinalScore(actualScore).total : parseFloat(actualScore));
-  if (!isFinite(numericActual)) return;
-
-  const { recencyProfiles, edgeMults } = TUNING_GRID;
-
-  const h2hFactors = [getParam("h2hFactor", league) ?? 1.0];
-
-  for (const h2hFactor of h2hFactors) {
-    for (const recencyProfile of recencyProfiles) {
-      for (const edgeMult of edgeMults) {
-        const injuryMult = 1.0;
-        for (const _unused of [0]) {
-          const config = { h2hFactor, recencyProfile, edgeMult, injuryMult };
-
-          const _savedRecencyWeightsForSweep = MODEL_TUNING.recencyWeights;
-          if (Array.isArray(recencyProfile)) MODEL_TUNING.recencyWeights = recencyProfile;
-
-          try {
-            let proj, line, edge, pickDecision;
-            try {
-              if (marketKey === "ft") {
-                const calc = computeFTProjection({
-                  league,
-                  parsed,
-                  lines,
-                  injMultA: clampNumber(Number(injMultA) * Number(injuryMult), 0.3, 1),
-                  injMultB: clampNumber(Number(injMultB) * Number(injuryMult), 0.3, 1),
-                  config: { h2hFactor, recencyProfile, edgeMult },
-                });
-                proj = calc.ftProj;
-                line = lines.ftLine;
-                edge = calc.ftEdge;
-                pickDecision = getPick(edge, line, league, "ft", { edgeMult });
-              } else if (marketKey === "h1") {
-                const calc = compute1HProjection({
-                  league,
-                  parsed,
-                  lines,
-                  injMultA: clampNumber(Number(injMultA) * Number(injuryMult), 0.3, 1),
-                  injMultB: clampNumber(Number(injMultB) * Number(injuryMult), 0.3, 1),
-                  config: { h2hFactor, recencyProfile, edgeMult },
-                });
-                proj = calc.h1Proj;
-                line = lines.h1Line;
-                edge = calc.h1Edge;
-                pickDecision = getPick(edge, line, league, "h1", { edgeMult });
-              } else if (marketKey === "team_a") {
-                const calc = computeFTProjection({
-                  league,
-                  parsed,
-                  lines,
-                  injMultA: clampNumber(Number(injMultA) * Number(injuryMult), 0.3, 1),
-                  injMultB: clampNumber(Number(injMultB) * Number(injuryMult), 0.3, 1),
-                  config: { h2hFactor, recencyProfile, edgeMult },
-                });
-                proj = calc.projAFT;
-                line = lines.aLine;
-                edge = calc.aEdge;
-                pickDecision = getPick(edge, line, league, "team_a", { teamSc: calc.aS, blowoutGap: calc.blowoutGap, edgeMult });
-              } else if (marketKey === "team_b") {
-                const calc = computeFTProjection({
-                  league,
-                  parsed,
-                  lines,
-                  injMultA: clampNumber(Number(injMultA) * Number(injuryMult), 0.3, 1),
-                  injMultB: clampNumber(Number(injMultB) * Number(injuryMult), 0.3, 1),
-                  config: { h2hFactor, recencyProfile, edgeMult },
-                });
-                proj = calc.projBFT;
-                line = lines.bLine;
-                edge = calc.bEdge;
-                pickDecision = getPick(edge, line, league, "team_b", { teamSc: calc.bS, blowoutGap: calc.blowoutGap, edgeMult });
-              } else if (
-                marketKey === "q1" ||
-                marketKey === "q2" ||
-                marketKey === "q3" ||
-                marketKey === "q4"
-              ) {
-                continue;
-              } else {
-                continue;
-              }
-            } catch (e) {
-              engineDebug("runRetrospectiveAnalysis sweep iteration failed", {
-                league,
-                marketKey,
-                error: e?.message || String(e),
-              });
-              continue;
-            }
-
-            if (Number.isFinite(edge)) edge = applyEdgeMult(edge, league, edgeMult);
-            if (pickDecision === "NO PLAY") continue;
-            const pickSide = getPickSideFromText(pickDecision);
-            if (pickSide !== side) continue;
-
-            let wouldWin = false;
-            if (side === "over") wouldWin = numericActual > line;
-            else if (side === "under") wouldWin = numericActual < line;
-
-            const delta = wouldWin ? (isWin ? 0 : 1) : isWin ? -1 : 0;
-            const _edgePct = isFinite(edge) && isFinite(line) && line ? Math.abs(edge / line) : 0;
-            const _volRatio =
-              isFinite(pick.volatility) && isFinite(pick.volLimit) && pick.volLimit > 0
-                ? Number(pick.volatility) / Number(pick.volLimit)
-                : NaN;
-            const _sampleTier = pick.sampleTier || "unknown";
-            const _hasH2H = pick.hasH2H || false;
-            const _winProbability = getConfidenceWinProbability(
-              null,
-              _edgePct,
-              _volRatio,
-              _sampleTier,
-              _hasH2H,
-              false,
-              league,
-              { marketKey },
-            );
-            // Every eligible settled observation advances the candidate's authoritative
-            // observation count. Delta remains the existing candidate-comparison metric.
-            updateCandidateScore(
-              league,
-              marketKey,
-              config,
-              delta,
-              _winProbability,
-              wouldWin ? 1 : 0,
-            );
-          } finally {
-            MODEL_TUNING.recencyWeights = _savedRecencyWeightsForSweep;
-          }
-        }
-      }
-    }
-  }
-
-  try {
-    const evaluation = refreshConfigGridEvaluationState(league, marketKey, {
-      createProposal: true,
-    });
-    engineDebug("Configuration grid evaluation state refreshed", {
-      league,
-      marketKey,
-      status: evaluation?.status,
-      sampleCount: evaluation?.sampleCount,
-      requiredSample: evaluation?.requiredSample,
-      proposalId: evaluation?.proposalId || null,
-      candidateConfigHash: evaluation?.candidateConfigHash || null,
-    });
-  } catch (e) {
-    setConfigEvaluationState(league, marketKey, {
-      status: "FAILED",
-      sampleCount: _mktSettled,
-      requiredSample: TUNER_REQUIRED_SAMPLE,
-      reason: e?.message || String(e),
-      evaluationStatus: "FAILED",
-    });
-    engineDebug("Configuration grid evaluation failed", {
-      league,
-      marketKey,
-      error: e?.message || String(e),
-      stack: e?.stack || "no stack",
-    });
-  }
-
-}
-
-/* SECTION 166 — save-learned-recency-weights */
-function saveLearnedRecencyWeights(league, marketSilo, weights, metadata = {}) {
-  if (
-    !Array.isArray(weights) ||
-    !(weights.length === 5 || weights.length === 10) ||
-    weights.some((v) => !isFinite(Number(v)) || Number(v) <= 0)
-  )
-    return false;
-  const clean = weights.map(Number).slice(0, 10);
-  const scope = String(league || "default").toLowerCase();
-  const silo = String(marketSilo || "global").toLowerCase();
-  try {
-    const payload = {
-      weights: clean,
-      league: scope,
-      marketSilo: silo,
-      updatedAt: new Date().toISOString(),
-      ...metadata,
-    };
-    localStorage.setItem(`learned_recency_weights_${scope}_${silo}`, JSON.stringify(payload));
-    if (silo === "global")
-      localStorage.setItem(`learned_recency_weights_${scope}`, JSON.stringify(payload));
-    return true;
-  } catch (e) {
-    engineDebug("saveLearnedRecencyWeights failed: " + (e?.message || String(e)), {
-      league,
-      marketSilo,
-      error: e,
-    });
-    return false;
-  }
-}
-
-/* SECTION 167 — get-learned-recency-weights */
-function getLearnedRecencyWeights(league, marketSilo) {
-  try {
-    const scope = String(league || "default").toLowerCase();
-    const silo = String(marketSilo || "global").toLowerCase();
-    const keys = [`learned_recency_weights_${scope}_${silo}`, `learned_recency_weights_${scope}`];
-    for (const key of keys) {
-      const raw = localStorage.getItem(key);
-      if (!raw) continue;
-      const parsed = JSON.parse(raw);
-      const weights = Array.isArray(parsed) ? parsed : parsed?.weights;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && parsed.applied === false) continue;
-      if (
-        Array.isArray(weights) &&
-        (weights.length === 5 || weights.length === 10) &&
-        weights.every((v) => isFinite(Number(v)) && Number(v) > 0)
-      ) {
-        return weights.map(Number);
-      }
-    }
-  } catch (e) {
-    engineDebug("getLearnedRecencyWeights failed: " + (e?.message || String(e)), {
-      league,
-      marketSilo,
-      error: e,
-    });
-  }
-  try {
-    const configured = getParam("recencyWeights", league, marketSilo || "ft");
-    if (Array.isArray(configured) && configured.length) return configured.slice(0, 10);
-  } catch (e) {
-    engineDebug("recencyWeights param load failed", { error: e?.message || String(e), league });
-  }
-  return Array.isArray(MODEL_TUNING?.recencyWeights)
-    ? MODEL_TUNING.recencyWeights.slice(0, 10)
-    : [1.35, 1.2, 1.0, 0.85, 0.7, 0.56, 0.44, 0.33, 0.24, 0.16];
-}
 
 const TRACKER_POLICY = {
   reviewCheckpointSettled: 50,
@@ -11292,7 +9381,7 @@ const TRACKER_POLICY = {
 };
 
 const TRACKER_SOFT_EFFECTS = {
-  enabled: true,
+  enabled: false,
 
   minSettled: 100,
   minSettledFull: 200,
@@ -11303,8 +9392,8 @@ const TRACKER_SOFT_EFFECTS = {
 };
 
 const PHASE2_CONTROL = {
-  trackerFeedbackLive: true,
-  teamMemoryLive: true,
+  trackerFeedbackLive: false,
+  teamMemoryLive: false,
 };
 
 const PHASE2_ACTIVATION_RULES = {
@@ -11320,60 +9409,8 @@ const PHASE2_ACTIVATION_RULES = {
   },
 };
 
-function getPhase2ActivationState() {
-  const derived = AppState.tracker.derived || defaultTrackerDerivedState();
-  const settled = Number(derived?.settledPicks || 0);
 
-  const marketSideSignals = Array.isArray(derived?.signalBoards?.marketSides)
-    ? derived.signalBoards.marketSides
-    : [];
-  const profileSignals = Array.isArray(derived?.signalBoards?.profiles)
-    ? derived.signalBoards.profiles
-    : [];
-  const teamSignals = Array.isArray(derived?.signalBoards?.teams) ? derived.signalBoards.teams : [];
-  const matchupSignals = Array.isArray(derived?.signalBoards?.matchups)
-    ? derived.signalBoards.matchups
-    : [];
 
-  const learningEnabled = !!TRACKER_LEARNING_ENABLED;
-
-  const trackerReady =
-    settled >= PHASE2_ACTIVATION_RULES.trackerFeedback.minSettled &&
-    marketSideSignals.length >= PHASE2_ACTIVATION_RULES.trackerFeedback.minMarketSideSignals &&
-    profileSignals.length >= PHASE2_ACTIVATION_RULES.trackerFeedback.minProfileSignals;
-
-  const teamReady =
-    settled >= PHASE2_ACTIVATION_RULES.teamMemory.minSettled &&
-    teamSignals.length >= PHASE2_ACTIVATION_RULES.teamMemory.minTeamSignals &&
-    matchupSignals.length >= PHASE2_ACTIVATION_RULES.teamMemory.minMatchupSignals;
-
-  const trackerFeedbackLive = learningEnabled && !!PHASE2_CONTROL.trackerFeedbackLive;
-  const teamMemoryLive = learningEnabled && !!PHASE2_CONTROL.teamMemoryLive;
-
-  return {
-    phase2Mode: learningEnabled ? "live" : "frozen",
-    settled,
-    reviewCheckpointSettled: Number(
-      TRACKER_POLICY.reviewCheckpointSettled ||
-        PHASE2_ACTIVATION_RULES.trackerFeedback.minSettled ||
-        20,
-    ),
-    trackerReady,
-    teamReady,
-    trackerCheckpointReady: trackerReady,
-    teamCheckpointReady: teamReady,
-    trackerFeedbackLive,
-    teamMemoryLive,
-    trackerReasons: [
-      `settled:${settled}/${PHASE2_ACTIVATION_RULES.trackerFeedback.minSettled}`,
-      `marketSideSignals:${marketSideSignals.length}/${PHASE2_ACTIVATION_RULES.trackerFeedback.minMarketSideSignals}`,
-      `profileSignals:${profileSignals.length}/${PHASE2_ACTIVATION_RULES.trackerFeedback.minProfileSignals}`],
-    teamReasons: [
-      `settled:${settled}/${PHASE2_ACTIVATION_RULES.teamMemory.minSettled}`,
-      `teamSignals:${teamSignals.length}/${PHASE2_ACTIVATION_RULES.teamMemory.minTeamSignals}`,
-      `matchupSignals:${matchupSignals.length}/${PHASE2_ACTIVATION_RULES.teamMemory.minMatchupSignals}`],
-  };
-}
 
 /* SECTION 168 — league-under-block-ratio */
 function getLeagueUnderBlockRatio(league) {
@@ -12101,7 +10138,7 @@ function getLeagueRegulationMinutes(league) {
 
 /* SECTION 171 — league-recency-defaults */
 function getLeagueRecencyDefaults(league) {
-  const learned = getLearnedRecencyWeights(league, "ft");
+  const learned = null;
   const configured = getParam("recencyWeights", league);
   const activeRecencyWeights =
     Array.isArray(learned) && learned.length ? learned : (configured || [1.35, 1.2, 1.0, 0.85, 0.7, 0.56, 0.44, 0.33, 0.24, 0.16]);
@@ -12234,7 +10271,7 @@ function getLeagueVolLimit(league) {
   const lk = String(league || "").toLowerCase();
   if (isFinite(LEAGUE_VOL_LIMITS[lk])) return LEAGUE_VOL_LIMITS[lk];
 
-  const learned = getLearnedLeagueStats(lk);
+  const learned = null;
   if (learned && isFinite(learned.stdev)) {
     let sd = Number(learned.stdev);
     const mean = Number(learned.mean);
@@ -12344,33 +10381,14 @@ function updateLeagueVolCache(league, values, sampleIds) {
   saveVolCache(cache);
 }
 
-function getLearnedLeagueStats(league, asOfOverride = null) {
-  const lk = String(league || "").toLowerCase();
-  let _asOf = asOfOverride;
-  try {
-    const _ctx = typeof AppState !== "undefined" ? AppState.context?.data : null;
-    _asOf = _asOf || (typeof resolvePredictionAsOf === "function" ? resolvePredictionAsOf(null, _ctx) : null);
-    const _replay = typeof AppState !== "undefined" && !!(AppState.replayMode || AppState.ui?.replayMode);
-    if (_asOf || _replay) {
-      // Existing learned league cache entries have no per-observation date identity.
-      // They therefore cannot prove historical membership at an as-of cutoff.
-      return null;
-    }
-  } catch (_asOfErr) {
-    return null;
-  }
-  const cache = loadVolCache();
-  const entry = cache[lk];
-  if (!entry || !(entry.n >= VOL_CACHE_MIN_SAMPLES)) return null;
-  const variance = entry.n > 1 ? entry.m2 / (entry.n - 1) : 0;
-  return { n: entry.n, mean: entry.mean, stdev: Math.sqrt(Math.max(0, variance)) };
-}
+
+
 
 /* SECTION 176 — league-score-base */
 function getLeagueScoreBase(league) {
   const lk = String(league || "").toLowerCase();
   if (isFinite(LEAGUE_BASES[lk])) return LEAGUE_BASES[lk];
-  const learned = getLearnedLeagueStats(lk);
+  const learned = null;
   if (learned) return learned.mean * 2;
   return LEAGUE_BASES.unknown;
 }
@@ -13050,7 +11068,7 @@ const TRACKER_SAVE_DEBOUNCE_MS = 10000;
 const TRACKER_NETWORK_TIMEOUT_MS = BB_CONFIG.timeouts.fetch;
 const TRACKER_FIXED_USER_KEY = "THE_BET_CEO_KEY_H";
 const ENGINE_MODEL_VERSION = "engine_v2_final";
-const TRACKER_LEARNING_ENABLED = true;
+const TRACKER_LEARNING_ENABLED = false;
 
 const TRACKER_LEGACY_BUILD_KEYS = [
   "tracker_cleanup_v11_soft_live",
@@ -13540,90 +11558,17 @@ function getFeatureSchemaHash() {
    model/calibration coefficients were actually live). Two predictions can share a config
    fingerprint while using different model coefficients; this block is what actually lets
    a historical prediction be reproduced. */
-function getCalibrationProvenance(league, marketKey = "ft") {
-  try {
-    const liveBundleRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
-    const liveBundle = liveBundleRaw ? JSON.parse(liveBundleRaw) : null;
-    const coeffRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
-    const plattRaw = localStorage.getItem("BB_PLATT_CALIB");
-    const coeff = coeffRaw ? JSON.parse(coeffRaw) : null;
-    const platt = plattRaw ? JSON.parse(plattRaw) : null;
-    const marketKey = String(arguments.length > 1 ? arguments[1] : "ft");
-    const scopeKey = typeof getConfidenceModelScopeKey === "function"
-      ? getConfidenceModelScopeKey(league, marketKey)
-      : String(league || "global").toLowerCase();
-    const scopedPlatt = (platt && (platt[scopeKey] || platt[String(league || "global").toLowerCase()] || platt.global)) || null;
-    return {
-      confidenceModelCoeffHash: coeff ? djb2Hash(JSON.stringify(coeff)) : null,
-      plattA: scopedPlatt && isFinite(scopedPlatt.a) ? scopedPlatt.a : null,
-      plattB: scopedPlatt && isFinite(scopedPlatt.b) ? scopedPlatt.b : null,
-      calibrationRunAt: liveBundle && liveBundle.appliedAt ? new Date(liveBundle.appliedAt).toISOString() : null,
-    };
-  } catch (e) {
-    return { confidenceModelCoeffHash: null, plattA: null, plattB: null, calibrationRunAt: null, error: String(e && e.message || e) };
-  }
-}
 
-/* SECTION 189 — pick-eligible-for-learning */
-function isPickEligibleForLearning(pick) {
-  if (!TRACKER_LEARNING_ENABLED) return false;
-  if (!pick) return false;
-  const res = String(pick.resultStatus || pick.engineResultStatus || "").toLowerCase();
-  if (res !== "win" && res !== "loss") return false;
-  const txt = String(pick.predictionText || pick.pick || "").trim().toUpperCase();
-  if (!txt || txt === "NO PLAY" || txt === "—" || txt === "-") return false;
-  const parsed =
-    typeof parseFinalScore === "function"
-      ? parseFinalScore(pick.actualScore)
-      : { total: parseFloat(pick.actualScore) };
-  const mkt = String(pick.marketKey || "").toLowerCase();
-  if (mkt === "winner" || mkt === "htft") {
-    if (pick.actualScore == null || pick.actualScore === "") return false;
-  } else if (typeof actualForMarket === "function") {
-    if (!Number.isFinite(actualForMarket(pick))) return false;
-  } else if (!(parsed && isFinite(parsed.total))) {
-    return false;
-  }
-  if (pick.settledVersion && typeof ENGINE_MODEL_VERSION !== "undefined") {
-    if (String(pick.settledVersion) !== String(ENGINE_MODEL_VERSION)) return false;
-  }
-  return true;
-}
 
-/* SECTION 190 — learning-tracked-picks */
-function getLearningTrackedPicks() {
-  const active = Array.isArray(AppState.tracker.state.activePicks)
-    ? AppState.tracker.state.activePicks
-    : [];
-  const archived = Array.isArray(AppState.tracker.state.archivedPicks)
-    ? AppState.tracker.state.archivedPicks
-    : [];
 
-  // The learning denominator is authoritative tracker state, not visible cards.
-  // De-duplicate the same event/market/side/line slot so an active+archived copy
-  // (or a remote/local merge duplicate) can never train the tuner twice.
-  const unique = new Map();
-  [...active, ...archived]
-    .map((p) => ensureTrackedPickKeys(p))
-    .filter((p) => isPickEligibleForLearning(p))
-    .forEach((p) => {
-      const key =
-        (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) ||
-        makeTrackedSignature(p);
-      if (!key) return;
-      const existing = unique.get(key);
-      if (!existing) {
-        unique.set(key, p);
-        return;
-      }
-      unique.set(key, resolveTrackedPick(existing, p));
-    });
 
-  return [...unique.values()];
-}
+
+
+
+
 
 function getTotalSettledCountForLeague(league) {
-  const all = getLearningTrackedPicks();
+  const all = getAllTrackedPicksForReport();
   return all.filter(
     (p) =>
       p.league === league &&
@@ -13762,7 +11707,7 @@ function finalizeDerivedBucket(bucket) {
 
   const _empiricalPrior = (() => {
     try {
-      const _settled = getLearningTrackedPicks().filter(
+      const _settled = getAllTrackedPicksForReport().filter(
         (p) => p.resultStatus === "win" || p.resultStatus === "loss",
       );
       if (_settled.length < 30) return 50;
@@ -13965,7 +11910,7 @@ function buildTrackerDerivedStateFromPicks(inputPicks = []) {
 }
 
 function buildTrackerDerivedState() {
-  return buildTrackerDerivedStateFromPicks(getLearningTrackedPicks());
+  return buildTrackerDerivedStateFromPicks(getAllTrackedPicksForReport());
 }
 
 function buildTrackerVersionStates() {
@@ -16365,10 +14310,6 @@ function getRawMarketInputMap() {
 
     team_a: document.getElementById("teamAMarket")?.value || "",
     team_b: document.getElementById("teamBMarket")?.value || "",
-
-    handicap: document.getElementById()?.value || "",
-    handicap_h1: document.getElementById()?.value || "",
-    handicap_h2: document.getElementById()?.value || "",
   };
 }
 
@@ -19703,7 +17644,7 @@ function renderConfigsPanel() {
     return parts.join(" · ") || ck;
   }
 
-  const settledPicks = getLearningTrackedPicks()
+  const settledPicks = getAllTrackedPicksForReport()
     .filter((p) => p.resultStatus === "win" || p.resultStatus === "loss")
     .sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a));
 
@@ -19899,11 +17840,10 @@ function renderConfigsPanel() {
     html += `</div>`;
   }
 
-  const _pendingGlobalProposal = getStoredTunerProposal(null);
-  const _pendingLeagueProposal =
-    selectedLeagueKey !== "unknown" ? getStoredTunerProposal(selectedLeagueKey) : null;
-  const _pendingInjProposal = getStoredConstantProposal("INJURY_OPPONENT_BOOST_FACTOR");
-  const _pendingUnderProposal = getStoredConstantProposal("UNDER_EDGE_FACTOR");
+  const _pendingGlobalProposal = null;
+  const _pendingLeagueProposal = null;
+  const _pendingInjProposal = null;
+  const _pendingUnderProposal = null;
   if (
     _pendingGlobalProposal ||
     _pendingLeagueProposal ||
@@ -19988,7 +17928,7 @@ function renderConfigsPanel() {
             <div class="tracker-review-text">Config: ${safeText(p2proposal.config.bestConfig)} · score ${safeText(p2proposal.config.score)} · ${safeText(p2proposal.config.improvement)}</div>
             <div class="tracker-review-action" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
               <span>Proposed ${safeText(new Date(p2proposal.ts).toLocaleString())} · sample ${Number(p2proposal.config.sampleSize || 0)}</span>
-              <button onclick="applyPhase2SimulatorProposalFromUI('${siloKey}','${selectedLeagueKey}')" style="background:#3a9c35; color:#fff; border:none; padding:4px 10px; font-weight:800; font-size:10px; cursor:pointer;">✅ Apply</button>
+              
             </div>
           </div>
         `;
@@ -20037,7 +17977,7 @@ function renderConfigsPanel() {
                     ? `<span style="color:#d98a00;font-weight:900;">STALE — re-run calibration</span>`
                     : _confidenceStatus === "APPLIED"
                       ? `<span style="color:#49d45f;font-weight:900;">Applied ${safeText(_pendingConfidenceProposal.appliedAt || "—")}</span>`
-                      : `<button onclick="applyConfidenceModelProposalFromUI()" ${_confidenceApplyDisabled ? "disabled" : ""} style="background:#3a9c35; color:#fff; border:none; padding:4px 10px; font-weight:800; font-size:10px; cursor:pointer;">✅ Apply</button>`
+                      : ``
                 }
               </div>
             </div>
@@ -20265,7 +18205,7 @@ function renderTrackerAnalytics() {
 
   const allReportPicks = getAllTrackedPicksForReport().map((p) => ensureTrackedPickKeys(p));
 
-  const currentVersionSettledPicks = getLearningTrackedPicks()
+  const currentVersionSettledPicks = getAllTrackedPicksForReport()
     .map((p) => ensureTrackedPickKeys(p))
     .filter((p) => ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase()));
   const fallbackSettledPicks = allReportPicks.filter((p) =>
@@ -21214,7 +19154,7 @@ function createTrackerFeedbackBucket() {
 
 /* SECTION 224 — tracker-feedback-profile */
 function buildTrackerFeedbackProfile() {
-  const all = getLearningTrackedPicks().filter((p) =>
+  const all = getAllTrackedPicksForReport().filter((p) =>
     ["win", "loss", "push"].includes(String(p.resultStatus || "").toLowerCase()),
   );
 
@@ -21449,7 +19389,7 @@ function refreshTrackerSignalSnapshot() {
 
 /* SECTION 231 — all-settled-tracked-picks */
 function getAllSettledTrackedPicks() {
-  return getLearningTrackedPicks().filter((p) => {
+  return getAllTrackedPicksForReport().filter((p) => {
     const status = String(p.resultStatus || "").toLowerCase();
     return status === "win" || status === "loss";
   });
@@ -21502,7 +19442,7 @@ function applySoftTrackerInfluenceToPicks(picks, fixtureMeta, phase2Activation =
   const settled = Number(derived?.settledPicks || 0);
   if (settled < Number(TRACKER_SOFT_EFFECTS.minSettled || 20)) return;
 
-  const totalSettledPicks = getLearningTrackedPicks().filter(
+  const totalSettledPicks = getAllTrackedPicksForReport().filter(
     (p) => p.resultStatus !== "pending",
   ).length;
   if (totalSettledPicks === 0) return;
@@ -21975,7 +19915,7 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus, extra
       // would actually require 125 settlements before the grid has 25 observations.
       setTimeout(async () => {
         try {
-          await runRetrospectiveAnalysis(updatedPick);
+          
           const _oosResult2 = runOutOfSampleValidation(updatedPick.league);
           if (_oosResult2) engineDebug("Out-of-sample validation result", _oosResult2);
           if (typeof renderConfigsPanel === "function") renderConfigsPanel();
@@ -22743,7 +20683,7 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
       localStorage.setItem(_arKey, String(_arCount));
       (async () => {
         try {
-          await runRetrospectiveAnalysis(pick);
+          
         } catch (err) {
           engineDebug("Retrospective analysis error (auto-settle)", err.message);
         }
@@ -23252,80 +21192,7 @@ async function refreshTrackedPickResults() {
               error: _pf?.message || String(_pf),
             });
           }
-          if (_nowSettled - _prevSettled >= _retrainEvery) {
-            setTimeout(() => {
-              try {
-                calibrateConfidenceModel();
-              } catch (e) {
-                engineDebug("calibrateConfidenceModel failed during retrain", {
-                  error: e?.message || String(e),
-                });
-              }
 
-              try {
-                calibrateEngineConstants();
-              } catch (e) {
-                engineDebug("calibrateEngineConstants failed during retrain", {
-                  error: e?.message || String(e),
-                });
-              }
-              try {
-                const allPicks = getAllTrackedPicksForReport();
-
-                runCoordinateAscentTuner(allPicks, null);
-
-                const _curLg = document.getElementById("leagueSelect")?.value || "";
-                if (_curLg) {
-                  runCoordinateAscentTuner(allPicks, _curLg);
-                }
-              } catch (e) {
-                engineDebug("Coordinate ascent retrospective failed during retrain", e);
-              }
-              try {
-                const _oosLeague = document.getElementById("leagueSelect")?.value || "";
-                const _oosResult = runOutOfSampleValidation(_oosLeague);
-                if (_oosResult) engineDebug("Out-of-sample validation result", _oosResult);
-              } catch (e) {
-                engineDebug("runOutOfSampleValidation threw during retrain", {
-                  error: e?.message || String(e),
-                });
-              }
-
-              try {
-                const _snapResult = refreshTrackerSignalSnapshot();
-                if (_snapResult)
-                  engineDebug("Tracker signal snapshot refresh result", {
-                    frozenAt: _snapResult.frozenAt,
-                    settledCountAtFreeze: _snapResult.settledCountAtFreeze,
-                    validationZ: _snapResult.validationZ || null,
-                  });
-              } catch (e) {
-                engineDebug(
-                  "refreshTrackerSignalSnapshot threw during retrain",
-                  e?.message || String(e),
-                );
-              }
-              try {
-                const _healthLg = document.getElementById("leagueSelect")?.value || "";
-                if (_healthLg) checkModelHealth(_healthLg);
-              } catch (e) {
-                engineDebug("checkModelHealth threw during retrain", {
-                  error: e?.message || String(e),
-                });
-              }
-              localStorage.setItem(
-                "BB_RETRAIN_CHECKPOINT",
-                JSON.stringify({
-                  settledCount: _nowSettled,
-                  ts: new Date().toISOString(),
-                }),
-              );
-              engineDebug("Retraining pipeline fired", {
-                settled: _nowSettled,
-                prev: _prevSettled,
-              });
-            }, 400);
-          }
         } catch (_re) {
           engineDebug("retrain scheduling block failed", { error: _re?.message || String(_re) });
         }
@@ -24519,8 +22386,8 @@ function getConfidenceWinProbability(
     const _familyScope = getConfidenceModelScopeKey(league, newSignals.marketKey || "ft");
     const _family = getConfidenceMarketFamily(newSignals.marketKey || "ft");
     const _globalFamilyScope = "global::" + _family;
-    const _liveRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
-    const _legacyRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF");
+    const _liveRaw = null;
+    const _legacyRaw = null;
     const _liveBundle = _liveRaw ? JSON.parse(_liveRaw) : null;
     const _cur = typeof getCurrentModelVersion === "function" ? getCurrentModelVersion() : null;
     const _versionOk = _liveBundle && (!_cur || String(_liveBundle.modelVersion || "") === String(_cur));
@@ -24641,47 +22508,11 @@ function getConfidenceWinProbability(
   );
 }
 
-/* SECTION 276 — confidence-coeff-fitted */
-function isConfidenceCoeffFitted(league, marketKey = "ft") {
-  try {
-    const liveRaw = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
-    if (!liveRaw) return false;
-    const bundle = JSON.parse(liveRaw);
-    const _cur = typeof getCurrentModelVersion === "function" ? getCurrentModelVersion() : null;
-    if (_cur && String(bundle.modelVersion || "") !== String(_cur)) return false;
-    if (bundle.featureSchemaHash && typeof getFeatureSchemaHash === "function" && String(bundle.featureSchemaHash) !== String(getFeatureSchemaHash())) return false;
-    const models = bundle.coeff || {};
-    const _family = getConfidenceMarketFamily(marketKey);
-    const _familyScope = getConfidenceModelScopeKey(league, marketKey);
-    const _globalFamilyScope = "global::" + _family;
-    const _resolvedScope = models[_familyScope] ? _familyScope : _globalFamilyScope;
-    const coeff = models[_resolvedScope] || null;
-    const _requiredCoeffKeys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
-    const _keysFitted = !!(coeff && _requiredCoeffKeys.every((k) => Number.isFinite(coeff[k])));
-    if (!_keysFitted) return false;
-    let _coeffN = 0;
-    try {
-      const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
-      // The observation count must belong to the exact coefficient scope actually served.
-      // A global-family coefficient therefore requires global-family N, not league N.
-      _coeffN = Number(nMap[_resolvedScope] || 0);
-    } catch (_e) {
-      _coeffN = 0;
-    }
-    // Serving: coefficients present are enough. Settled N is diagnostic only.
-    return !!_keysFitted;
-  } catch (e) {
-    engineDebug("isConfidenceCoeffFitted failed", { league, error: e?.message || String(e) });
-    return false;
-  }
-}
 
-/* SECTION 277 — confidence-model-fitted */
-function isConfidenceModelFitted(league, marketKey = "ft") {
-  return typeof isConfidenceCoeffFitted === "function"
-    ? isConfidenceCoeffFitted(league, marketKey)
-    : false;
-}
+
+
+
+
 
 /* SECTION 277B — market-ECE lookup and D13 calibration cap
    D13: when at least 30 settled outcomes exist for a league/market scope,
@@ -24701,24 +22532,8 @@ function getMarketECE(league, marketKey) {
   } catch (_eECE) {}
   return null;
 }
-function applyD13EceGradeCap(grade, league, marketKey, outMeta = null) {
-  const rank = { A: 4, B: 3, C: 2, D: 1 };
-  const e = getMarketECE(league, marketKey);
-  if (!e || e.n < 30 || !Number.isFinite(e.ece)) return grade;
-  let cap = null;
-  if (e.ece >= 0.15) cap = "C";
-  else if (e.ece >= 0.10) cap = "B";
-  if (cap && rank[String(grade)] > rank[cap]) {
-    if (outMeta && typeof outMeta === "object") {
-      outMeta._d13Capped = true;
-      outMeta._d13Ece = e.ece;
-      outMeta._d13N = e.n;
-      outMeta._d13Cap = cap;
-    }
-    return cap;
-  }
-  return grade;
-}
+
+
 
 /* SECTION 278 — resolve-confidence-grade */
 function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKey = "", outMeta = null) {
@@ -24750,61 +22565,8 @@ function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKe
 
 <script>
 
-/* SECTION 278A — confidence-model-provenance */
-function getConfidenceModelProvenance(league, marketKey = "ft") {
-  const result = {
-    modelType: "fallback",
-    fallbackReason: "confidence_model_unavailable",
-    settledResults: 0,
-    requiredResults: Number(typeof CONFIDENCE_REQUIRED_SAMPLE_SERVE !== "undefined" ? CONFIDENCE_REQUIRED_SAMPLE_SERVE : 0),
-    resolvedScope: "global",
-  };
-  try {
-    const raw = localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE");
-    if (!raw) {
-      result.modelType = "fallback";
-      result.fallbackReason = "default_priors_settled_not_required";
-      return result;
-    }
-    const bundle = JSON.parse(raw);
-    const cur = typeof getCurrentModelVersion === "function" ? getCurrentModelVersion() : null;
-    if (cur && String(bundle.modelVersion || "") !== String(cur)) {
-      result.fallbackReason = "model_version_mismatch";
-      result.resolvedScope = "version_mismatch";
-      return result;
-    }
-    if (bundle.featureSchemaHash && typeof getFeatureSchemaHash === "function" && String(bundle.featureSchemaHash) !== String(getFeatureSchemaHash())) {
-      result.fallbackReason = "feature_schema_mismatch";
-      result.resolvedScope = "schema_mismatch";
-      return result;
-    }
-    const models = bundle.coeff || {};
-    const lk = String(league || "").toLowerCase();
-    const family = getConfidenceMarketFamily(marketKey);
-    const familyScope = getConfidenceModelScopeKey(lk, marketKey);
-    const globalFamilyScope = "global::" + family;
-    const resolvedScope = models[familyScope] ? familyScope : globalFamilyScope;
-    const coeff = models[resolvedScope] || null;
-    result.resolvedScope = resolvedScope;
-    const keys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
-    if (!coeff || !keys.every((k) => Number.isFinite(coeff[k]))) {
-      result.fallbackReason = "coefficients_unfitted";
-      return result;
-    }
-    const nMap = bundle.sampleSizes && typeof bundle.sampleSizes === "object" ? bundle.sampleSizes : {};
-    const n = Number(nMap[resolvedScope] || 0);
-    result.settledResults = Number.isFinite(n) && n >= 0 ? n : 0;
-    // Do not block live confidence when settled N is below the trainer sample.
-    result.modelType = "logistic";
-    result.fallbackReason = result.settledResults > 0 ? null : "default_or_unfitted_priors_ok";
-    result.modelVersion = bundle.modelVersion || null;
-    result.calibrationVersion = bundle.calibrationVersion || null;
-    return result;
-  } catch (_e) {
-    result.fallbackReason = "confidence_provenance_resolution_failed";
-    return result;
-  }
-}
+
+
 
 /* SECTION 279 — get-confidence-grade */
 function getConfidenceGrade(params) {
@@ -24955,7 +22717,7 @@ function getConfidenceGrade(params) {
     const _marketKeyForModel = params?.marketKey || "ft";
     const _fitted = typeof isConfidenceModelFitted === "function" ? isConfidenceModelFitted(league, _marketKeyForModel) : false;
     const _prov = typeof getConfidenceModelProvenance === "function"
-      ? getConfidenceModelProvenance(league, _marketKeyForModel)
+      ? { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }
       : null;
     params._modelType = _fitted ? "logistic" : "fallback";
     params._fittedN = _prov && Number.isFinite(_prov.settledResults) ? _prov.settledResults : (_fitted ? 40 : 0);
@@ -33292,430 +31054,8 @@ function getCrossSignalAgreement(side, marketKey, parsed) {
   return { side, marketKey, signals };
 }
 
-/* SECTION 326 — calibrate-confidence-model */
-function calibrateConfidenceModel() {
-  const currentVersion = getCurrentModelVersion();
-  const allPicks = getAllSettledTrackedPicks().filter(
-    (p) =>
-      p.modelVersion === currentVersion &&
-      !p.isShadow &&
-      isFinite(Number(p.edgePct)),
-  );
-  if (allPicks.length < 150) {
-    engineDebug("Confidence calibration skipped: insufficient authoritative settled sample", {
-      settledResults: allPicks.length,
-      requiredResults: 150,
-    });
-    return;
-  }
 
-  const _chronoSorted = allPicks
-    .slice()
-    .sort((a, b) => Date.parse(a.createdAt || 0) - Date.parse(b.createdAt || 0));
-  const _trainEnd = Math.floor(_chronoSorted.length * 0.6);
-  const _calEnd = Math.floor(_chronoSorted.length * 0.8);
-  const fitPicks = _chronoSorted.slice(0, _trainEnd);
-  const calPicks = _chronoSorted.slice(_trainEnd, _calEnd);
-  const testPicks = _chronoSorted.slice(_calEnd);
-  const _biasBucketOf = (edgePctVal) => Math.max(0, Math.min(4, Math.floor(Math.abs(Number(edgePctVal) || 0) / 5)));
-  const _settledBucketCounts = [0, 0, 0, 0, 0];
-  fitPicks.forEach((p) => _settledBucketCounts[_biasBucketOf(p.edgePct)]++);
-  const _biasWeightByBucket = _settledBucketCounts.map((n) => 1); // bias-weighting deferred; uniform weights
-  fitPicks.forEach((p) => { p._biasWeight = _biasWeightByBucket[_biasBucketOf(p.edgePct)]; });
-  try {
-    localStorage.setItem("BB_SETTLED_BIAS_AUDIT", JSON.stringify({ settledBucketCounts: _settledBucketCounts, weights: _biasWeightByBucket, fitN: fitPicks.length, holdoutN: calPicks.length, ts: new Date().toISOString() }));
-  } catch (e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", e); }
 
-  /* FIX item 28: fit the proposed model FIRST (moved up from below threshold derivation).
-     Threshold/grade-winrate derivation must score picks using THIS proposed model, not the
-     live global getConfidenceWinProbability() (which reads the OLD coefficients still in
-     localStorage) — scoring a new model's thresholds against the old model's predictions
-     was mixing model generations. */
-  const buildF = (p) => buildConfidenceFeatures(p);
-
-  const _gd = (data, lr, lambda) => {
-    let c = {
-      intercept: -0.2,
-      edgePct: 8.0,
-      volRatio: -0.8,
-      sampleFull: 0.4,
-      h2h: 0.2,
-      trap: -1.2,
-    };
-
-    const _n = data.reduce((s, d) => s + (isFinite(d.w) ? d.w : 1), 0) || 1;
-    for (let iter = 0; iter < 400; iter++) {
-      const g = { intercept: 0, edgePct: 0, volRatio: 0, sampleFull: 0, h2h: 0, trap: 0 };
-      for (const { f, y, w } of data) {
-        const _w = isFinite(w) ? w : 1;
-        const lo =
-          c.intercept +
-          c.edgePct * f.edgePct +
-          c.volRatio * f.volRatio +
-          c.sampleFull * f.sampleFull +
-          c.h2h * f.h2h +
-          c.trap * f.trap;
-        const prob = 1 / (1 + Math.exp(-Math.min(20, Math.max(-20, lo))));
-        const e = (y - prob) * _w;
-        g.intercept += e;
-        g.edgePct += e * f.edgePct;
-        g.volRatio += e * f.volRatio;
-        g.sampleFull += e * f.sampleFull;
-        g.h2h += e * f.h2h;
-        g.trap += e * f.trap;
-      }
-      c.intercept += lr * (g.intercept / _n);
-      c.edgePct += lr * (g.edgePct / _n) - lr * lambda * c.edgePct;
-      c.volRatio += lr * (g.volRatio / _n) - lr * lambda * c.volRatio;
-      c.sampleFull += lr * (g.sampleFull / _n) - lr * lambda * c.sampleFull;
-      c.h2h += lr * (g.h2h / _n) - lr * lambda * c.h2h;
-      c.trap += lr * (g.trap / _n) - lr * lambda * c.trap;
-    }
-    return c;
-  };
-
-  const runGD = (data) => {
-    if (!data || data.length < 15) return null;
-    if (data.length >= 60) {
-      const foldSize = Math.floor(data.length / 3);
-      const candidates = [
-        { lr: 0.002, lambda: 0.005 },
-        { lr: 0.001, lambda: 0.005 },
-        { lr: 0.002, lambda: 0.001 },
-        { lr: 0.0005, lambda: 0.001 }];
-      let bestLoss = Infinity,
-        bestCoeff = null;
-      candidates.forEach(({ lr, lambda }) => {
-        let totalLoss = 0;
-        for (let fold = 0; fold < 3; fold++) {
-          const trainEnd = Math.floor(data.length * (0.4 + fold * 0.15));
-          const valEnd = Math.min(data.length, trainEnd + Math.max(foldSize, Math.floor(data.length * 0.15)));
-          if (trainEnd < 20 || valEnd <= trainEnd) continue;
-          const train = data.slice(0, trainEnd);
-          const val = data.slice(trainEnd, valEnd);
-          const coeff = _gd(train, lr, lambda);
-          val.forEach(({ f, y }) => {
-            const lo =
-              coeff.intercept +
-              coeff.edgePct * f.edgePct +
-              coeff.volRatio * f.volRatio +
-              coeff.sampleFull * f.sampleFull +
-              coeff.h2h * f.h2h +
-              coeff.trap * f.trap;
-            const prob = 1 / (1 + Math.exp(-Math.min(20, Math.max(-20, lo))));
-            totalLoss -=
-              y === 1 ? Math.log(Math.max(1e-9, prob)) : Math.log(Math.max(1e-9, 1 - prob));
-          });
-        }
-        if (totalLoss < bestLoss) {
-          bestLoss = totalLoss;
-          bestCoeff = _gd(data, lr, lambda);
-        }
-      });
-      return bestCoeff;
-    }
-    return _gd(data, 0.001, 0.005);
-  };
-
-  const models = {};
-  const modelSampleSizes = {};
-  const _families = ["TOTAL", "TEAM", "Q", "MARGIN"];
-  const _scopeForPick = (p) => getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
-  const _globalFamilyScope = (family) => "global::" + family;
-
-  _families.forEach((family) => {
-    const familyPicks = fitPicks.filter((p) => getConfidenceMarketFamily(p.marketKey || "ft") === family);
-    const data = familyPicks.map((p) => ({ f: buildF(p), y: p.resultStatus === "win" ? 1 : 0, w: p._biasWeight }));
-    const m = runGD(data);
-    if (m) {
-      models[_globalFamilyScope(family)] = m;
-      modelSampleSizes[_globalFamilyScope(family)] = data.length;
-    }
-  });
-
-  [...new Set(fitPicks.map((p) => String(p.league || "").toLowerCase()).filter(Boolean))].forEach((league) => {
-    _families.forEach((family) => {
-      const familyPicks = fitPicks.filter((p) => String(p.league || "").toLowerCase() === league && getConfidenceMarketFamily(p.marketKey || "ft") === family);
-      const ld = familyPicks.map((p) => ({ f: buildF(p), y: p.resultStatus === "win" ? 1 : 0, w: p._biasWeight }));
-      const lm = runGD(ld);
-      const base = models[_globalFamilyScope(family)];
-      if (lm && base) {
-        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TEAM" ? "team_a" : family === "Q" ? "q1" : "winner");
-        models[key] = empiricalBayesShrink(lm, ld.length, base, 40);
-        modelSampleSizes[key] = ld.length;
-      } else if (lm) {
-        const key = league + "::" + family;
-        models[key] = lm;
-        modelSampleSizes[key] = ld.length;
-      }
-    });
-  });
-
-  const _rawLogOdds = (coeff, p) => {
-    const f = buildF(p);
-    return (
-      (coeff.intercept ?? -0.2) +
-      (coeff.edgePct ?? 8.0) * f.edgePct +
-      (coeff.volRatio ?? -0.8) * f.volRatio +
-      (coeff.sampleFull ?? 0.4) * f.sampleFull +
-      (coeff.h2h ?? 0.2) * f.h2h +
-      (coeff.trap ?? -1.2) * f.trap
-    );
-  };
-  /* FIX item 28: score a pick's win probability using the PROPOSED coefficients for its own
-     scope (falling back to the proposed global model), not the live model in localStorage. */
-  const _proposedWinProb = (p) => {
-    const family = getConfidenceMarketFamily(p.marketKey || "ft");
-    const scope = getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
-    const coeff = models[scope] || models[_globalFamilyScope(family)];
-    if (!coeff) return null;
-    const lo = clampNumber(_rawLogOdds(coeff, p), -20, 20);
-    return 1 / (1 + Math.exp(-lo));
-  };
-
-  /* FIX item 29: grade win rates must come from calPicks (the untouched holdout), not the
-     same fitPicks used to fit the model above — otherwise the model is graded using the
-     data it was trained on, which inflates apparent reliability. */
-  const gradeWinRates = { A: [], B: [], C: [], D: [] };
-  // Regrade holdout picks with the PROPOSED model before computing grade WRs (avoid historical-label leakage).
-  calPicks.forEach((p) => {
-    let grade = String(p.confidenceGrade || p.confidence || "").toUpperCase();
-    try {
-      if (typeof _proposedWinProb === "function") {
-        const wp = _proposedWinProb(p);
-        if (Number.isFinite(wp) && typeof gradeFromWinProb === "function") {
-          grade = String(gradeFromWinProb(wp, p) || grade).toUpperCase();
-        } else if (Number.isFinite(wp)) {
-          // Local fallback thresholds aligned with typical A/B/C/D bands.
-          grade = wp >= 0.72 ? "A" : wp >= 0.64 ? "B" : wp >= 0.56 ? "C" : "D";
-        }
-      }
-    } catch (_eRegrade) {}
-    if (gradeWinRates[grade] !== undefined) {
-      gradeWinRates[grade].push(p.resultStatus === "win" ? 1 : 0);
-    }
-  });
-  const thresholds = {};
-  Object.keys(gradeWinRates).forEach((g) => {
-    const wins = gradeWinRates[g].filter((v) => v === 1).length;
-    const total = gradeWinRates[g].length;
-    if (total >= 5) thresholds[g + "WinRate"] = wins / total;
-  });
-
-  /* FIX item 27/28: percentile thresholds derived from calPicks (untouched holdout) scored
-     with the PROPOSED model via _proposedWinProb — previously fitPicks scored with the live
-     global model, contaminating both the training/calibration separation (27) and the model
-     generation being evaluated (28). */
-  const winProbs = calPicks
-    .map((p) => ({ winProb: _proposedWinProb(p), result: p.resultStatus }))
-    .filter((s) => s && Number.isFinite(s.winProb));
-  if (winProbs.length >= 30) {
-    winProbs.sort((a, b) => a.winProb - b.winProb);
-    let aThreshold = winProbs[Math.floor(winProbs.length * 0.8)]?.winProb ?? 0.66;
-    let bThreshold = winProbs[Math.floor(winProbs.length * 0.5)]?.winProb ?? 0.58;
-    let cThreshold = winProbs[Math.floor(winProbs.length * 0.2)]?.winProb ?? 0.51;
-
-    const TARGET_WR_GAP = 0.04;
-    if (
-      isFinite(thresholds.AWinRate) &&
-      isFinite(thresholds.BWinRate) &&
-      thresholds.AWinRate < thresholds.BWinRate + TARGET_WR_GAP
-    ) {
-      aThreshold = clampNumber(aThreshold + 0.02, 0.1, 0.9);
-    }
-    if (
-      isFinite(thresholds.BWinRate) &&
-      isFinite(thresholds.CWinRate) &&
-      thresholds.BWinRate < thresholds.CWinRate + TARGET_WR_GAP
-    ) {
-      bThreshold = clampNumber(bThreshold + 0.02, 0.1, 0.9);
-    }
-    if (
-      isFinite(thresholds.CWinRate) &&
-      isFinite(thresholds.DWinRate) &&
-      thresholds.CWinRate < thresholds.DWinRate + TARGET_WR_GAP
-    ) {
-      cThreshold = clampNumber(cThreshold + 0.02, 0.1, 0.9);
-    }
-    const gradeThresholds = { aThresh: aThreshold, bThresh: bThreshold, cThresh: cThreshold };
-    try {
-      localStorage.setItem("BB_CONFIDENCE_THRESHOLDS_PROPOSED", JSON.stringify(gradeThresholds));
-      localStorage.setItem("BB_CONFIDENCE_GRADE_WIN_RATES_PROPOSED", JSON.stringify(thresholds));
-      engineDebug("Confidence grade thresholds proposed (not auto-applied)", {
-        gradeThresholds,
-        winRates: thresholds,
-      });
-    } catch (e) {
-      console.error("[BB Engine] Confidence grade threshold proposal save failed", e);
-    }
-  }
-
-  const fitPlattScaling = (coeff, calRows) => {
-    if (!coeff || !calRows || calRows.length < 20)
-      return { a: 1, b: 0, n: calRows ? calRows.length : 0 };
-    const rows = calRows.map((p) => ({
-      logit: clampNumber(_rawLogOdds(coeff, p), -10, 10),
-      y: p.resultStatus === "win" ? 1 : 0,
-    }));
-    let a = 1,
-      b = 0;
-    const lr = 0.01,
-      l2 = 0.01;
-    for (let iter = 0; iter < 300; iter++) {
-      let ga = 0,
-        gb = 0;
-      rows.forEach((r) => {
-        const lo = a * r.logit + b;
-        const prob = 1 / (1 + Math.exp(-Math.min(20, Math.max(-20, lo))));
-        const e = r.y - prob;
-        ga += e * r.logit;
-        gb += e;
-      });
-      a += lr * (ga / rows.length) - lr * l2 * (a - 1);
-      b += lr * (gb / rows.length) - lr * l2 * b;
-    }
-    return { a, b, n: rows.length };
-  };
-  const plattCalib = {};
-  Object.keys(models).forEach((scope) => {
-    let scopeCalRows = calPicks;
-    if (scope.indexOf("::") > -1) {
-      const parts = scope.split("::");
-      const scopeLeague = parts[0];
-      const family = parts[1];
-      scopeCalRows = calPicks.filter((p) =>
-        (scopeLeague === "global" || String(p.league || "").toLowerCase() === scopeLeague) &&
-        getConfidenceMarketFamily(p.marketKey || "ft") === family
-      );
-    }
-    plattCalib[scope] = fitPlattScaling(models[scope], scopeCalRows);
-  });
-
-  /* FIX item 26: this is where a genuine out-of-sample evaluation belongs — score calPicks
-     (never touched by runGD/_gd above) with the PROPOSED model and report real predictive
-     metrics, not just a raw win rate disconnected from any specific model's predictions.
-     runOutOfSampleValidation() (separate function, see its updated comment) intentionally
-     does NOT do this — it only tracks raw test-set win rate over time as a simple drift
-     monitor and was never actually evaluating model predictions; that gap is what item 26
-     originally flagged, and it is fixed here where the model fitting actually happens. */
-  try {
-    const _applyPlatt = (p) => {
-      let prob = _proposedWinProb(p);
-      if (!Number.isFinite(prob)) return NaN;
-      const scope = p.league && plattCalib[p.league] ? p.league : "global";
-      const pl = plattCalib[scope];
-      if (pl && Number.isFinite(pl.a) && Number.isFinite(pl.b)) {
-        const raw = Math.min(1 - 1e-9, Math.max(1e-9, prob));
-        const logit = Math.log(raw / (1 - raw));
-        const lo = pl.a * logit + pl.b;
-        prob = 1 / (1 + Math.exp(-Math.min(20, Math.max(-20, lo))));
-      }
-      return prob;
-    };
-    const evalRows = (testPicks && testPicks.length ? testPicks : calPicks)
-      .map((p) => ({ prob: _applyPlatt(p), y: p.resultStatus === "win" ? 1 : 0 }))
-      .filter((r) => Number.isFinite(r.prob));
-    if (evalRows.length >= 15) {
-      let brierSum = 0,
-        logLossSum = 0,
-        correct = 0;
-      evalRows.forEach((r) => {
-        brierSum += (r.prob - r.y) ** 2;
-        const pClamped = Math.min(1 - 1e-9, Math.max(1e-9, r.prob));
-        logLossSum -= r.y === 1 ? Math.log(pClamped) : Math.log(1 - pClamped);
-        if ((r.prob >= 0.5 ? 1 : 0) === r.y) correct++;
-      });
-      const oosMetrics = {
-        n: evalRows.length,
-        brierScore: brierSum / evalRows.length,
-        logLoss: logLossSum / evalRows.length,
-        accuracy: correct / evalRows.length,
-        meanPredictedProb: evalRows.reduce((s, r) => s + r.prob, 0) / evalRows.length,
-        meanActualWinRate: evalRows.reduce((s, r) => s + r.y, 0) / evalRows.length,
-        computedAt: new Date().toISOString(),
-      };
-      localStorage.setItem("BB_CONFIDENCE_MODEL_OOS_METRICS_PROPOSED", JSON.stringify(oosMetrics));
-      engineDebug(
-        "Proposed confidence model OOS metrics (held-out calPicks, never used in fitting)",
-        oosMetrics,
-      );
-    }
-  } catch (e) {
-    engineDebug("OOS metrics computation failed", { error: e?.message || String(e) });
-  }
-
-  if (Object.keys(models).length) {
-    try {
-      const proposalCreatedAt = new Date().toISOString();
-      const totalSettled = allPicks.length;
-      const fitSampleCount = fitPicks.length;
-      const holdoutSampleCount = calPicks.length;
-      const proposedBundleFingerprint = djb2Hash(
-        JSON.stringify({
-          coeff: models,
-          platt: plattCalib,
-          sampleSizes: modelSampleSizes,
-          thresholds,
-          gradeWinRates,
-        }),
-      );
-      const proposalId =
-        "CONF-" +
-        getCurrentModelVersion() +
-        "-" +
-        proposedBundleFingerprint +
-        "-" +
-        Date.now().toString(36);
-      const meta = {
-        proposalVersion: 2,
-        proposalId,
-        status: "PROPOSAL_READY",
-        applied: false,
-        sampleCount: totalSettled,
-        requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
-        fitSampleCount,
-        holdoutSampleCount,
-        currentModelVersion: (() => {
-          try {
-            const live = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_LIVE") || "null");
-            return live?.modelVersion || live?.calibrationVersion || "legacy-confidence";
-          } catch (_e) {
-            return "legacy-confidence";
-          }
-        })(),
-        proposedModelVersion: CONFIDENCE_CALIBRATION_VERSION,
-        baseLiveHash: getConfidenceLiveFingerprint(),
-        candidateConfigHash: proposedBundleFingerprint,
-        createdAt: proposalCreatedAt,
-        provenance: "chronological 80/20 fit/holdout confidence calibration with scoped logistic + Platt calibration",
-        scopes: Object.keys(models),
-      };
-      localStorage.setItem("BB_CONFIDENCE_MODEL_COEFF_PROPOSED", JSON.stringify(models));
-      localStorage.setItem(
-        "BB_CONFIDENCE_MODEL_COEFF_N_PROPOSED",
-        JSON.stringify(modelSampleSizes),
-      );
-      localStorage.setItem("BB_PLATT_CALIB_PROPOSED", JSON.stringify(plattCalib));
-      localStorage.setItem(CONFIDENCE_PROPOSAL_META_KEY, JSON.stringify(meta));
-    } catch (e) {
-      console.error("[BB Engine] Confidence model coefficient proposal save failed", e);
-      engineDebug("Confidence model proposal metadata save failed", {
-        error: e?.message || String(e),
-        stack: e?.stack || "no stack",
-      });
-    }
-    engineDebug(
-      "Confidence model coefficients proposed (not auto-applied — review in Configs panel)",
-      {
-        scopes: Object.keys(models),
-        totalSettled: allPicks.length,
-        fitSampleCount: fitPicks.length,
-        holdoutSampleCount: calPicks.length,
-        requiredSample: CONFIDENCE_REQUIRED_SAMPLE,
-      },
-    );
-  }
-}
 
 </script>
 
@@ -33729,7 +31069,7 @@ function calibrateConfidenceModel() {
    above, which is the function the original item 26 finding actually applies to. */
 /* SECTION 327 — oos-validation */
 function runOutOfSampleValidation(league) {
-  const allPicks = getLearningTrackedPicks()
+  const allPicks = getAllTrackedPicksForReport()
     .filter(
       (p) =>
         p.league === league &&
@@ -33791,13 +31131,13 @@ function runOutOfSampleValidation(league) {
 
 /* SECTION 328 — check-model-health */
 function checkModelHealth(league) {
-  const allPicks = getLearningTrackedPicks().filter(
+  const allPicks = getAllTrackedPicksForReport().filter(
     (p) => p.league === league && (p.resultStatus === "win" || p.resultStatus === "loss"),
   );
 
   const MIN_N = 12;
   if (allPicks.length < MIN_N) return null;
-  /* FIX item 30: getLearningTrackedPicks() returns [...active, ...archived], which is not
+  /* FIX item 30: getAllTrackedPicksForReport() returns [...active, ...archived], which is not
      guaranteed to be globally chronological (active is newest-first via unshift, but the
      concatenation with archived does not preserve that). Sort explicitly, newest first,
      before slicing, so "recent" actually means recent. Mirrors the existing sort convention
@@ -33940,9 +31280,6 @@ function buildTrackedPickPayload({
         aLine: parseMarketLine(document.getElementById("teamAMarket")?.value || ""),
         bLine: parseMarketLine(document.getElementById("teamBMarket")?.value || ""),
 
-        handicapLine: parseHandicapLine(document.getElementById()?.value || ""),
-        handicapH1Line: parseHandicapLine(document.getElementById()?.value || ""),
-        handicapH2Line: parseHandicapLine(document.getElementById()?.value || ""),
       };
       const fixtureMetaSnapshot = getCurrentFixtureMeta();
 
@@ -34409,7 +31746,7 @@ function buildTrackedPickPayload({
         return null;
       }
     })(),
-    calibrationProvenance: getCalibrationProvenance(league, marketKey),
+    calibrationProvenance: { source: "static" },
     isLock,
     isABQualified,
     trackerBucket: "raw",
@@ -34920,8 +32257,6 @@ function extractInputs(league) {
 
     aLine: readLine("teamAMarket"),
     bLine: readLine("teamBMarket"),
-    q1aLine: readLine(),
-    q1bLine: readLine(),
     h1aLine: readLine("h1TeamAMarket"),
     h1bLine: readLine("h1TeamBMarket"),
 
@@ -36077,7 +33412,7 @@ async function runEngine() {
     }) : "NaN";
 
     const phase2Activation =
-      typeof getPhase2ActivationState === "function" ? getPhase2ActivationState() : null;
+      null;
 
     const ctxA = getMassacreTeamContext("A", parsed);
     const ctxB = getMassacreTeamContext("B", parsed);
@@ -36107,7 +33442,7 @@ async function runEngine() {
 
     const projDiff = ftCalc.projAFT - ftCalc.projBFT;
 
-    const _coeffFitted = isConfidenceCoeffFitted(league, "ft");
+    const _coeffFitted = false;
 
     const picks = [
       {
@@ -36185,10 +33520,10 @@ async function runEngine() {
         h2Method: h2Calc.h2Method,
         h2hWeightApplied: h2Calc.h2hWeightApplied,
         h2hContribution: h2Calc.h2hContribution,
-        modelType: getConfidenceModelProvenance(league, "h2").modelType,
-        fallbackReason: getConfidenceModelProvenance(league, "h2").fallbackReason,
-        settledResults: getConfidenceModelProvenance(league, "h2").settledResults,
-        requiredResults: getConfidenceModelProvenance(league, "h2").requiredResults,
+        modelType: { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }.modelType,
+        fallbackReason: { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }.fallbackReason,
+        settledResults: { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }.settledResults,
+        requiredResults: { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }.requiredResults,
         volatility: h2VolatilityForConf,
         volLimit: getMarketVolLimit(league, "h2"),
         coeffFitted: _coeffFitted,
@@ -36456,7 +33791,7 @@ async function runEngine() {
       // states which probability model was actually available.
       finalPicksForDisplay.forEach((p) => {
         if (!p) return;
-        const _modelProv = getConfidenceModelProvenance(p.league || league, p.marketKey || "ft");
+        const _modelProv = { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 };
         p.modelType = _modelProv.modelType;
         p.fallbackReason = _modelProv.fallbackReason;
         p.settledResults = _modelProv.settledResults;
@@ -36610,7 +33945,7 @@ async function runEngine() {
       const warnings = [];
       const rows = Array.isArray(picks) ? picks : [];
       const finite = (v) => Number.isFinite(Number(v));
-      const prov = getConfidenceModelProvenance(leagueKey, "ft");
+      const prov = { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 };
       if (!meta || !meta.homeTeam || !meta.awayTeam) {
         warnings.push("teams/events not identified");
       }
@@ -36821,7 +34156,7 @@ async function runEngine() {
         volatilityBlock: ftCalc.volatilityBlock,
         trap: ftTrap,
         h1Trap: h1Trap,
-        coeffFitted: isConfidenceCoeffFitted(league, "ft"),
+        coeffFitted: false,
 
         aVol: ftCalc.aVol,
         bVol: ftCalc.bVol,
@@ -37442,9 +34777,9 @@ async function runEngine() {
                 fullModel: !!row.fullModel,
                 trap: !!row.trap,
                 hasH2H: !!row.hasH2H,
-                modelType: row.modelType || getConfidenceModelProvenance(row.league || league, row.marketKey || "ft").modelType,
-                fallbackReason: row.fallbackReason || getConfidenceModelProvenance(row.league || league, row.marketKey || "ft").fallbackReason,
-                settledResults: Number.isFinite(Number(row.settledResults)) ? Number(row.settledResults) : getConfidenceModelProvenance(row.league || league, row.marketKey || "ft").settledResults,
+                modelType: row.modelType || { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }.modelType,
+                fallbackReason: row.fallbackReason || { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }.fallbackReason,
+                settledResults: Number.isFinite(Number(row.settledResults)) ? Number(row.settledResults) : { modelType: "static", fallbackReason: "learning_removed", settledResults: 0, requiredResults: 0 }.settledResults,
                 requiredResults: Number.isFinite(Number(row.requiredResults)) ? Number(row.requiredResults) : 40,
                 marketKey: key,
                 finalGrade: (typeof auditFinalGradeSentinel === "function"
@@ -37772,7 +35107,7 @@ async function runEngine() {
           : null;
     } catch (_eSample) {}
     const _runFailureProposal =
-      _runFailureLeague ? getTunerProposalStatus(_runFailureLeague) : null;
+      null;
     engineDebug("run failed", {
       timestamp: new Date().toISOString(),
       build: typeof APP_BUILD_VERSION !== "undefined" ? APP_BUILD_VERSION : "unknown",
