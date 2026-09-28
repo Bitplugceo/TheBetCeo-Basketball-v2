@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -766,6 +765,11 @@ body.bb-last10-alert .wrapper{
   background: #3a9c35 !important;
   color: #fff !important;
   box-shadow: 0 2px 8px rgba(58, 156, 53, 0.35) !important;
+}
+
+#runBtn:disabled {
+  opacity: 0.55 !important;
+  cursor: wait !important;
 }
 
 #clearBtn {
@@ -13853,29 +13857,149 @@ const TRACKER_API_URL = WORKER_BASE_URL + "/cloud-sync";
 const BB_DB_NAME = "BBEngineData";
 const BB_STORE_NAME = "trackerStore";
 
+let _bbDbPromise = null;
+let _bbDbHandle = null;
+function _bbResetDb() {
+  try {
+    if (_bbDbHandle) _bbDbHandle.close();
+  } catch (_c) {}
+  _bbDbHandle = null;
+  _bbDbPromise = null;
+}
+// One shared connection (the old code opened a brand-new, never-closed connection on every call)
+// and it can never wait forever: iOS Safari sometimes never answers indexedDB.open / a stalled transaction.
 function initBBDatabase() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(BB_DB_NAME, 1);
+  if (_bbDbPromise) return _bbDbPromise;
+  const p = new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("IndexedDB open timeout"));
+    }, 4000);
+    let request;
+    try {
+      request = indexedDB.open(BB_DB_NAME, 1);
+    } catch (e) {
+      clearTimeout(timer);
+      settled = true;
+      reject(e);
+      return;
+    }
     request.onupgradeneeded = (e) => {
       if (!e.target.result.objectStoreNames.contains(BB_STORE_NAME)) {
         e.target.result.createObjectStore(BB_STORE_NAME);
       }
     };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onsuccess = () => {
+      const db = request.result;
+      clearTimeout(timer);
+      if (settled) {
+        try { db.close(); } catch (_c) {}
+        return;
+      }
+      settled = true;
+      db.onclose = () => { if (_bbDbHandle === db) _bbResetDb(); };
+      db.onversionchange = () => { try { db.close(); } catch (_c) {} if (_bbDbHandle === db) _bbResetDb(); };
+      _bbDbHandle = db;
+      resolve(db);
+    };
+    request.onerror = () => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(request.error || new Error("IndexedDB open failed"));
+    };
+    request.onblocked = () => {};
+  });
+  _bbDbPromise = p;
+  p.catch(() => {
+    if (_bbDbPromise === p) _bbDbPromise = null;
+  });
+  return p;
+}
+
+// Run one IndexedDB transaction. Always settles: complete / abort / error / timeout.
+function _bbIdbTx(mode, work, timeoutMs) {
+  return initBBDatabase().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        let done = false;
+        let result;
+        const finish = (fn, v) => {
+          if (done) return;
+          done = true;
+          clearTimeout(t);
+          fn(v);
+        };
+        const t = setTimeout(() => {
+          // connection is stuck: drop it so the next call opens a fresh one
+          _bbResetDb();
+          finish(reject, new Error("IndexedDB " + mode + " timeout"));
+        }, timeoutMs || 5000);
+        let tx;
+        try {
+          tx = db.transaction(BB_STORE_NAME, mode);
+        } catch (e) {
+          _bbResetDb();
+          finish(reject, e);
+          return;
+        }
+        tx.oncomplete = () => finish(resolve, result);
+        tx.onabort = () => finish(reject, tx.error || new Error("IndexedDB transaction aborted"));
+        tx.onerror = () => finish(reject, tx.error || new Error("IndexedDB transaction error"));
+        try {
+          const req = work(tx.objectStore(BB_STORE_NAME));
+          if (req) {
+            req.onsuccess = () => {
+              result = req.result;
+            };
+          }
+        } catch (e) {
+          finish(reject, e);
+          try { tx.abort(); } catch (_a) {}
+        }
+      }),
+  );
+}
+
+// Promise that never blocks the caller for longer than `ms`
+function bbWithTimeout(promise, ms, label, fallbackValue) {
+  return new Promise((resolve) => {
+    let done = false;
+    const t = setTimeout(() => {
+      if (done) return;
+      done = true;
+      try {
+        if (typeof engineDebug === "function") engineDebug("timeout: " + label + " after " + ms + "ms — continuing");
+      } catch (_e) {}
+      resolve(fallbackValue);
+    }, ms);
+    Promise.resolve(promise).then(
+      (v) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        resolve(v);
+      },
+      (err) => {
+        if (done) return;
+        done = true;
+        clearTimeout(t);
+        try {
+          if (typeof engineDebug === "function")
+            engineDebug("failed (non-fatal): " + label, { error: String((err && err.message) || err) });
+        } catch (_e) {}
+        resolve(fallbackValue);
+      },
+    );
   });
 }
 
 async function readAsyncStorage(key) {
                                                                                     
   try {
-    const db = await initBBDatabase();
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(BB_STORE_NAME, "readonly");
-      const request = tx.objectStore(BB_STORE_NAME).get(key);
-      request.onsuccess = () => resolve(request.result);
-      request.onerror = () => reject(request.error);
-    });
+    return await _bbIdbTx("readonly", (store) => store.get(key), 4000);
   } catch (err) {
     try {
       const raw = localStorage.getItem(key);
@@ -13910,13 +14034,15 @@ async function writeAsyncStorage(key, value) {
   }
 
   try {
-    const db = await initBBDatabase();
-    return await new Promise((resolve, reject) => {
-      const tx = db.transaction(BB_STORE_NAME, "readwrite");
-      tx.objectStore(BB_STORE_NAME).put(value, key);
-      tx.oncomplete = () => resolve(true);
-      tx.onerror = () => reject(tx.error);
-    });
+    await _bbIdbTx(
+      "readwrite",
+      (store) => {
+        store.put(value, key);
+        return null;
+      },
+      6000,
+    );
+    return true;
   } catch (err) {
     try {
       const serialized = typeof value === "string" ? value : JSON.stringify(value);
@@ -14191,23 +14317,21 @@ async function purgeZombieTrackerStorageKeys(keepKey) {
   if (!keys.length) return { purged: 0 };
   let purged = 0;
   try {
-    const db = await initBBDatabase();
     await Promise.all(
-      keys.map(
-        (key) =>
-          new Promise((resolve) => {
-            try {
-              const tx = db.transaction(BB_STORE_NAME, "readwrite");
-              tx.objectStore(BB_STORE_NAME).delete(key);
-              tx.oncomplete = () => {
-                purged++;
-                resolve();
-              };
-              tx.onerror = () => resolve();
-            } catch (_e) {
-              resolve();
-            }
-          }),
+      keys.map((key) =>
+        _bbIdbTx(
+          "readwrite",
+          (store) => {
+            store.delete(key);
+            return null;
+          },
+          4000,
+        ).then(
+          () => {
+            purged++;
+          },
+          () => {},
+        ),
       ),
     );
   } catch (_dbErr) {
@@ -14310,12 +14434,9 @@ async function _saveTrackerStateToLocalUnsafe() {
     }
 
     try {
-      const _verifyDb = await initBBDatabase();
-      const _isInDB = await new Promise((res) => {
-        const _vtx = _verifyDb.transaction(BB_STORE_NAME, "readonly");
-        _vtx.objectStore(BB_STORE_NAME).get(primaryKey).onsuccess = (e) => res(!!e.target.result);
-        _vtx.onerror = () => res(false);
-      }).catch(() => false);
+      const _isInDB = await _bbIdbTx("readonly", (store) => store.get(primaryKey), 4000)
+        .then((r) => !!r)
+        .catch(() => false);
       if (!_isInDB) {
         trackerDebug("WARN: IndexedDB write not present; verified fallback storage payload instead.");
       }
@@ -37229,8 +37350,20 @@ async function runEngine() {
     build: APP_BUILD_VERSION,
   });
 
+  // Last-resort watchdog: if anything in this run stalls, release the button instead of leaving it dead
+  let _runWatchdog = setTimeout(() => {
+    _runWatchdog = null;
+    try {
+      window.__engineRunInProgress = false;
+      const _rb = document.getElementById("runBtn");
+      if (_rb) _rb.disabled = false;
+      engineDebug("run watchdog: run stalled >45s, Run button released");
+      setStatusText("⚠ Run stalled — button released. Tap Run again.", "err");
+    } catch (_w) {}
+  }, 45000);
+
   try {
-    const _localState = await loadTrackerStateFromLocal();
+    const _localState = await bbWithTimeout(loadTrackerStateFromLocal(), 5000, "loadTrackerStateFromLocal", null);
     if (_localState) {
       const _merged = mergeTrackerStates(g_trackerState, _localState);
       normalizeTrackerState(_merged);
@@ -39317,8 +39450,8 @@ async function runEngine() {
                                                                                
                                                                                 
                                                                     
-      await addTrackedPicks(persistableTrackedPicks);
-      await forceTrackerSaveNow(persistableTrackedPicks);
+      await bbWithTimeout(addTrackedPicks(persistableTrackedPicks), 8000, "addTrackedPicks", null);
+      await bbWithTimeout(forceTrackerSaveNow(persistableTrackedPicks), 10000, "forceTrackerSaveNow", null);
 
                                                                                           
                                                                                           
@@ -39439,6 +39572,10 @@ async function runEngine() {
                                                                                  
     throw err;
   } finally {
+    if (_runWatchdog) {
+      clearTimeout(_runWatchdog);
+      _runWatchdog = null;
+    }
     window.__engineRunInProgress = false;
     MODEL_TUNING.recencyWeights = _savedRecencyWeights;
     engineDebug("run finally", { trackerState: getTrackerStateDebugScore(g_trackerState) });
