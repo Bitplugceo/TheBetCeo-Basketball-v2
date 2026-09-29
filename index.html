@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -29160,14 +29159,12 @@ async function fetchApiLiveEuroSeasonGames(seasonCode, competition) {
     "/seasons/" +
     encodeURIComponent(code) +
     "/games";
-  try {
-    const data = await proxyFetch(url, 45000);
-    const games = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
-    return games.map(normalizeApiLiveEuroGame).filter(Boolean);
-  } catch (e) {
-    logDebug("fetchApiLiveEuroSeasonGames failed", e);
-    return [];
+  const data = await proxyFetch(url, 45000);
+  const games = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+  if (!games.length && Number(data?.total || 0) > 0) {
+    throw new Error(comp + " api-live " + code + ": empty games payload (total=" + data.total + ")");
   }
+  return games.map(normalizeApiLiveEuroGame).filter(Boolean);
 }
 
 async function findIncrowdEuroGameByEventId(league, eventId, opts) {
@@ -29366,19 +29363,54 @@ async function fetchEuroleagueSeasonGames(seasonCode, competition, opts) {
     const hit = _euroleagueSeasonCache.get(cacheKey);
     if (hit && hit.games && hit.games.length && Date.now() - (hit.ts || 0) < maxAgeMs) return hit.games;
   }
-  const url = euroleagueGamesUrl(code, comp);
-  const data = await proxyFetch(url, 45000);
-  const games = Array.isArray(data?.data)
-    ? data.data
-    : Array.isArray(data?.games)
-      ? data.games
-      : Array.isArray(data)
-        ? data
-        : null;
-  if (!games) throw new Error(comp + " feed " + code + ": unexpected response shape");
-  // Never cache an empty list: a transient empty answer would otherwise hide a whole season for 15 min
-  if (games.length) _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), games });
-  return games;
+
+  // api-live v2 is the authoritative competition/game feed. Incrowd is a mirror/fallback.
+  // Keep both paths normalized to the same {home, away, date, status} shape because the
+  // downstream EuroLeague/EuroCup stat builder deliberately knows nothing about source shape.
+  let apiErr = null;
+  try {
+    const games = await fetchApiLiveEuroSeasonGames(code, comp);
+    if (games.length) {
+      _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), games });
+      return games;
+    }
+    apiErr = new Error(comp + " api-live " + code + ": no games returned");
+  } catch (e) {
+    apiErr = e;
+    if (typeof engineDebug === "function") {
+      engineDebug("api-live Euro season feed failed; trying Incrowd mirror", {
+        competition: comp,
+        season: code,
+        error: e?.message || String(e),
+      });
+    }
+  }
+
+  try {
+    const url = euroleagueGamesUrl(code, comp);
+    const data = await proxyFetch(url, 45000);
+    const games = Array.isArray(data?.data)
+      ? data.data
+      : Array.isArray(data?.games)
+        ? data.games
+        : Array.isArray(data)
+          ? data
+          : null;
+    if (!games) throw new Error(comp + " Incrowd feed " + code + ": unexpected response shape");
+    if (!games.length) {
+      throw new Error(comp + " Incrowd feed " + code + ": empty games payload");
+    }
+    _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), games });
+    return games;
+  } catch (incrowdErr) {
+    const msg =
+      comp + " " + code + " unavailable from api-live and Incrowd. " +
+      "api-live: " + (apiErr?.message || String(apiErr)) + "; " +
+      "Incrowd: " + (incrowdErr?.message || String(incrowdErr));
+    const err = new Error(msg);
+    err.cause = { apiLive: apiErr, incrowd: incrowdErr };
+    throw err;
+  }
 }
 
 async function fetchEuroleagueClubs(seasonCode, competition) {
@@ -29391,26 +29423,58 @@ async function fetchEuroleagueClubs(seasonCode, competition) {
     const hit = _euroleagueSeasonCache.get(cacheKey);
     if (hit && Date.now() - (hit.ts || 0) < 60 * 60 * 1000) return hit.clubs || [];
   }
+
+  // Use api-live first. The Incrowd endpoint is retained as a fallback because it mirrors
+  // the same competition data and may remain reachable when the primary host is blocked.
+  let apiErr = null;
+  try {
+    const data = await proxyFetch(
+      "https://api-live.euroleague.net/v2/competitions/" +
+        encodeURIComponent(comp) +
+        "/seasons/" +
+        encodeURIComponent(code) +
+        "/clubs",
+      30000,
+    );
+    const clubs = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+    if (clubs.length) {
+      _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), clubs });
+      return clubs;
+    }
+    apiErr = new Error(comp + " api-live clubs " + code + ": empty response");
+  } catch (e) {
+    apiErr = e;
+    if (typeof engineDebug === "function") {
+      engineDebug("api-live Euro clubs failed; trying Incrowd mirror", {
+        competition: comp,
+        season: code,
+        error: e?.message || String(e),
+      });
+    }
+  }
+
   try {
     const data = await proxyFetch(euroleagueClubsUrl(code, comp), 30000);
-    const clubs = Array.isArray(data?.data) ? data.data : [];
-    // FIX: a transient empty answer used to hide the whole club list for 1 hour
-    if (clubs.length) _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), clubs });
-    return clubs;
-  } catch (e) {
-    const _msg = e?.message || String(e);
+    const clubs = Array.isArray(data?.data) ? data.data : Array.isArray(data) ? data : [];
+    if (clubs.length) {
+      _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), clubs });
+      return clubs;
+    }
+    throw new Error(comp + " Incrowd clubs " + code + ": empty response");
+  } catch (incrowdErr) {
+    const _msg =
+      comp + " clubs unavailable from api-live and Incrowd. " +
+      "api-live: " + (apiErr?.message || String(apiErr)) + "; " +
+      "Incrowd: " + (incrowdErr?.message || String(incrowdErr));
     const _isSoftTimeout =
-      e?.name === "TimeoutError" ||
-      e?.name === "AbortError" ||
+      incrowdErr?.name === "TimeoutError" ||
+      incrowdErr?.name === "AbortError" ||
       /timeout/i.test(_msg) ||
       /abort/i.test(_msg);
     if (_isSoftTimeout) {
-                                                                             
-      if (typeof engineDebug === "function") {
-        engineDebug("fetchEuroleagueClubs soft-fail", { error: _msg });
-      }
+      if (typeof engineDebug === "function") engineDebug("fetchEuroleagueClubs soft-fail", { error: _msg });
     } else {
-      logDebug("fetchEuroleagueClubs failed", e);
+      logDebug("fetchEuroleagueClubs failed", new Error(_msg));
     }
     return [];
   }
