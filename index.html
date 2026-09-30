@@ -1,4 +1,3 @@
-A
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -19407,11 +19406,7 @@ async function pollLiveGameClocks() {
     if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
       const _uiLeague = (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
       if (!isIncrowdEuroAutoFetchLeague(_uiLeague)) {
-        // FIX: off-Euro tab used to skip Euro picks entirely (never live-polled / settled). Throttle to 1 poll/min per league instead.
-        window.__euroBgPollTs = window.__euroBgPollTs || {};
-        const _nowBg = Date.now();
-        if (_nowBg - (window.__euroBgPollTs[league] || 0) < 60000) continue;
-        window.__euroBgPollTs[league] = _nowBg;
+        continue;
       }
       try {
         if (typeof pollIncrowdEuroLiveForLeague === "function") {
@@ -27392,8 +27387,7 @@ async function fetchLeagueTeamCatalog(league) {
               primary: (lk === "eurocup" ? "U" : "E") + new Date().getFullYear(),
               competition: lk === "eurocup" ? "U" : "E",
             };
-      let clubs = await fetchEuroleagueClubs(seasons.primary, seasons.competition);
-      if ((!clubs || !clubs.length) && seasons.previous) clubs = await fetchEuroleagueClubs(seasons.previous, seasons.competition);
+      const clubs = await fetchEuroleagueClubs(seasons.primary, seasons.competition);
       return (clubs || [])
         .filter((c) => c && c.code && c.name)
         .map((c) => ({ id: String(c.code), name: String(c.name) }))
@@ -28903,13 +28897,6 @@ function euroleagueClubsUrl(seasonCode, competition) {
 }
 
 
-// FIX: statuses that are explicitly NOT "upcoming"/"live-able". Anything else that has no score is treated as upcoming,
-// so a new/unknown status string (pending, notstarted, tbd ...) can no longer empty the whole fixture list.
-const _EURO_NON_UPCOMING_STATUSES = new Set([
-  "playing", "live", "inprogress", "in_progress", "in play", "running", "active",
-  "postponed", "cancelled", "canceled", "suspended", "abandoned", "forfeited", "void",
-]);
-const _EURO_DEAD_STATUSES = new Set(["postponed", "cancelled", "canceled", "suspended", "abandoned", "forfeited", "void"]);
 function euroleagueGameIsPlayed(g) {
   const st = String(g?.status || "").toLowerCase();
   if (st === "result" || st === "played" || st === "closed" || st === "final") return true;
@@ -28938,7 +28925,7 @@ function euroleagueGameIsUpcoming(g) {
   const st = String(g?.status || "").toLowerCase();
   if (st === "result" || st === "played" || st === "closed" || st === "final") return false;
   if (euroleagueGameIsPlayed(g)) return false;
-  return !_EURO_NON_UPCOMING_STATUSES.has(st);
+  return st === "confirmed" || st === "scheduled" || st === "fixture" || !st;
 }
 
 function euroleagueGameIsLive(g) {
@@ -28954,7 +28941,7 @@ function euroleagueGameIsLive(g) {
     st === "active"
   )
     return true;
-  if (!_EURO_DEAD_STATUSES.has(st)) {
+  if (st === "confirmed" || st === "scheduled" || st === "fixture" || !st) {
                                                                                 
     if (g.quarter != null && String(g.quarter).trim() !== "") return true;
     if (g.remainingTime != null && String(g.remainingTime).trim() !== "" && String(g.remainingTime) !== "00:00")
@@ -29394,8 +29381,7 @@ async function fetchEuroleagueClubs(seasonCode, competition) {
   try {
     const data = await proxyFetch(euroleagueClubsUrl(code, comp), 30000);
     const clubs = Array.isArray(data?.data) ? data.data : [];
-    // FIX: a transient empty answer used to hide the whole club list for 1 hour
-    if (clubs.length) _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), clubs });
+    _euroleagueSeasonCache.set(cacheKey, { ts: Date.now(), clubs });
     return clubs;
   } catch (e) {
     const _msg = e?.message || String(e);
@@ -29463,143 +29449,22 @@ async function loadEuroleagueGamesForStats(league) {
   return merged;
 }
 
-
-// ===== FIX: club-code changes / cross-competition history / SofaScore backfill helpers =====
-function _euroMergeGames(a, b) {
-  const seen = new Set();
-  const out = [];
-  (a || []).concat(b || []).forEach((g) => {
-    const id = String((g && (g.id || g.identifier)) || "");
-    if (!id) { out.push(g); return; }
-    if (seen.has(id)) return;
-    seen.add(id);
-    out.push(g);
-  });
-  return out;
-}
-// code -> Set of FULL normalised club names (never abbreviations, so two clubs can't be merged by accident)
-function _euroFullNameIndex(clubs, allGames) {
-  const map = new Map();
-  const add = (side) => {
-    if (!side) return;
-    const code = String(side.code || "").toUpperCase();
-    if (!code) return;
-    const names = [side.name, side.clubPermanentName]
-      .map(_euroNormName)
-      .filter((n) => n.length >= 6);
-    if (!names.length) return;
-    if (!map.has(code)) map.set(code, new Set());
-    names.forEach((n) => map.get(code).add(n));
-  };
-  (clubs || []).forEach(add);
-  (allGames || []).forEach((g) => {
-    add(g && g.home);
-    add(g && g.away);
-  });
-  return map;
-}
-// All codes that belong to the same club (exact full-name match). Lets history survive a feed code change.
-function euroleagueCodeAliases(teamCode, allGames, clubs) {
-  const c = String(teamCode || "").toUpperCase();
-  const out = new Set(c ? [c] : []);
-  if (!c) return out;
-  const idx = _euroFullNameIndex(clubs, allGames);
-  const mine = idx.get(c);
-  if (!mine || !mine.size) return out;
-  for (const [code, names] of idx) {
-    if (code === c) continue;
-    for (const n of names) {
-      if (mine.has(n)) { out.add(code); break; }
-    }
-  }
-  return out;
-}
-function euroleagueResolveAliasSet(code, name, games, clubs, otherGames, otherClubs) {
-  const c = String(code || "").toUpperCase();
-  const hasOther = Array.isArray(otherGames) && otherGames.length > 0;
-  const allG = hasOther ? _euroMergeGames(games, otherGames) : games || [];
-  const allC = (clubs || []).concat(otherClubs || []);
-  const out = euroleagueCodeAliases(c, allG, allC);
-  if (hasOther) {
-    try {
-      const extra = resolveEuroleagueTeamCode(name, otherClubs || [], otherGames);
-      if (extra && euroleagueCodeMatchesName(extra, name, otherClubs || [], otherGames)) out.add(String(extra).toUpperCase());
-    } catch (_e) {}
-  }
-  return out;
-}
-// Best-effort last resort: last finished games from SofaScore (ALL competitions). Returns null on any failure.
-async function euroSofaBackfillStats(teamName, league, asOfFixture, fixtureGameId) {
-  try {
-    if (typeof proxyFetch !== "function" || typeof ssCollectSearchTeams !== "function" || typeof ssFetchTeamLastEvents !== "function") return null;
-    const q = String(teamName || "").trim();
-    if (!q) return null;
-    const parsed = await proxyFetch(
-      "https://api.sofascore.com/api/v1/search/teams?q=" + encodeURIComponent(q) + "&sport=basketball",
-      12000,
-    ).catch(() => null);
-    if (!parsed) return null;
-    const want = _euroNormName(q);
-    const cand = ssCollectSearchTeams(parsed).filter((t) => {
-      const n = _euroNormName(t.name);
-      return !!n && (n === want || (n.length >= 5 && want.length >= 5 && (n.includes(want) || want.includes(n))));
-    });
-    const picked = typeof ssPickTeamFromSearch === "function" ? ssPickTeamFromSearch(cand, league) : cand[0];
-    if (!picked) return null;
-    const events = await ssFetchTeamLastEvents(picked.id);
-    const tid = String(picked.id);
-    const fixtureMs = Date.parse(asOfFixture || "");
-    const pseudo = [];
-    (events || []).forEach((ev) => {
-      if (!ev) return;
-      if (typeof ssIsBasketballEvent === "function" && !ssIsBasketballEvent(ev)) return;
-      const tn = String(ev?.tournament?.name || ev?.tournament?.uniqueTournament?.name || "").toLowerCase();
-      if (/rapid|3x3|3-on-3|blitz|esport/.test(tn)) return;
-      const st = String(ev?.status?.type || "");
-      const done = st === "finished" || st === "afterExtraTime" || ev?.status?.finished === true;
-      if (!done) return;
-      const homeMe = String(ev?.homeTeam?.id || "") === tid;
-      const awayMe = String(ev?.awayTeam?.id || "") === tid;
-      if (!homeMe && !awayMe) return;
-      const hs = ssFinalFtPoints(ev.homeScore);
-      const as = ssFinalFtPoints(ev.awayScore);
-      if (!Number.isFinite(hs) || !Number.isFinite(as)) return;
-      const iso = ev.startTimestamp ? new Date(ev.startTimestamp * 1000).toISOString() : "";
-      if (!iso) return;
-      if (Number.isFinite(fixtureMs) && Date.parse(iso) >= fixtureMs) return;
-      pseudo.push({
-        id: "ssbf_" + String(ev.id),
-        status: "result",
-        date: iso,
-        home: { code: homeMe ? "SSBF_ME" : "SSBF_OPP", score: hs, quarters: {} },
-        away: { code: awayMe ? "SSBF_ME" : "SSBF_OPP", score: as, quarters: {} },
-      });
-    });
-    if (pseudo.length < 2) return null;
-    const stats = buildEuroleagueTeamStats("SSBF_ME", pseudo, null, asOfFixture, fixtureGameId, new Set(["SSBF_ME"]));
-    return stats ? { stats, sofaTeamId: tid, sofaTeamName: picked.name } : null;
-  } catch (_e) {
-    return null;
-  }
-}
-function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverride, excludeGameId, aliasCodes) {
+function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverride, excludeGameId) {
   const tCode = String(teamCode || "").toUpperCase();
   if (!tCode) return null;
-  const _codes = new Set(aliasCodes instanceof Set && aliasCodes.size ? Array.from(aliasCodes) : []);
-  _codes.add(tCode);
   const played = (allGames || [])
     .filter((g) => euroleagueGameIsPlayed(g))
     .filter((g) => {
       const hc = String(g?.home?.code || "").toUpperCase();
       const ac = String(g?.away?.code || "").toUpperCase();
-      return _codes.has(hc) || _codes.has(ac);
+      return hc === tCode || ac === tCode;
     })
     .filter((g) =>
       typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(g?.date) : true,
     )
     .map((g) => {
       const hc = String(g?.home?.code || "").toUpperCase();
-      const isHome = _codes.has(hc);
+      const isHome = hc === tCode;
       const me = isHome ? g.home : g.away;
       const opp = isHome ? g.away : g.home;
       const mq = me?.quarters || {};
@@ -29789,16 +29654,10 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
   };
 }
 
-function buildEuroleagueH2H(teamACode, teamBCode, allGames, aliasA, aliasB) {
+function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
   const tA = String(teamACode || "").toUpperCase();
   const tB = String(teamBCode || "").toUpperCase();
   if (!tA || !tB) return [];
-  const _setA = new Set(aliasA instanceof Set && aliasA.size ? Array.from(aliasA) : []);
-  const _setB = new Set(aliasB instanceof Set && aliasB.size ? Array.from(aliasB) : []);
-  _setA.add(tA);
-  _setB.add(tB);
-  _setA.delete(tB);
-  _setB.delete(tA);
   const minTs =
     typeof BB_GAME_HISTORY_MIN_TS === "number"
       ? BB_GAME_HISTORY_MIN_TS
@@ -29806,13 +29665,15 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames, aliasA, aliasB) {
   const games = (allGames || [])
     .filter((g) => euroleagueGameIsPlayed(g))
     .filter((g) => {
-      const _hc = String(g?.home?.code || "").toUpperCase();
-      const _ac = String(g?.away?.code || "").toUpperCase();
-      return (_setA.has(_hc) && _setB.has(_ac)) || (_setA.has(_ac) && _setB.has(_hc));
+      const codes = new Set([
+        String(g?.home?.code || "").toUpperCase(),
+        String(g?.away?.code || "").toUpperCase(),
+      ]);
+      return codes.has(tA) && codes.has(tB);
     })
     .map((g) => {
       const hc = String(g?.home?.code || "").toUpperCase();
-      const homeIsA = _setA.has(hc);
+      const homeIsA = hc === tA;
       const sideA = homeIsA ? g.home : g.away;
       const sideB = homeIsA ? g.away : g.home;
       const aq = sideA?.quarters || {};
@@ -29933,10 +29794,8 @@ function resolveEuroleagueTeamCode(nameOrCode, clubs, allGames) {
   // 1) exact club code / tv code / tla
   const upper = raw.toUpperCase();
   if (entries.has(upper)) return upper;
-  if (norm.length <= 4) {
-    const shortHits = [];
-    for (const [code, names] of entries) if (names.has(norm)) shortHits.push(code);
-    if (shortHits.length === 1) return shortHits[0];
+  for (const [code, names] of entries) {
+    if (names.has(norm) && norm.length <= 4) return code;
   }
 
   // 2) exact normalised name
@@ -29944,28 +29803,8 @@ function resolveEuroleagueTeamCode(nameOrCode, clubs, allGames) {
   for (const [code, names] of entries) if (names.has(norm)) exact.push(code);
   if (exact.length === 1) return exact[0];
   if (exact.length > 1) {
-    // FIX: the old code returned exact[0] (arbitrary) despite the comment. Prefer FULL-name hits; if several codes are the
-    // same club (code changed between seasons) take the current-season / most recent one; truly different clubs => reject.
-    const _full = _euroFullNameIndex(clubs, allGames);
-    const fullHits = exact.filter((c) => _full.get(c) && _full.get(c).has(norm));
-    const pool = fullHits.length ? fullHits : exact;
-    if (pool.length === 1) return pool[0];
-    const _al = euroleagueCodeAliases(pool[0], allGames, clubs);
-    if (!pool.every((c) => _al.has(c))) return null;
-    const _clubCodes = new Set((clubs || []).map((c) => String((c && c.code) || "").toUpperCase()));
-    const cur = pool.filter((c) => _clubCodes.has(c));
-    if (cur.length === 1) return cur[0];
-    let bestC = null;
-    let bestT = -1;
-    (allGames || []).forEach((g) => {
-      [g && g.home, g && g.away].forEach((s) => {
-        const c = String((s && s.code) || "").toUpperCase();
-        if (!pool.includes(c)) return;
-        const t = Date.parse((g && g.date) || "");
-        if (Number.isFinite(t) && t > bestT) { bestT = t; bestC = c; }
-      });
-    });
-    return bestC || pool[0];
+    // ambiguous exact name (e.g. same abbreviation on two clubs): prefer the one whose FULL name equals it
+    return exact[0];
   }
 
   // 3) careful fuzzy: only long names, best overlap ratio wins, ties are rejected
@@ -30113,8 +29952,6 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       loadEuroleagueGamesForStats(league),
       fetchEuroleagueClubs(primary, competition),
     ]);
-    // FIX: check staleness BEFORE anything is mutated (old code cleared fields / wrote caches first)
-    if (!_stillValid(null, null)) return;
     const _seasonReport = (allGames && allGames.__report) || { loaded: {}, failed: {} };
     const _failedSeasons = Object.keys(_seasonReport.failed || {});
     const _seasonWarn = _failedSeasons.length
@@ -30156,6 +29993,8 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
     if (String(teamAId) === String(teamBId))
       throw new Error("Team A and Team B cannot be the same team.");
 
+    selectedTeamIds.A = String(teamAId);
+    selectedTeamIds.B = String(teamBId);
     const _playedCount = (code) =>
       allGames.filter(
         (g) =>
@@ -30164,7 +30003,7 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
             String(g?.away?.code || "").toUpperCase() === code),
       ).length;
     const _noDataMsg = (name, code) =>
-      safeText(name) + " (" + safeText(code) + "): no " + _euroLabel + " history in the feeds (" + _playedCount(code) + " played) — enter the last-10 manually in the team box ❌";
+      safeText(name) + " (" + safeText(code) + "): only " + _playedCount(code) + " played game(s) found ❌";
     setStatusHTML('<span class="spinner"></span>Building last-10 from Incrowd feeds...', "loading");
 
     const selectedFixture = getSelectedFixtureOption();
@@ -30183,83 +30022,14 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
 
     const _asOfFixture = selectedFixture?.dataset?.eventDate || "";
     const _fixtureGameId = selectedFixture?.value || "";
-    // FIX: match a club across feed-code changes by exact full name
-    let aliasA = euroleagueCodeAliases(teamAId, allGames, clubs);
-    let aliasB = euroleagueCodeAliases(teamBId, allGames, clubs);
-    aliasA.delete(String(teamBId));
-    aliasB.delete(String(teamAId));
-    let aStats = buildEuroleagueTeamStats(teamAId, allGames, null, _asOfFixture, _fixtureGameId, aliasA);
-    let bStats = buildEuroleagueTeamStats(teamBId, allGames, null, _asOfFixture, _fixtureGameId, aliasB);
-    let aVenueStats = teamAVenue ? buildEuroleagueTeamStats(teamAId, allGames, teamAVenue, _asOfFixture, _fixtureGameId, aliasA) : null;
-    let bVenueStats = teamBVenue ? buildEuroleagueTeamStats(teamBId, allGames, teamBVenue, _asOfFixture, _fixtureGameId, aliasB) : null;
-    // FIX: thin history (new-season / newcomer teams). Backfills are always flagged and kept out of league caches.
-    const _backfill = { A: null, B: null };
-    const _cnt = (s) => (s && s.scored ? s.scored.length : 0);
-    let _otherGames = null;
-    let _otherClubs = [];
-    let _otherMeta = null;
-    if (_cnt(aStats) < 5 || _cnt(bStats) < 5) {
-      try {
-        const _otherKey = _euroMeta.competition === "U" ? "euroleague" : "eurocup";
-        _otherMeta = getIncrowdEuroCompetition(_otherKey);
-        setStatusHTML('<span class="spinner"></span>Thin history — checking ' + _otherMeta.label + " feeds...", "loading");
-        const _oCodes = getEuroleagueSeasonCodes(_otherKey);
-        const _oRes = await Promise.all([
-          loadEuroleagueGamesForStats(_otherKey),
-          fetchEuroleagueClubs(_oCodes.primary, _oCodes.competition),
-        ]);
-        if (!_stillValid(null, null)) return;
-        _otherGames = _oRes[0] || [];
-        _otherClubs = _oRes[1] || [];
-      } catch (_eOther) {
-        logDebug("euro other-competition backfill load failed", _eOther);
-        _otherGames = null;
-      }
-    }
-    const _extendSide = (side) => {
-      const isA = side === "A";
-      const code = isA ? teamAId : teamBId;
-      const name = isA ? _nameA : _nameB;
-      const cur = isA ? aStats : bStats;
-      if (_cnt(cur) >= 5 || !_otherGames || !_otherGames.length || !_otherMeta) return;
-      const merged = _euroMergeGames(allGames, _otherGames);
-      const al = euroleagueResolveAliasSet(code, name, allGames, clubs, _otherGames, _otherClubs);
-      al.delete(String(isA ? teamBId : teamAId));
-      const venue = isA ? teamAVenue : teamBVenue;
-      const st = buildEuroleagueTeamStats(code, merged, null, _asOfFixture, _fixtureGameId, al);
-      if (_cnt(st) > _cnt(cur)) {
-        const vs = venue ? buildEuroleagueTeamStats(code, merged, venue, _asOfFixture, _fixtureGameId, al) : null;
-        const info = { kind: "cross", label: _otherMeta.label + " feed (+" + _euroLabel + ")", source: _otherMeta.source || "euroleague" };
-        if (isA) { aStats = st; aVenueStats = vs; aliasA = al; _backfill.A = info; }
-        else { bStats = st; bVenueStats = vs; aliasB = al; _backfill.B = info; }
-      }
-    };
-    _extendSide("A");
-    _extendSide("B");
-    for (const _side of ["A", "B"]) {
-      const _cur = _side === "A" ? aStats : bStats;
-      if (_cnt(_cur) >= 2) continue;
-      const _nm = _side === "A" ? _nameA : _nameB;
-      try {
-        setStatusHTML('<span class="spinner"></span>No ' + _euroLabel + " history for " + safeText(_nm) + " — trying SofaScore backfill...", "loading");
-        const _bf = await euroSofaBackfillStats(_nm, league, _asOfFixture, _fixtureGameId);
-        if (!_stillValid(null, null)) return;
-        if (_bf && _bf.stats) {
-          const info = { kind: "sofascore", label: "SofaScore (all competitions)", source: "manual", detail: _bf.sofaTeamName + " #" + _bf.sofaTeamId };
-          if (_side === "A") { aStats = _bf.stats; aVenueStats = null; _backfill.A = info; }
-          else { bStats = _bf.stats; bVenueStats = null; _backfill.B = info; }
-        }
-      } catch (_eSofa) {
-        logDebug("euro sofascore backfill failed", _eSofa);
-      }
-    }
-    // No await below this line: from here on the function is synchronous, so the checks above are sufficient.
-    if (!_stillValid(null, null)) return;
-    selectedTeamIds.A = String(teamAId);
-    selectedTeamIds.B = String(teamBId);
-    if (!_backfill.A && aStats?.scored?.length) updateLeagueVolCache(league, aStats.scored, aStats.eventIds || null);
-    if (!_backfill.B && bStats?.scored?.length) updateLeagueVolCache(league, bStats.scored, bStats.eventIds || null);
-    if (!_backfill.A && aStats?.q1Scored?.length >= 2) {
+    const aStats = buildEuroleagueTeamStats(teamAId, allGames, null, _asOfFixture, _fixtureGameId);
+    const bStats = buildEuroleagueTeamStats(teamBId, allGames, null, _asOfFixture, _fixtureGameId);
+    const aVenueStats = teamAVenue ? buildEuroleagueTeamStats(teamAId, allGames, teamAVenue, _asOfFixture, _fixtureGameId) : null;
+    const bVenueStats = teamBVenue ? buildEuroleagueTeamStats(teamBId, allGames, teamBVenue, _asOfFixture, _fixtureGameId) : null;
+
+    if (aStats?.scored?.length) updateLeagueVolCache(league, aStats.scored, aStats.eventIds || null);
+    if (bStats?.scored?.length) updateLeagueVolCache(league, bStats.scored, bStats.eventIds || null);
+    if (aStats?.q1Scored?.length >= 2) {
       updateTeamQuarterShapeProfile(
         league,
         teamAName,
@@ -30270,7 +30040,7 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
         aStats.eventIds,
       );
     }
-    if (!_backfill.B && bStats?.q1Scored?.length >= 2) {
+    if (bStats?.q1Scored?.length >= 2) {
       updateTeamQuarterShapeProfile(
         league,
         teamBName,
@@ -30378,46 +30148,22 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
 
     _fillSide("a", aStats, aVenueStats, teamAVenue, teamAName);
     _fillSide("b", bStats, bVenueStats, teamBVenue, teamBName);
-    const _backfillNotes = [];
-    ["A", "B"].forEach((side) => {
-      const bf = _backfill[side];
-      if (!bf) return;
-      const nm = side === "A" ? teamAName : teamBName;
-      const note =
-        "⚠️ " + safeText(nm) + ": last-10 backfilled from " + bf.label + (bf.detail ? " (" + safeText(bf.detail) + ")" : "") +
-        " — not pure " + _euroLabel + " data" + (bf.kind === "sofascore" ? "; FT totals only, no quarter/half splits" : "") + ".";
-      _backfillNotes.push(note);
-      messages.push(note);
-      const tagEl = document.getElementById(side === "A" ? "aAutoTag" : "bAutoTag");
-      if (tagEl) tagEl.style.display = "none";
-    });
-    // FIX: still nothing for a side -> open that team box so the person can type the last-10
-    try {
-      if (!(aStats?.scored?.length > 0)) accordionOpen("teamASection");
-      else if (!(bStats?.scored?.length > 0)) accordionOpen("teamBSection");
-    } catch (_eAcc) {}
     fillVenueMarketInputs("a", aVenueStats, teamAVenue);
     fillVenueMarketInputs("b", bVenueStats, teamBVenue);
 
-    const _metaFor = (bf, vs) => {
-      const o = { source: bf ? bf.source : _euroMeta.source || "euroleague", venueReliable: bf ? false : !!vs?.venueReliable };
-      if (bf) { o.backfill = bf.kind; o.backfillLabel = bf.label; }
-      return { ft: Object.assign({}, o), h1: Object.assign({}, o) };
+    g_fetchMeta.A = {
+      ft: { source: _euroMeta.source || "euroleague", venueReliable: !!aVenueStats?.venueReliable },
+      h1: { source: _euroMeta.source || "euroleague", venueReliable: !!aVenueStats?.venueReliable },
     };
-    g_fetchMeta.A = _metaFor(_backfill.A, aVenueStats);
-    g_fetchMeta.B = _metaFor(_backfill.B, bVenueStats);
+    g_fetchMeta.B = {
+      ft: { source: _euroMeta.source || "euroleague", venueReliable: !!bVenueStats?.venueReliable },
+      h1: { source: _euroMeta.source || "euroleague", venueReliable: !!bVenueStats?.venueReliable },
+    };
 
     setStatusHTML('<span class="spinner"></span>Scanning ' + _euroLabel + " H2H...", "loading");
     let h2hGames = [];
     try {
-      h2hGames = buildEuroleagueH2H(teamAId, teamBId, allGames, aliasA, aliasB);
-      if (h2hGames.length < 2 && _otherGames && _otherGames.length) {
-        const _mergedAll = _euroMergeGames(allGames, _otherGames);
-        const _hA = euroleagueResolveAliasSet(teamAId, _nameA, allGames, clubs, _otherGames, _otherClubs);
-        const _hB = euroleagueResolveAliasSet(teamBId, _nameB, allGames, clubs, _otherGames, _otherClubs);
-        const _alt = buildEuroleagueH2H(teamAId, teamBId, _mergedAll, _hA, _hB);
-        if (_alt.length > h2hGames.length) h2hGames = _alt;
-      }
+      h2hGames = buildEuroleagueH2H(teamAId, teamBId, allGames);
     } catch (e) {
       logDebug(_euroLabel + " H2H failed", e);
     }
@@ -30621,7 +30367,6 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       h2hGames,
     });
     if (_seasonWarn) fetchAuditIssues.push(_seasonWarn);
-    _backfillNotes.forEach((n) => { if (!fetchAuditIssues.includes(n)) fetchAuditIssues.push(n); });
     setFetchAuditIssues(fetchAuditIssues);
 
     const aGameCount = Math.min(aStats?.scored?.length || 0, aStats?.allowed?.length || 0);
@@ -40048,9 +39793,7 @@ function onLeagueChange() {
   const _espnEl = document.getElementById("espnSection");
   if (_espnEl) _espnEl.style.display = _isEspnAuto ? "block" : "none";
   const _sofaEl = document.getElementById("sofascoreManualSection");
-  // FIX: Euro leagues auto-fetch but must keep the manual SofaScore section as a backup route
-  const _euroManualBackup = typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league);
-  if (_sofaEl) _sofaEl.style.display = !league || (_isEspnAuto && !_euroManualBackup) ? "none" : "block";
+  if (_sofaEl) _sofaEl.style.display = !league || _isEspnAuto ? "none" : "block";
 
   document.getElementById("aQSection").style.display = isQs || !isNbaOrNcaa ? "block" : "none";
   document.getElementById("bQSection").style.display = isQs || !isNbaOrNcaa ? "block" : "none";
