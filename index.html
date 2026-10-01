@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7014,12 +7013,12 @@ const TUNABLE_PARAM_REGISTRY = {
     lastVerifiedAt: null,
   },
   underEdgeFactor: {
-    value: 1.2,
-    min: 1.0,
-    max: 1.6,
+    value: 1.5,
+    min: 1.3,
+    max: 2.5,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "q1", "q2", "q3", "q4", "team_a", "team_b"],
+    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b", "h1_team_a", "h1_team_b"],
     description:
       "ISSUE-030 VERIFY: per-league under threshold multiplier (UNDER harder than OVER). Default 1.2 global; league override path via getParam(underEdgeFactor, league). No silent behavior change — ensure Number.isFinite before multiply.",
     lastVerifiedAt: null,
@@ -7340,6 +7339,30 @@ const TUNABLE_PARAM_REGISTRY = {
     scope: "global",
     appliesTo: ["handicap_h2"],
     description: "Point edge threshold required for 2H Handicap picks (WNBA-only market)",
+    lastVerifiedAt: null,
+  },
+
+  maxVolRatioOver: {
+    value: 1.5, min: 1.0, max: 3.0, type: "scalar", scope: "global",
+    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b"],
+    description: "Volatility-ratio cap above which an Over is forced to NO PLAY (applyBBMarketGate). Provisional - validate on settled data.",
+    lastVerifiedAt: null,
+  },
+  maxVolRatioUnder: {
+    value: 1.25, min: 0.8, max: 3.0, type: "scalar", scope: "global",
+    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b"],
+    description: "Volatility-ratio cap above which an Under is forced to NO PLAY (stricter than Over). Provisional - validate on settled data.",
+    lastVerifiedAt: null,
+  },
+
+  fatigueShortRestPenalty: {
+    value: -1.0,
+    min: -4.0,
+    max: 0,
+    type: "scalar",
+    scope: "global",
+    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b"],
+    description: "Point signal (per team, before market scaling) for 1 day rest after a short previous gap. Live-wired in buildTeamMarketIntelSignal.",
     lastVerifiedAt: null,
   },
 
@@ -8882,7 +8905,7 @@ let INJURY_OPPONENT_BOOST_FACTOR =
   getParam("injuryOppBoostFactor") ?? getTunableConstant("INJURY_OPPONENT_BOOST_FACTOR", 0.2);
 
 /* CALCULATION SECTION */
-let UNDER_EDGE_FACTOR = getParam("underEdgeFactor") ?? getTunableConstant("UNDER_EDGE_FACTOR", 1.2);
+let UNDER_EDGE_FACTOR = getParam("underEdgeFactor") ?? getTunableConstant("UNDER_EDGE_FACTOR", 1.5);
 
                                
 const TUNING_GRID = {
@@ -10662,7 +10685,7 @@ function computeQuarterProjection({
       projA *= injA;
       projB *= injB;
       if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function" && typeof computeIntelligencePack === "function") {
-        const _qIntel = computeIntelligencePack(league, null, _parsed);
+        const _qIntel = computeIntelligencePack(league, null, _parsed, "q1");
         const _qVolR = Number.isFinite(qVolRatio) ? qVolRatio : 1;
         projA = applyDampedIntelSignal(projA, buildTeamMarketIntelSignal(_qIntel, "A").signal, _qVolR);
         projB = applyDampedIntelSignal(projB, buildTeamMarketIntelSignal(_qIntel, "B").signal, _qVolR);
@@ -11195,7 +11218,7 @@ function assertInvariant(condition, label, context) {
 /* CALCULATION SECTION */
 function getMetricForMarket(marketKey) {
   const key = String(marketKey || "").toLowerCase();
-  if (key === "ft" || key === "h1" || key === "team_a" || key === "team_b" || key.startsWith("q")) {
+  if (key === "ft" || key === "h1" || key === "team_a" || key === "team_b" || key === "h2" || key === "h1_team_a" || key === "h1_team_b" || key.startsWith("q")) {
     return { decision: "brier", projection: "rmse" };
   }
 
@@ -11485,7 +11508,7 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
     venueStrongGames: [8, 9, 10, 11, 12],
     venueModerateWeight: [0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
     venueStrongWeight: [0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
-    underEdgeFactor: [1.0, 1.1, 1.2, 1.3, 1.4],
+    underEdgeFactor: [1.3, 1.4, 1.5, 1.6, 1.8],
     injuryOppBoostFactor: [0.1, 0.15, 0.2, 0.25, 0.3],
     edgeFTPointThreshold: [4.0, 5.0, 6.0, 7.0, 8.0],
     edgeH1PointThreshold: [5.0, 6.0, 7.0, 8.0, 9.0],
@@ -17530,6 +17553,134 @@ function applySiblingMarketContradictionGate(picks, rawMarketInputs) {
       forceKeys(["q3", "q4", "h2"], "Market contradiction: Q3+Q4 vs 2H lines");
     }
   }
+  /* BB-FIX: extra cross-market line consistency */
+  const _fin = (v) => Number.isFinite(v);
+  const _ta = lineOf("team_a"), _tb = lineOf("team_b"), _ft = lineOf("ft");
+  if (_fin(_ta) && _fin(_tb) && _fin(_ft) && Math.abs(_ta + _tb - _ft) > 6.0) {
+    forceKeys(["team_a", "team_b", "ft"], "Market contradiction: Team A + Team B vs FT lines");
+  }
+  if (_fin(h1) && _fin(h2) && _fin(_ft) && Math.abs(h1 + h2 - _ft) > 6.0) {
+    forceKeys(["h1", "h2", "ft"], "Market contradiction: 1H + 2H vs FT lines");
+  }
+  const _h1a = lineOf("h1_team_a"), _h1b = lineOf("h1_team_b");
+  if (_fin(_h1a) && _fin(_h1b) && _fin(h1) && Math.abs(_h1a + _h1b - h1) > 4.0) {
+    forceKeys(["h1_team_a", "h1_team_b", "h1"], "Market contradiction: 1H Team A + 1H Team B vs 1H lines");
+  }
+  return picks;
+}
+
+
+/* BB-FIX: Under strictness + volatility gate + market-trap gate. Allows or NO PLAYs only; never flips a pick. */
+function bbSampleStats(arr) {
+  const v = (Array.isArray(arr) ? arr : []).map(Number).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
+  const n = v.length;
+  if (!n) return { n: 0 };
+  const mean = v.reduce((a, b) => a + b, 0) / n;
+  const sd = Math.sqrt(v.reduce((a, b) => a + (b - mean) * (b - mean), 0) / Math.max(1, n - 1));
+  const med = n % 2 ? v[(n - 1) / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
+  const share = (f) => v.reduce((a, x) => a + f(x), 0) / n;
+  return { n, v, mean, sd: Math.max(sd, 1), med, min: v[0], max: v[n - 1], share };
+}
+function bbTrapSample(mk) {
+  try {
+    const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || null;
+    if (!root) return null;
+    if (typeof resolvePredictionAsOf === "function" && resolvePredictionAsOf(root?.predictionDate || root?.asOf || root?.eventDate, root)) return null; /* replay: no leakage */
+    const num = (x) => (Array.isArray(x) ? x.map(Number) : []);
+    const tot = (side, sk, ak) => {
+      const o = root?.[side]?.overall || {};
+      const sc = num(o[sk]), al = num(o[ak]);
+      if (!sc.length || sc.length !== al.length) return [];
+      return sc.map((v, i) => v + al[i]).filter((v) => Number.isFinite(v) && v > 0);
+    };
+    if (mk === "team_a") return getOverallSeries("A", 10);
+    if (mk === "team_b") return getOverallSeries("B", 10);
+    if (mk === "h1_team_a") return num(root?.A?.overall?.h1Scored10).filter((v) => v > 0);
+    if (mk === "h1_team_b") return num(root?.B?.overall?.h1Scored10).filter((v) => v > 0);
+    if (mk === "ft") return tot("A", "ftScored10", "ftAllowed10").concat(tot("B", "ftScored10", "ftAllowed10"));
+    if (mk === "h1") return tot("A", "h1Scored10", "h1Allowed10").concat(tot("B", "h1Scored10", "h1Allowed10"));
+    if (mk === "h2") return tot("A", "h2Scored10", "h2Allowed10").concat(tot("B", "h2Scored10", "h2Allowed10"));
+  } catch (_e) {}
+  return null;
+}
+/* BB-FIX: virtual settlement of blocked picks. Call bbShadowSettle(eventId, marketKey, actualValue) after a game ends; bbShadowReport() shows whether blocks were right. */
+function bbShadowSettle(eventId, marketKey, actual) {
+  try {
+    const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
+    arr.forEach((e) => {
+      if (e.result || String(e.eventId) !== String(eventId) || e.marketKey !== String(marketKey).toLowerCase() || !Number.isFinite(Number(actual))) return;
+      const a = Number(actual);
+      e.actual = a;
+      e.result = a === e.line ? "PUSH" : ((e.side === "OVER") === (a > e.line) ? "WOULD_WIN" : "WOULD_LOSE");
+    });
+    localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr));
+  } catch (_e) {}
+}
+function bbShadowReport() {
+  try {
+    const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]").filter((e) => e.result && e.result !== "PUSH");
+    const w = arr.filter((e) => e.result === "WOULD_WIN").length;
+    return { settled: arr.length, wouldWin: w, wouldLose: arr.length - w, blockCorrectRate: arr.length ? (arr.length - w) / arr.length : null };
+  } catch (_e) { return null; }
+}
+window.bbShadowSettle = bbShadowSettle; window.bbShadowReport = bbShadowReport;
+function applyBBMarketGate(picks, rawMarketInputs, league) {
+  if (!Array.isArray(picks)) return picks;
+  const VOL_CAP = { OVER: Number(getParam("maxVolRatioOver", league)) || 1.5, UNDER: Number(getParam("maxVolRatioUnder", league)) || 1.25 };
+  picks.forEach((p) => {
+    try {
+      if (!p || !p.marketKey || p.pick === "NO PLAY" || p.pick === "—" || p.marketIntegrity) return;
+      const mk = String(p.marketKey).toLowerCase();
+      const txt = String(p.pick || "").toUpperCase();
+      const side = txt.startsWith("UNDER") ? "UNDER" : txt.startsWith("OVER") ? "OVER" : "";
+      if (!side) return;
+      const L = Number(p.line);
+      const sig = []; let blocks = 0; let warns = 0; let baitAligned = false;
+      const add = (id, level, note) => { sig.push({ id, level, note }); if (level === "BLOCK") blocks++; else if (level === "WARN") warns++; };
+      const vr = Number(p.volatility) / Number(p.volLimit);
+      if (Number.isFinite(vr) && vr > VOL_CAP[side]) add("VOL", "BLOCK", "volatility ratio " + vr.toFixed(2) + " > cap " + VOL_CAP[side]);
+      if (side === "UNDER" && typeof getConfidenceRank === "function") {
+        const g = String(p.confidenceGrade || p.confidence || "").trim().charAt(0).toUpperCase();
+        if (/[ABCD]/.test(g) && getConfidenceRank(g) < getConfidenceRank("B")) add("UNDER_CONF", "BLOCK", "Under needs confidence grade B or better (got " + g + ")");
+      }
+      const S = bbSampleStats(bbTrapSample(mk));
+      if (S.n < 5) {
+        if (bbTrapSample(mk) !== null && side === "UNDER") add("T8", "BLOCK", "insufficient evidence for Under (n=" + S.n + ")");
+        else if (bbTrapSample(mk) !== null) add("T8", "INFO", "thin sample n=" + S.n);
+      } else if (Number.isFinite(L) && L > 0) {
+        const win = side === "UNDER" ? S.share((x) => (x < L ? 1 : x === L ? 0.5 : 0)) : S.share((x) => (x > L ? 1 : x === L ? 0.5 : 0));
+        if (side === "UNDER" && S.min >= L) add("T1", "BLOCK", "team never scored below " + L + " in sample");
+        if (side === "OVER" && S.max <= L) add("T1", "BLOCK", "team never scored above " + L + " in sample");
+        const bk = side === "UNDER" ? [0.60, 0.70] : [0.45, 0.55];
+        if (win < bk[0]) add("T2", "BLOCK", side + " hit-rate " + (win * 100).toFixed(0) + "% at line " + L);
+        else if (win < bk[1]) add("T2", "WARN", side + " hit-rate " + (win * 100).toFixed(0) + "% at line " + L);
+        const meta = typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta((rawMarketInputs || {})[p.marketKey] || "") : null;
+        if (meta && meta.isRange && !meta.invalid) {
+          const pBelowLow = S.share((x) => (x < meta.low ? 1 : 0)), pAboveHigh = S.share((x) => (x > meta.high ? 1 : 0));
+          const pAboveMid = S.share((x) => (x > L ? 1 : 0)), pBelowMid = 1 - pAboveMid;
+          const underBait = pBelowLow <= 0.1 && pAboveMid >= 0.7;
+          const overBait = pAboveHigh <= 0.1 && pBelowMid >= 0.7;
+          if (underBait && side === "UNDER") add("T3", "BLOCK", "range " + meta.low + "-" + meta.high + " looks like Under bait (team rarely < " + meta.low + ")");
+          if (overBait && side === "OVER") add("T3", "BLOCK", "range " + meta.low + "-" + meta.high + " looks like Over bait (team rarely > " + meta.high + ")");
+          if ((underBait && side === "OVER") || (overBait && side === "UNDER")) baitAligned = true;
+        }
+        const adverse = (side === "UNDER" ? S.med - Number(p.proj) : Number(p.proj) - S.med) / S.sd;
+        if (Number.isFinite(adverse)) { if (adverse >= 1.5) add("T4", "BLOCK", "projection disagrees with history by " + adverse.toFixed(1) + " SD"); else if (adverse >= 1.0) add("T4", "WARN", "projection disagrees with history by " + adverse.toFixed(1) + " SD"); }
+      }
+      const status = blocks > 0 || (side === "UNDER" && warns >= 1) || (side === "OVER" && warns >= 2) ? "BLOCK" : warns ? "WARNING" : "CLEAR";
+      p.marketIntegrity = { status, side, signals: sig, baitAligned };
+      if (status === "BLOCK") {
+        const why = "TRAP BLOCK: " + sig.filter((x) => x.level !== "INFO").map((x) => x.note).join("; ");
+        p.blockedPick = p.pick;
+        try {
+          const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
+          arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side, line: L, proj: p.proj, reason: why });
+          localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr.slice(-300)));
+        } catch (_e) {}
+        forcePickNoPlayWithNote(p, why);
+      }
+    } catch (_ge) { if (typeof engineDebug === "function") engineDebug("applyBBMarketGate failed", { error: String(_ge && _ge.message || _ge) }); }
+  });
   return picks;
 }
 
@@ -24957,8 +25108,20 @@ function selectAutoH2HWindow(games, league) {
   else if (avail >= 5 && stable(m5, m4)) chosen = 5;
   else chosen = Math.min(4, avail);
   if (era.indexOf("2022") >= 0) chosen = Math.min(chosen, 5);
-  const picked = pool.slice(0, Math.max(0, chosen));
+  let picked = pool.slice(0, Math.max(0, chosen));
+  /* BB-FIX: competition/season-type awareness. Regular season(2) and postseason(3) games are kept; same-type games are preferred when >=3 exist. */
+  const _bbTypes = {};
+  picked.forEach(function (g) { const t = g && g.seasonType != null ? String(g.seasonType) : "?"; _bbTypes[t] = (_bbTypes[t] || 0) + 1; });
+  const _bbKeys = Object.keys(_bbTypes).filter(function (k) { return k !== "?"; });
+  let _bbMixed = _bbKeys.length > 1;
+  if (_bbMixed) {
+    const domKey = _bbKeys.sort(function (a, b) { return _bbTypes[b] - _bbTypes[a]; })[0];
+    const sameType = pool.filter(function (g) { return g && String(g.seasonType) === domKey; });
+    if (sameType.length >= 3) { picked = sameType.slice(0, Math.max(3, chosen)); _bbMixed = false; }
+  }
   const decision = {
+    mixedCompetition: _bbMixed,
+    seasonTypeCounts: _bbTypes,
     games: picked,
     n: picked.length,
     era: era,
@@ -24967,7 +25130,8 @@ function selectAutoH2HWindow(games, league) {
       era +
       " auto-n=" +
       picked.length +
-      (Number.isFinite(m4) ? " (last4 total " + m4.toFixed(1) + ")" : ""),
+      (Number.isFinite(m4) ? " (last4 total " + m4.toFixed(1) + ")" : "") +
+      (_bbMixed ? " | MIXED season types " + JSON.stringify(_bbTypes) : ""),
   };
   try { window.__bbAutoH2H = decision; } catch (_e) {}
   return decision;
@@ -25302,7 +25466,7 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
 /* CALCULATION SECTION */
 function getSampleTier(...arrays) {
   if (!arrays.length) return "insufficient";
-  const counts = arrays.map((a) => Array.isArray(a) ? a.reduce((n,v) => n + (Number.isFinite(Number(v)) ? 1 : 0), 0) : 0);
+  const counts = arrays.map((a) => Array.isArray(a) ? a.reduce((n,v) => n + (bbStrictFinite(v) ? 1 : 0), 0) : 0);
   const minCount = Math.min(...counts);
   if (minCount <= 0) return "insufficient";
   if (minCount >= 10) return "full";
@@ -25312,7 +25476,7 @@ function getSampleTier(...arrays) {
 
 /* CALCULATION SECTION */
 function finiteCount(arr) {
-  return Array.isArray(arr) ? arr.reduce((n, v) => n + (Number.isFinite(Number(v)) ? 1 : 0), 0) : 0;
+  return Array.isArray(arr) ? arr.reduce((n, v) => n + (bbStrictFinite(v) ? 1 : 0), 0) : 0;
 }
 
 /* CALCULATION SECTION */
@@ -25525,6 +25689,12 @@ function getOverallSeries(side, limit, contextData = null, manualOverride = null
   return manualRaw.filter(v => Number.isFinite(v) && v > 0).slice(0, maxN);
 }
 
+/* BB-FIX: strict finite check. Number(null)===0, so null/''/false must NOT count as numbers. */
+function bbStrictFinite(v) {
+  if (typeof v === "number") return Number.isFinite(v);
+  if (typeof v === "string") return v.trim() !== "" && Number.isFinite(Number(v));
+  return false;
+}
 /* CALCULATION SECTION */
 function applyEdgeMult(edge, league, explicitMultiplier = null) {
   if (!Number.isFinite(edge)) return edge;
@@ -25562,7 +25732,7 @@ function getPick(edge, line, league, marketKey, context = {}) {
   const _uefRaw = context?.underEdgeFactorOverride != null
     ? context.underEdgeFactorOverride
     : (getParam("underEdgeFactor", league, marketKey) ?? UNDER_EDGE_FACTOR);
-  const _underEdgeFactor = Number.isFinite(Number(_uefRaw)) ? Number(_uefRaw) : 1.2;
+  const _underEdgeFactor = Math.max(1.3, Number.isFinite(Number(_uefRaw)) ? Number(_uefRaw) : 1.5); /* BB-FIX: hard floor 1.3 so no tuner can make Unders easy */
 
   if (edge < 0) pointThreshold *= _underEdgeFactor;
 
@@ -25940,6 +26110,8 @@ function getConfidenceMarketFamily(marketKey) {
   if (mk === "team_a" || mk === "team_b") return "TEAM";
   if (/^q[1-4]$/.test(mk)) return "Q";
   if (mk === "winner" || mk === "handicap" || mk === "handicap_h1" || mk === "handicap_h2") return "MARGIN";
+  if (mk === "h1") return "TOTAL_H1";
+  if (mk === "h2") return "TOTAL_H2";
   return "TOTAL";
 }
 function getConfidenceModelScopeKey(league, marketKey) {
@@ -25979,6 +26151,7 @@ function getConfidenceWinProbability(
     if (_liveBundle && _versionOk && _schemaOk && _liveBundle.coeff) {
       const models = _liveBundle.coeff;
       if (models[_familyScope]) { coeff = models[_familyScope]; _resolvedScope = _familyScope; }
+      else if (_family.indexOf("TOTAL_") === 0 && models[String(league || "global").toLowerCase() + "::TOTAL"]) { _resolvedScope = String(league || "global").toLowerCase() + "::TOTAL"; coeff = models[_resolvedScope]; }
       else if (models[_globalFamilyScope]) { coeff = models[_globalFamilyScope]; _resolvedScope = _globalFamilyScope; }
       else { coeff = {}; _resolvedScope = "family_unfitted:" + _family; }
     } else if (_liveBundle) {
@@ -26106,22 +26279,25 @@ function isConfidenceCoeffFitted(league, marketKey = "ft") {
     const _family = getConfidenceMarketFamily(marketKey);
     const _familyScope = getConfidenceModelScopeKey(league, marketKey);
     const _globalFamilyScope = "global::" + _family;
-    const _resolvedScope = models[_familyScope] ? _familyScope : _globalFamilyScope;
+    const _legacyTotalScope = String(league || "global").toLowerCase() + "::TOTAL";
+    const _resolvedScope = models[_familyScope] ? _familyScope : (_family.indexOf("TOTAL_") === 0 && models[_legacyTotalScope] ? _legacyTotalScope : _globalFamilyScope);
     const coeff = models[_resolvedScope] || null;
     const _requiredCoeffKeys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
     const _keysFitted = !!(coeff && _requiredCoeffKeys.every((k) => Number.isFinite(coeff[k])));
     if (!_keysFitted) return false;
     let _coeffN = 0;
+    let _bbTooFew = false;
     try {
       const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
                                                                                           
                                                                                       
       _coeffN = Number(nMap[_resolvedScope] || 0);
+      if (Object.prototype.hasOwnProperty.call(nMap, _resolvedScope) && _coeffN < 50) _bbTooFew = true; /* BB-FIX: min 50 samples */
     } catch (_e) {
       _coeffN = 0;
     }
                                                                               
-    return !!_keysFitted;
+    return !!_keysFitted && !_bbTooFew;
   } catch (e) {
     engineDebug("isConfidenceCoeffFitted failed", { league, error: e?.message || String(e) });
     return false;
@@ -26719,10 +26895,10 @@ function buildTeamMarketIntelSignal(pack, teamSide) {
     ? Number(pack.marketScale || 1)
     : 1;
   if (Number.isFinite(restDays) && restDays < 1) {
-    signal -= 2.0 * scale;
+    signal -= Math.abs(Number(getParam("fatigueB2BPenalty") ?? -2.5)) * scale;
   } else if (Number.isFinite(restDays) && restDays === 1) {
     const prevGap = Number(teamSide === "A" ? pack.previousGapDaysA : pack.previousGapDaysB);
-    if (Number.isFinite(prevGap) && prevGap < 2) signal -= 1.0 * scale;
+    if (Number.isFinite(prevGap) && prevGap < 2) signal -= Math.abs(Number(getParam("fatigueShortRestPenalty") ?? -1.0)) * scale;
   }
   return { signal: clampNumber(signal, -3 * scale, 0) };
 }
@@ -26889,7 +27065,7 @@ function computeIntelligencePack(league, lines = {}, parsedInput = null, marketK
     restDaysA,
     restDaysB,
     backToBack,
-    marketScale: String(marketKey || "ft").toLowerCase() === "ft" ? 1 : 0.5,
+    marketScale: (function (m) { m = String(m || "ft").toLowerCase(); return m === "ft" ? 1 : (/^q[1-4]$/.test(m) || m === "q" ? 0.25 : 0.5); })(marketKey),
     previousGapDaysA: ctxA.previousGapDays,
     previousGapDaysB: ctxB.previousGapDays,
     hasAnyData: ctxA.restDays != null || ctxB.restDays != null,
@@ -28527,6 +28703,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         advancedQ: advancedQ,
 
         date: ref.date || null,
+        seasonType: ref.seasonType ?? null,
         venueCity: ref.venueCity || null,
         venueState: ref.venueState || null,
       };
@@ -28753,6 +28930,9 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
         comp?.status?.type?.state === "post";
 
       if (!done) return;
+      /* BB-FIX: exclude preseason (season type 1) from H2H unless the league itself is preseason/friendly/summer */
+      const _bbSt = Number(ev?.seasonType?.type ?? ev?.season?.type);
+      if (_bbSt === 1 && !/pre|friendly|summer/i.test(String(leagueKey))) return;
 
       const competitors = comp?.competitors || [];
       if (competitors.length < 2) return;
@@ -28768,6 +28948,7 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
       candidateMap.set(String(ev.id), {
         id: String(ev.id),
         date: rawDate,
+        seasonType: Number.isFinite(_bbSt) ? _bbSt : null,
       });
     });
   });
@@ -33944,7 +34125,12 @@ function computeFTProjection({
     isFinite(avgOrNaN(ctxB.ortg10)) &&
     isFinite(avgOrNaN(ctxB.drtg10)) &&
     finiteCount(ctxA.ortg10) >= 5 &&
-    finiteCount(ctxB.ortg10) >= 5;
+    finiteCount(ctxB.ortg10) >= 5 &&
+    finiteCount(ctxA.drtg10) >= 5 &&
+    finiteCount(ctxB.drtg10) >= 5 &&
+    isFetchedAuthoritative("A", _ctxRoot) &&
+    isFetchedAuthoritative("B", _ctxRoot);
+  try { window.__bbAdvDiag = { market: "ft", league: league, enabled: !!(hasRealRatings && hasRealPace && isEspnLeague), reason: (hasRealRatings && hasRealPace && isEspnLeague) ? "all checks passed" : (!isEspnLeague ? "league has no advanced-stat feed" : (!hasRealRatings ? "ORTG/DRTG <5 per team or source not fetched" : "pace sample <5 or implausible")), fallback: (hasRealRatings && hasRealPace && isEspnLeague) ? "none" : "STANDARD PROJECTION" }; } catch (_e) {}
 
   engineDebug("FT advanced stats availability", {
     hasRealPace,
@@ -34393,6 +34579,7 @@ function compute1HProjection({
     ? getPeriodAdvancedSeries(ctxB, "h1")
     : { ortg: [], drtg: [], pace: [], source: "none" };
   const _nativeAdvH1 = _advA1.source === "h1" && _advB1.source === "h1" &&
+    isFetchedAuthoritative("A", _ctxRoot, "h1") && isFetchedAuthoritative("B", _ctxRoot, "h1") &&
     Number.isFinite(avgOrNaN(_advA1.ortg)) && Number.isFinite(avgOrNaN(_advA1.drtg)) &&
     Number.isFinite(avgOrNaN(_advB1.ortg)) && Number.isFinite(avgOrNaN(_advB1.drtg));
   const _pA1 = avgOrNaN(getPaceSeriesValue(_advA1.pace, _advA1.paceUnit || "possessions_per_game"));
@@ -34576,7 +34763,7 @@ function compute1HProjection({
       : (Number.isFinite(Number((_ctxRoot.A || {}).restDays)) ? Number((_ctxRoot.A || {}).restDays) : null);
     const _restB1 = Number.isFinite(Number(config?.restDaysB)) ? Number(config.restDaysB)
       : (Number.isFinite(Number((_ctxRoot.B || {}).restDays)) ? Number((_ctxRoot.B || {}).restDays) : null);
-    const _intelPack1 = { restDaysA: _restA1, restDaysB: _restB1, marketScale: 1, previousGapDaysA: (_ctxRoot.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot.B||{}).previousGapDays };
+    const _intelPack1 = { restDaysA: _restA1, restDaysB: _restB1, marketScale: 0.5, previousGapDaysA: (_ctxRoot.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot.B||{}).previousGapDays };
     const _volR1 = Number.isFinite(combinedVol) ? combinedVol : 1;
     if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function") {
       projA1H = applyDampedIntelSignal(projA1H, buildTeamMarketIntelSignal(_intelPack1, "A").signal, _volR1);
@@ -34712,6 +34899,7 @@ function compute2HProjection({
     ? getPeriodAdvancedSeries(ctxB, "h2")
     : { ortg: [], drtg: [], pace: [], source: "none" };
   const _nativeAdvH2 = _advA2.source === "h2" && _advB2.source === "h2" &&
+    isFetchedAuthoritative("A", _ctxRoot2H, "h2") && isFetchedAuthoritative("B", _ctxRoot2H, "h2") &&
     Number.isFinite(avgOrNaN(_advA2.ortg)) && Number.isFinite(avgOrNaN(_advA2.drtg)) &&
     Number.isFinite(avgOrNaN(_advB2.ortg)) && Number.isFinite(avgOrNaN(_advB2.drtg));
   const _pA2 = avgOrNaN(getPaceSeriesValue(_advA2.pace, _advA2.paceUnit || "possessions_per_game"));
@@ -34899,7 +35087,7 @@ function compute2HProjection({
       : (Number.isFinite(Number((_ctxRoot2H.A || {}).restDays)) ? Number((_ctxRoot2H.A || {}).restDays) : null);
     const _restB2 = Number.isFinite(Number(config?.restDaysB)) ? Number(config.restDaysB)
       : (Number.isFinite(Number((_ctxRoot2H.B || {}).restDays)) ? Number((_ctxRoot2H.B || {}).restDays) : null);
-    const _intelPack2 = { restDaysA: _restA2, restDaysB: _restB2, marketScale: 1, previousGapDaysA: (_ctxRoot2H.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot2H.B||{}).previousGapDays };
+    const _intelPack2 = { restDaysA: _restA2, restDaysB: _restB2, marketScale: 0.5, previousGapDaysA: (_ctxRoot2H.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot2H.B||{}).previousGapDays };
     const _volR2 = Number.isFinite(combinedVol2) ? combinedVol2 : 1;
     if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function") {
       projA2H = applyDampedIntelSignal(projA2H, buildTeamMarketIntelSignal(_intelPack2, "A").signal, _volR2);
@@ -35444,7 +35632,7 @@ function calibrateConfidenceModel() {
 
   const models = {};
   const modelSampleSizes = {};
-  const _families = ["TOTAL", "TEAM", "Q", "MARGIN"];
+  const _families = ["TOTAL", "TOTAL_H1", "TOTAL_H2", "TEAM", "Q", "MARGIN"];
   const _scopeForPick = (p) => getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
   const _globalFamilyScope = (family) => "global::" + family;
 
@@ -35465,7 +35653,7 @@ function calibrateConfidenceModel() {
       const lm = runGD(ld);
       const base = models[_globalFamilyScope(family)];
       if (lm && base) {
-        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TEAM" ? "team_a" : family === "Q" ? "q1" : "winner");
+        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TOTAL_H1" ? "h1" : family === "TOTAL_H2" ? "h2" : family === "TEAM" ? "team_a" : family === "Q" ? "q1" : "winner");
         models[key] = empiricalBayesShrink(lm, ld.length, base, 40);
         modelSampleSizes[key] = ld.length;
       } else if (lm) {
@@ -39048,6 +39236,7 @@ async function runEngine() {
 
                                                                                                         
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
+    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league);
 
     finalPicksForDisplay.forEach((p) => {
       p.smartLineNoPlay = p.displayPick === "NO PLAY" && p.pick !== "NO PLAY";
@@ -39209,6 +39398,7 @@ async function runEngine() {
                                                                               
                                                                                         
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
+    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league);
 
     const paceIcon = ftCalc.pace > 100 ? "🔥" : "🧊";
 
@@ -39271,7 +39461,7 @@ async function runEngine() {
       const errors = [];
       const warnings = [];
       const rows = Array.isArray(picks) ? picks : [];
-      const finite = (v) => Number.isFinite(Number(v));
+      const finite = (v) => bbStrictFinite(v);
       const prov = getConfidenceModelProvenance(leagueKey, "ft");
       if (!meta || !meta.homeTeam || !meta.awayTeam) {
         warnings.push("teams/events not identified");
