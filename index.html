@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -3046,7 +3045,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
       id="afdbBtn"
       title="Auto-Fetch Debugger"
       aria-label="Open Auto-Fetch Debugger"
-      onclick="if (typeof AFDB !== 'undefined' && AFDB.open) AFDB.open();"
+      onclick="try { if (typeof AFDB !== 'undefined' && AFDB.open && AFDB.open()) return; if (typeof openTrackerModal === 'function') { openTrackerModal(); setTrackerModalView('debug'); } } catch (e) { console.error('[AFDB] open failed', e); }"
     >
       🔬
     </button>
@@ -4017,10 +4016,20 @@ const BB_LOCK_REGISTRY = Object.freeze([
           type="button"
           id="trackerMilitaryRaidBtn"
           class="tracker-insights-btn"
-          title="Single-click: Military Raid · Double-click: Toggle debug view"
+          title="Military Raid"
           onclick="triggerTrackerMilitaryRaid()"
         >
           🚨
+        </button>
+        <button
+          type="button"
+          id="trackerDebugBtn"
+          class="tracker-insights-btn"
+          title="Engine Debug Centre"
+          aria-label="Open Engine Debug Centre"
+          onclick="toggleTrackerDebugView()"
+        >
+          🔬
         </button>
         <button
           type="button"
@@ -4161,6 +4170,201 @@ const BB_LOCK_REGISTRY = Object.freeze([
     style="width: 100%; height: 100%; display: flex; flex-direction: column; overflow: hidden"
   ></div>
 </div>
+
+<script>
+/* ENGINE DEBUG CENTRE (AFDB) — self-contained diagnostic module. Never throws into the main engine. */
+(function () {
+  "use strict";
+  var MAX = 600;
+  var S = { entries: [], fetches: [], tests: [], filter: "all", live: true, tab: "status", timer: null, lastOk: { run: null, fetch: null }, errors: [] };
+  function esc(v) { return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function now() { return new Date().toISOString(); }
+  function safe(fn, fb) { try { return fn(); } catch (e) { return fb; } }
+  function g(name) { try { return (0, eval)("typeof " + name + " !== 'undefined' ? " + name + " : undefined"); } catch (e) { return undefined; } }
+
+  function log(level, scope, event, payload) {
+    try {
+      S.entries.unshift({ ts: now(), level: String(level || "INFO").toUpperCase(), scope: String(scope || "APP"), event: String(event || ""), payload: payload == null ? "" : (typeof payload === "string" ? payload : safe(function () { return JSON.stringify(payload); }, String(payload))) });
+      if (S.entries.length > MAX) S.entries.length = MAX;
+      if (S.open) schedule();
+    } catch (e) {}
+  }
+  /* classify a fetch outcome into a distinct failure class (never a generic FETCH FAILED) */
+  function classify(r) {
+    if (r.neverInitiated) return "REQUEST_NEVER_INITIATED";
+    if (r.timedOut) return "REQUEST_TIMED_OUT";
+    if (r.networkError) return "NETWORK_ERROR";
+    if (r.status && (r.status < 200 || r.status >= 300)) return "HTTP_STATUS_" + r.status;
+    if (r.parseError) return "MALFORMED_DATA";
+    if (r.rejected) return "PARSED_BUT_REJECTED";
+    if (r.droppedBeforeCalc) return "VALIDATED_BUT_NOT_IN_CALCULATION";
+    return "OK";
+  }
+  function recordFetch(r) {
+    try {
+      r = r || {}; r.ts = now(); r.failureClass = classify(r);
+      S.fetches.unshift(r); if (S.fetches.length > 200) S.fetches.length = 200;
+      if (r.failureClass === "OK") S.lastOk.fetch = r.ts;
+      log(r.failureClass === "OK" ? "INFO" : "ERROR", "FETCH", r.failureClass + " " + (r.label || r.url || ""), { status: r.status, ms: r.ms, records: r.records });
+    } catch (e) {}
+  }
+  /* passive instrumentation of window.fetch (pass-through; never alters behaviour) */
+  (function wrapFetch() {
+    try {
+      if (!window.fetch || window.fetch.__afdbWrapped) return;
+      var orig = window.fetch.bind(window);
+      var w = function (input, init) {
+        var url = typeof input === "string" ? input : (input && input.url) || "";
+        var t0 = Date.now();
+        return orig(input, init).then(function (res) {
+          recordFetch({ label: "fetch", url: String(url).slice(0, 200), status: res.status, ms: Date.now() - t0, provider: safe(function () { return new URL(url, location.href).host; }, "") });
+          return res;
+        }, function (err) {
+          var aborted = err && (err.name === "AbortError" || /timeout/i.test(String(err.message)));
+          recordFetch({ label: "fetch", url: String(url).slice(0, 200), ms: Date.now() - t0, timedOut: !!aborted, networkError: !aborted, error: err && err.message });
+          throw err;
+        });
+      };
+      w.__afdbWrapped = true; window.fetch = w;
+    } catch (e) {}
+  })();
+  window.addEventListener("error", function (e) { S.errors.unshift({ ts: now(), msg: e.message, src: (e.filename || "") + ":" + (e.lineno || "") }); S.errors.length = Math.min(S.errors.length, 100); log("ERROR", "RUNTIME", e.message, e.filename + ":" + e.lineno); });
+  window.addEventListener("unhandledrejection", function (e) { var m = e.reason && e.reason.message ? e.reason.message : String(e.reason); S.errors.unshift({ ts: now(), msg: "Unhandled rejection: " + m }); S.errors.length = Math.min(S.errors.length, 100); log("ERROR", "PROMISE", "Unhandled rejection", m); });
+
+  /* ---------- tests ---------- */
+  function T(name, fn, inputs, expected, fnName) {
+    var r = { name: name, inputs: inputs, expected: expected, actual: "", pass: false, error: "", fn: fnName || "" };
+    try { var out = fn(); r.actual = typeof out === "string" ? out : JSON.stringify(out); r.pass = r.actual === String(expected) || r.actual === JSON.stringify(expected); }
+    catch (e) { r.error = (e && e.message) || String(e); r.actual = "EXCEPTION"; }
+    return r;
+  }
+  function runTests(group) {
+    var res = [];
+    var deps = ["getPick", "getMarginPick", "strictNum", "computeCombinedMarginVolatility", "getVolatilityRatioForSeries", "evaluateMarketIntegrityGate", "getHistoricalScoresForMarket", "setTrackerModalView", "renderTrackerAnalytics", "engineDebug"];
+    if (!group || group === "startup") deps.forEach(function (d) { res.push(T("Startup: " + d + " defined", function () { return typeof g(d); }, d, "function", d)); });
+    if (!group || group === "volatility") {
+      res.push(T("strictNum(null) is NaN", function () { return String(g("strictNum")(null)); }, "null", "NaN", "strictNum"));
+      res.push(T("strictNum('') is NaN", function () { return String(g("strictNum")("")); }, "''", "NaN", "strictNum"));
+      res.push(T("strictNum(true) is NaN", function () { return String(g("strictNum")(true)); }, "true", "NaN", "strictNum"));
+      res.push(T("strictNum(0) keeps genuine zero", function () { return String(g("strictNum")(0)); }, "0", "0", "strictNum"));
+      res.push(T("strictNum('75') is 75", function () { return String(g("strictNum")("75")); }, "'75'", "75", "strictNum"));
+      res.push(T("Required volatility: null cannot pass getPick", function () { return g("getPick")(8, 150, "nba", "ft", { volatility: null, volatilityLimit: 12, volatilityRequired: true }); }, "vol=null", "NO PLAY", "getPick"));
+      res.push(T("Volatility required by default (undefined) in getPick", function () { return g("getPick")(8, 150, "nba", "ft", { volatilityLimit: 12 }); }, "vol=undefined, no flag", "NO PLAY", "getPick"));
+      res.push(T("Required volatility: null cannot pass getMarginPick", function () { return g("getMarginPick")(6, "nba", "winner", { volatility: null, volatilityLimit: 12, volatilityRequired: true }); }, "vol=null", "NO PLAY", "getMarginPick"));
+      res.push(T("Combined SD: both missing -> NaN (not 0)", function () { return String(g("computeCombinedMarginVolatility")(NaN, NaN)); }, "NaN,NaN", "NaN", "computeCombinedMarginVolatility"));
+      res.push(T("Combined SD: null + 5 -> NaN", function () { return String(g("computeCombinedMarginVolatility")(null, 5)); }, "null,5", "NaN", "computeCombinedMarginVolatility"));
+      res.push(T("Combined SD: 3,4 -> 5", function () { return String(g("computeCombinedMarginVolatility")(3, 4)); }, "3,4", "5", "computeCombinedMarginVolatility"));
+      res.push(T("Series with null/blank/boolean -> NaN volatility", function () { return String(g("getVolatilityRatioForSeries")([null, "", true, false], 12)); }, "[null,'',true,false]", "NaN", "getVolatilityRatioForSeries"));
+    }
+    if (!group || group === "storage") {
+      res.push(T("Storage read/write", function () { localStorage.setItem("__afdb_t", "1"); var v = localStorage.getItem("__afdb_t"); localStorage.removeItem("__afdb_t"); return v; }, "localStorage", "1", "localStorage"));
+    }
+    if (!group || group === "integrity") {
+      res.push(T("Historical score trace returns an array", function () { return Array.isArray(g("getHistoricalScoresForMarket")("ft")); }, "ft", true, "getHistoricalScoresForMarket"));
+      res.push(T("Debug logs reachable", function () { return Array.isArray(g("g_engineDebugLog")) && Array.isArray(g("g_trackerDebugLog")); }, "engine+tracker logs", true, "g_engineDebugLog"));
+    }
+    return res;
+  }
+  function runSelfTest() { S.tests = runTests(); S.lastOk.run = now(); var f = S.tests.filter(function (t) { return !t.pass; }).length; log(f ? "ERROR" : "INFO", "SELFTEST", f + " failed / " + S.tests.length + " total"); render(); return S.tests; }
+  function runCalcTest() { S.tests = runTests("volatility"); log("INFO", "SELFTEST", "calculation test ran"); render(); return S.tests; }
+  function runTestFetch() {
+    var t0 = Date.now();
+    if (typeof fetch !== "function") { recordFetch({ label: "probe", neverInitiated: true }); render(); return Promise.resolve(false); }
+    var ctl = typeof AbortController === "function" ? new AbortController() : null;
+    var to = setTimeout(function () { try { ctl && ctl.abort(); } catch (e) {} }, 7000);
+    return fetch(location.href.split("#")[0], { method: "GET", cache: "no-store", signal: ctl ? ctl.signal : undefined })
+      .then(function (r) { clearTimeout(to); S.lastOk.fetch = now(); render(); return r.ok; })
+      .catch(function () { clearTimeout(to); render(); return false; });
+  }
+
+  /* ---------- views ---------- */
+  function lines() {
+    var out = [];
+    S.entries.forEach(function (e) { out.push({ ts: e.ts, level: e.level, text: "[" + e.scope + "] " + e.event + (e.payload ? " | " + e.payload : "") }); });
+    (g("g_engineDebugLog") || []).forEach(function (l) { out.push({ ts: "", level: sevOf(l), text: "[ENGINE] " + l }); });
+    (g("g_trackerDebugLog") || []).forEach(function (l) { out.push({ ts: "", level: sevOf(l), text: "[TRACKER] " + l }); });
+    return out;
+  }
+  function sevOf(l) { var f = g("getDebugSeverity"); var v = f ? safe(function () { return f(l); }, "") : ""; return v === "error" ? "ERROR" : v === "warn" ? "WARN" : v === "ok" ? "INFO" : "INFO"; }
+  function btn(act, label, danger) { return '<button type="button" data-afdb="' + act + '" style="margin:3px;padding:9px 11px;font-size:12px;font-weight:800;border-radius:7px;border:1px solid ' + (danger ? "#a33" : "#335") + ';background:#111;color:' + (danger ? "#f66" : "#8bf") + ';cursor:pointer">' + label + "</button>"; }
+  function statusHtml() {
+    var deps = [["Engine core (getPick)", "getPick"], ["Margin gate", "getMarginPick"], ["Strict numeric helper", "strictNum"], ["Market integrity gate", "evaluateMarketIntegrityGate"], ["Tracker renderer", "renderTrackerAnalytics"]];
+    var rows = deps.map(function (d) { var ok = typeof g(d[1]) === "function"; return "<div>" + (ok ? "🟡" : "🔴") + " " + esc(d[0]) + " — " + (ok ? "defined (run self-test to confirm it works)" : "MISSING") + "</div>"; }).join("");
+    var failed = S.tests.filter(function (t) { return !t.pass; }).length;
+    var verdict = !S.tests.length ? "⚪ No self-test run yet. Defined ≠ working." : failed ? "🔴 " + failed + " test(s) failing" : "🟢 All " + S.tests.length + " executed tests passed";
+    var storage = safe(function () { localStorage.setItem("__afdb", "1"); localStorage.removeItem("__afdb"); return "available"; }, "UNAVAILABLE");
+    return "<div style='line-height:1.7'><b>" + verdict + "</b><br>" + rows + "<div>Storage: " + storage + "</div><div>Last self-test: " + esc(S.lastOk.run || "never") + "</div><div>Last successful fetch: " + esc(S.lastOk.fetch || "never") + "</div><div>Runtime errors captured: " + S.errors.length + "</div></div>" +
+      (S.errors.length ? "<pre style='white-space:pre-wrap;color:#f88'>" + esc(S.errors.slice(0, 8).map(function (e) { return e.ts + " " + e.msg + " " + (e.src || ""); }).join("\n")) + "</pre>" : "");
+  }
+  function fetchHtml() {
+    if (!S.fetches.length) return "<div style='color:#999'>No fetches recorded yet. Network requests are logged automatically; use “Run fetch test”.</div>";
+    return S.fetches.slice(0, 60).map(function (f) { var ok = f.failureClass === "OK"; return "<div style='border-bottom:1px solid #222;padding:5px 0'><b style='color:" + (ok ? "#6d6" : "#f77") + "'>" + esc(f.failureClass) + "</b> " + esc(f.label || "") + "<br><span style='color:#999'>" + esc(f.url || "") + " · status " + esc(f.status == null ? "—" : f.status) + " · " + esc(f.ms == null ? "—" : f.ms + "ms") + (f.error ? " · " + esc(f.error) : "") + "</span></div>"; }).join("");
+  }
+  function testsHtml() {
+    if (!S.tests.length) return "<div style='color:#999'>No tests executed. Use “Run full system self-test”.</div>";
+    return S.tests.map(function (t) { return "<div style='border-bottom:1px solid #222;padding:5px 0'>" + (t.pass ? "✅" : "❌") + " <b>" + esc(t.name) + "</b><br><span style='color:#999'>fn: " + esc(t.fn) + " · in: " + esc(t.inputs) + " · expected: " + esc(t.expected) + " · actual: " + esc(t.actual) + (t.error ? " · error: " + esc(t.error) : "") + "</span></div>"; }).join("");
+  }
+  function logsHtml() {
+    var ls = lines().filter(function (l) { return S.filter === "all" || l.level === S.filter; }).slice(0, 250);
+    if (!ls.length) return "<div style='color:#999'>No log lines for this filter.</div>";
+    return ls.map(function (l) { var c = l.level === "ERROR" ? "#f77" : l.level === "WARN" ? "#fc6" : "#bbb"; return "<div style='color:" + c + ";padding:2px 0;word-break:break-word'>" + esc((l.ts ? l.ts.slice(11, 19) + " " : "") + l.level + " " + l.text) + "</div>"; }).join("");
+  }
+  function integrityHtml() {
+    var rows = ["MISSING_REQUIRED_VOLATILITY", "INVALID_VOLATILITY_LIMIT", "INVALID_NUMERIC_INPUT", "INVALID_TEAM_IDENTITY", "COMPETITION_MISMATCH", "INSUFFICIENT_VALID_SAMPLE", "INVALID_MARKET_LINE", "ADVANCED_STAT_PROVENANCE_FAILED", "CALCULATION_NON_FINITE", "MARKET_INTEGRITY_CONFLICT"];
+    var all = lines();
+    return rows.map(function (code) { var n = all.filter(function (l) { return l.text.indexOf(code) >= 0; }).length; return "<div>" + (n ? "🔴" : "⚪") + " " + code + " — " + n + " log hit(s)</div>"; }).join("") + "<div style='color:#999;margin-top:6px'>Latest NO PLAY reasons appear in the Logs tab with their code.</div>";
+  }
+  function body() {
+    var t = S.tab;
+    return t === "status" ? statusHtml() : t === "fetch" ? fetchHtml() : t === "integrity" ? integrityHtml() : t === "tests" ? testsHtml() : logsHtml();
+  }
+  function tabBtn(id, label) { return '<button type="button" data-afdb="tab:' + id + '" style="padding:8px 10px;font-size:12px;font-weight:800;border:0;border-bottom:2px solid ' + (S.tab === id ? "#4ea9ff" : "transparent") + ';background:none;color:' + (S.tab === id ? "#4ea9ff" : "#aaa") + '">' + label + "</button>"; }
+  function html(embedded) {
+    return "<div style='font-family:ui-monospace,Consolas,monospace;color:#ddd;font-size:12px;height:100%;display:flex;flex-direction:column;min-height:0'>" +
+      "<div style='display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #333'><b style='font-size:14px'>🔬 ENGINE DEBUG CENTRE</b>" + (embedded ? "" : btn("close", "✕ Close")) + "</div>" +
+      "<div style='padding:6px 8px;border-bottom:1px solid #222'>" + btn("diag", "Run diagnostics") + btn("fetchtest", "Run fetch test") + btn("calctest", "Run calculation test") + btn("selftest", "Run full self-test") + btn("export", "Export report") + btn("copy", "Copy report") + btn("clear", "Clear logs", true) +
+      " <label style='font-size:11px'><input type='checkbox' data-afdb='live' " + (S.live ? "checked" : "") + "> live</label> " +
+      "<select data-afdb='filter' style='background:#111;color:#ddd;border:1px solid #444;padding:6px;border-radius:6px'>" + ["all", "ERROR", "WARN", "INFO"].map(function (o) { return "<option value='" + o + "'" + (S.filter === o ? " selected" : "") + ">" + (o === "all" ? "All severities" : o) + "</option>"; }).join("") + "</select></div>" +
+      "<div style='display:flex;overflow-x:auto;border-bottom:1px solid #222'>" + tabBtn("status", "Status") + tabBtn("fetch", "Fetch") + tabBtn("integrity", "Integrity") + tabBtn("tests", "Tests") + tabBtn("logs", "Logs") + "</div>" +
+      "<div id='afdbBody' style='flex:1;min-height:0;overflow:auto;padding:10px 12px;-webkit-overflow-scrolling:touch'>" + body() + "</div></div>";
+  }
+  function report() {
+    return JSON.stringify({ generatedAt: now(), userAgent: navigator.userAgent, status: { lastOk: S.lastOk, runtimeErrors: S.errors }, tests: S.tests, fetches: S.fetches.slice(0, 100), logs: lines().slice(0, 400) }, null, 2);
+  }
+  var host = null, embeddedMode = false;
+  function render() { try { var el = host || document.getElementById("afdbPanel"); if (!el) return; el.innerHTML = html(embeddedMode); wire(el); } catch (e) { try { console.error("[AFDB] render failed", e); } catch (_e) {} } }
+  function schedule() { if (!S.live) return; clearTimeout(S.timer); S.timer = setTimeout(function () { var b = document.getElementById("afdbBody"); if (b) b.innerHTML = body(); }, 400); }
+  function act(a, el) {
+    try {
+      if (a === "close") close();
+      else if (a === "diag") { runSelfTest(); }
+      else if (a === "fetchtest") runTestFetch();
+      else if (a === "calctest") runCalcTest();
+      else if (a === "selftest") runSelfTest();
+      else if (a === "export") { var blob = new Blob([report()], { type: "application/json" }); var u = URL.createObjectURL(blob); var a1 = document.createElement("a"); a1.href = u; a1.download = "engine-debug-report-" + Date.now() + ".json"; document.body.appendChild(a1); a1.click(); setTimeout(function () { URL.revokeObjectURL(u); a1.remove(); }, 500); }
+      else if (a === "copy") { var tx = report(); (navigator.clipboard && navigator.clipboard.writeText ? navigator.clipboard.writeText(tx) : Promise.reject()).then(function () { log("INFO", "DEBUG", "report copied"); }, function () { log("WARN", "DEBUG", "clipboard unavailable; use Export"); }); }
+      else if (a === "clear") { if (confirm("Clear all engine, tracker and debugger logs? This cannot be undone.")) { S.entries = []; S.fetches = []; S.errors = []; safe(function () { window.g_engineDebugLog.length = 0; }); try { (0, eval)("g_engineDebugLog = []; g_trackerDebugLog = [];"); } catch (e) {} render(); } }
+      else if (a.indexOf("tab:") === 0) { S.tab = a.slice(4); render(); }
+    } catch (e) { log("ERROR", "DEBUG", "action failed: " + a, e && e.message); }
+  }
+  function wire(root) {
+    root.querySelectorAll("[data-afdb]").forEach(function (el) {
+      var a = el.getAttribute("data-afdb");
+      if (a === "live") el.addEventListener("change", function () { S.live = el.checked; });
+      else if (a === "filter") el.addEventListener("change", function () { S.filter = el.value; render(); });
+      else el.addEventListener("click", function () { act(a, el); });
+    });
+  }
+  function open() { try { var ov = document.getElementById("afdbOverlay"); if (!ov) return false; host = null; embeddedMode = false; S.open = true; ov.style.display = "flex"; render(); return true; } catch (e) { return false; } }
+  function close() { var ov = document.getElementById("afdbOverlay"); if (ov) ov.style.display = "none"; S.open = false; }
+  /* embedded renderer used by the tracker "Debug" view */
+  function renderInto(el) { try { host = el; embeddedMode = true; S.open = true; el.innerHTML = html(true); wire(el); host = null; embeddedMode = false; return true; } catch (e) { el.innerHTML = "<div style='padding:12px;color:#f88'>Debug view failed to render: " + esc(e && e.message) + "</div>"; return false; } }
+
+  window.AFDB = { open: open, close: close, log: log, recordFetch: recordFetch, runTestFetch: runTestFetch, runSelfTest: runSelfTest, renderInto: renderInto, getReport: report };
+  log("INFO", "DEBUG", "AFDB initialised");
+})();
+</script>
+
 
 
 
@@ -5380,6 +5584,12 @@ function updateTeamUIFromStats(side, stats) {
   AppState.context.data[side].drtg10 = Array.isArray(stats.drtg10) ? stats.drtg10.slice(0, 10) : [];
   AppState.context.data[side].pace10 = Array.isArray(stats.pace10) ? stats.pace10.slice(0, 10) : [];
   AppState.context.data[side].advancedProvenance10 = Array.isArray(stats.advancedProvenance10) ? stats.advancedProvenance10.slice(0, 10) : [];
+  AppState.context.data[side].advancedProvenance10_h1 = Array.isArray(stats.advancedProvenance10_h1) ? stats.advancedProvenance10_h1.slice(0, 10) : [];
+  AppState.context.data[side].advancedProvenance10_h2 = Array.isArray(stats.advancedProvenance10_h2) ? stats.advancedProvenance10_h2.slice(0, 10) : [];
+  AppState.context.data[side].advancedProvenance10_q1 = Array.isArray(stats.advancedProvenance10_q1) ? stats.advancedProvenance10_q1.slice(0, 10) : [];
+  AppState.context.data[side].advancedProvenance10_q2 = Array.isArray(stats.advancedProvenance10_q2) ? stats.advancedProvenance10_q2.slice(0, 10) : [];
+  AppState.context.data[side].advancedProvenance10_q3 = Array.isArray(stats.advancedProvenance10_q3) ? stats.advancedProvenance10_q3.slice(0, 10) : [];
+  AppState.context.data[side].advancedProvenance10_q4 = Array.isArray(stats.advancedProvenance10_q4) ? stats.advancedProvenance10_q4.slice(0, 10) : [];
   AppState.context.data[side].advancedSource = String(stats.advancedSource || "");
   AppState.context.data[side].advancedTeamId = String(stats.advancedTeamId || "");
   AppState.context.data[side].advancedLeagueKey = String(stats.advancedLeagueKey || "").toLowerCase();
@@ -9614,7 +9824,7 @@ function calibrateEngineConstants() {
           lineVal = lines.bLine;
           marketKeyForPick = "team_b";
         }
-        const decision = getPick(edge, lineVal, league, marketKeyForPick, { volatility: Number(pick.volatility), volatilityLimit: getMarketVolLimit(league, marketKeyForPick), volatilityRequired: true });
+        const decision = getPick(edge, lineVal, league, marketKeyForPick, { volatility: strictNum(pick.volatility), volatilityLimit: getMarketVolLimit(league, marketKeyForPick), volatilityRequired: true });
         const baselineWon = pick.resultStatus === "win";
         const baselineLost = pick.resultStatus === "loss";
         const candidatePlayed = decision !== "NO PLAY";
@@ -9664,6 +9874,9 @@ function calibrateEngineConstants() {
     TUNABLE_CONSTANTS_GRID.UNDER_EDGE_FACTOR.forEach((candidate) => {
       const decision = getPick(edge, lineVal, pick.league, pick.marketKey, {
         underEdgeFactorOverride: candidate,
+        volatility: strictNum(pick.volatility),
+        volatilityLimit: getMarketVolLimit(pick.league, pick.marketKey),
+        volatilityRequired: true,
       });
       if (decision === "NO PLAY") return;
       const wouldWin = numericActual < lineVal;
@@ -11061,7 +11274,7 @@ function evaluatePickWithParams(pick, paramOverrides) {
       };
     }
 
-    const _replayVol = Number(pick.volatility);
+    const _replayVol = strictNum(pick.volatility);
     const _replayVolLimit = getMarketVolLimit(league, marketKey);
     const decision = getPick(edge, lineVal, league, marketKey, {
       underEdgeFactorOverride: paramOverrides?.underEdgeFactor,
@@ -16152,6 +16365,7 @@ function updateTrackerInsightsButton() {
     else if (isTrackerReportView()) titleEl.textContent = "Engine Report";
     else if (isTrackerConfigsView()) titleEl.textContent = "Verified Configs";
     else if (isTrackerHealthView()) titleEl.textContent = "Engine Health";
+    else if (isTrackerDebugView()) titleEl.textContent = "Engine Debug Centre";
   }
 
   if (militaryBtn) {
@@ -16300,7 +16514,7 @@ function setTrackerModalView(view) {
 }
 
 function toggleTrackerDebugView() {
-  if (isTrackerDebugView()) setTrackerModalView("report");
+  if (isTrackerDebugView()) setTrackerModalView("picks");
   else setTrackerModalView("debug");
 }
 
@@ -17244,8 +17458,39 @@ function parseMarketLine(val) {
 }
 
 /* CALCULATION SECTION */
+/* MARKET INTEGRITY: trace historical score observations from the verified team series into the live integrity gate.
+   Totals use per-game totals (scored+allowed from the SAME game); team totals use the team's own scored series. */
+function getHistoricalScoresForMarket(marketKey) {
+  try {
+    const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || null;
+    if (!root) return [];
+    const mk = String(marketKey || "");
+    const clean = (arr) => (Array.isArray(arr) ? arr.map(strictNum).filter((v) => Number.isFinite(v) && v > 0) : []);
+    const gameTotals = (side, key) => {
+      const sc = clean(getManualSeries(side, key, null, root));
+      const al = clean(getManualAllowedSeries(side, key, null, root));
+      const n = Math.min(sc.length, al.length);
+      const out = [];
+      for (let i = 0; i < n; i++) out.push(sc[i] + al[i]);
+      return out;
+    };
+    if (["ft", "h1", "h2", "q1", "q2", "q3", "q4"].includes(mk)) return gameTotals("A", mk).concat(gameTotals("B", mk));
+    if (mk === "team_a") return clean(getManualSeries("A", "ft", null, root));
+    if (mk === "team_b") return clean(getManualSeries("B", "ft", null, root));
+    if (mk === "h1_team_a") return clean(getManualSeries("A", "h1", null, root));
+    if (mk === "h1_team_b") return clean(getManualSeries("B", "h1", null, root));
+    return [];
+  } catch (e) {
+    if (typeof engineDebug === "function") engineDebug("historical score trace failed", { market: marketKey, error: e?.message || String(e) });
+    return [];
+  }
+}
+
 function applySmartLineToPick(pickRow, rawInput, league, wideRangeState = null) {
   if (!pickRow) return pickRow;
+  if (!Array.isArray(pickRow.historicalScores) || !pickRow.historicalScores.length) {
+    pickRow = { ...pickRow, historicalScores: getHistoricalScoresForMarket(pickRow.marketKey) };
+  }
   const meta =
     wideRangeState && wideRangeState.marketKey === String(pickRow.marketKey || "")
       ? wideRangeState.rangeMeta || null
@@ -18639,8 +18884,8 @@ function repairMisclassifiedNoPlayTrackedPicks(activeList, archivedList, opts) {
       if (!isFinite(edgeVal)) return;
       if (!isWinnerMkt && (!isFinite(lineVal) || lineVal <= 0)) return;
       const fixedPick = isMargin
-        ? getMarginPick(edgeVal, p.league, p.marketKey, { volatility: Number(p.volatility), volatilityLimit: getMarketVolLimit(p.league, p.marketKey), volatilityRequired: true })
-        : getPick(edgeVal, lineVal, p.league, p.marketKey, { blowoutGap: p.gameBlowoutGap, _edgeAlreadyScaled: true, volatility: Number(p.volatility), volatilityLimit: getMarketVolLimit(p.league, p.marketKey), volatilityRequired: true });
+        ? getMarginPick(edgeVal, p.league, p.marketKey, { volatility: strictNum(p.volatility), volatilityLimit: getMarketVolLimit(p.league, p.marketKey), volatilityRequired: true })
+        : getPick(edgeVal, lineVal, p.league, p.marketKey, { blowoutGap: p.gameBlowoutGap, _edgeAlreadyScaled: true, volatility: strictNum(p.volatility), volatilityLimit: getMarketVolLimit(p.league, p.marketKey), volatilityRequired: true });
       if (!fixedPick || fixedPick === "NO PLAY") return;
       p.predictionText = formatMarginPickForDisplay(
         fixedPick,
@@ -21795,6 +22040,25 @@ function renderTrackerAnalytics() {
     syncTrackerModalView();
     panel.classList.remove("tracker-hidden");
     panel.style.display = "block";
+    g_lastRenderedTrackerView = currentView;
+    return;
+  }
+
+  if (currentView === "debug") {
+    /* dedicated Debug renderer: never depends on fetch/calculation state and cannot crash the engine */
+    try {
+      syncTrackerModalView();
+      panel.classList.remove("tracker-hidden");
+      panel.style.display = "block";
+      if (typeof AFDB !== "undefined" && typeof AFDB.renderInto === "function") {
+        AFDB.renderInto(panel);
+      } else {
+        const _lines = [...(g_engineDebugLog || []), ...(g_trackerDebugLog || [])].slice(0, 200);
+        panel.innerHTML = "<pre style='white-space:pre-wrap;font-size:11px;padding:10px;color:#ddd'>" + escapeHtml(_lines.join("\n") || "No debug lines.") + "</pre>";
+      }
+    } catch (_dbgErr) {
+      try { panel.innerHTML = "<div style='padding:12px;color:#f88'>Debug view error: " + escapeHtml(_dbgErr?.message || String(_dbgErr)) + "</div>"; } catch (_e2) {}
+    }
     g_lastRenderedTrackerView = currentView;
     return;
   }
@@ -25255,11 +25519,13 @@ function clipProjectionToBaseline(proj, baseline, leagueVolLimit) {
 
 /* CALCULATION SECTION */
 function getVolatilityRatioForSeries(series, leagueVolLimit) {
-  const cleanSeries = Array.isArray(series) ? series.map(Number).filter((v) => isFinite(v)) : [];
+  /* INTEGRITY: validate original values (null/""/boolean are NOT zero) and never fabricate volatility when the sample is too small */
+  const cleanSeries = Array.isArray(series) ? series.map(strictNum).filter((v) => Number.isFinite(v)) : [];
 
-  if (cleanSeries.length < 3) return 1.35;
+  if (cleanSeries.length < 3) return NaN; /* MISSING_REQUIRED_VOLATILITY: insufficient valid observations */
   const sd = stdDev(cleanSeries);
   const limit = Number(leagueVolLimit) || 12;
+  if (!Number.isFinite(sd)) return NaN;
   return Math.min(2.5, sd / limit);
 }
 
@@ -25502,6 +25768,20 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
 };
 
 /* CALCULATION SECTION */
+/* PROVENANCE: build period-specific provenance records (H1/H2/Q1-Q4) from the same verified summary metadata used for FT */
+function buildPeriodProvenance(summaries, period, teamId, leagueKey) {
+  const out = [];
+  (Array.isArray(summaries) ? summaries : []).forEach((sm) => {
+    if (!sm || !sm.provenanceMeta) return;
+    const src = (period === "h1") ? sm.advancedH1 : (period === "h2") ? sm.advancedH2 : (sm.advancedQ ? sm.advancedQ[period] : null);
+    if (!src || src.synthetic) return;
+    const o = strictNum(src.ortg), d = strictNum(src.drtg), pc = strictNum(src.pace);
+    if (!Number.isFinite(o) || !Number.isFinite(d) || !Number.isFinite(pc)) return;
+    out.push({ ...sm.provenanceMeta, teamId: String(teamId), leagueKey: String(leagueKey || "").toLowerCase(), period, ortg: o, drtg: d, pace: pc });
+  });
+  return out.slice(0, 10);
+}
+
 function isUsableNumericObservation(value) {
   if (typeof value === "number") return Number.isFinite(value);
   if (typeof value !== "string" || value.trim() === "") return false;
@@ -25545,28 +25825,42 @@ function getPeriodAdvancedSeries(ctx, marketKey) {
   };
   const validateProvenance = (records, periodSuffix) => {
     if (!Array.isArray(records) || !records.length) return null;
-    const expectedTeam = String(c.advancedTeamId || c.teamId || "");
+    const period = periodSuffix === "full" ? "ft" : (periodSuffix || "ft");
+    const expectedTeam = String(c.advancedTeamId || c.teamId || "").trim();
     const expectedLeague = normalizeComp(c.advancedLeagueKey || c.leagueKey || c.competitionKey || "");
-    const allowed = aliases[expectedLeague] || (expectedLeague ? [expectedLeague] : []);
+    /* INTEGRITY: unverifiable identity is a rejection, never a bypass */
+    if (!expectedTeam || !expectedLeague) return null;
+    const allowed = aliases[expectedLeague] || [expectedLeague];
     const now = Date.now();
-    const maxFutureMs = 36 * 60 * 60 * 1000;
+    const maxFutureMs = 6 * 60 * 60 * 1000;
+    const inRange = (v, lo, hi) => { const n = strictNum(v); return Number.isFinite(n) && n >= lo && n <= hi; };
+    const rangeFor = period === "ft"
+      ? { rtg: [60, 200], pace: [40, 120] }
+      : (period === "h1" || period === "h2") ? { rtg: [30, 300], pace: [20, 140] } : { rtg: [10, 400], pace: [10, 160] };
     const out = [];
     const seen = new Set();
     for (const r of records) {
       if (!r || typeof r !== "object") continue;
       const id = String(r.eventId || "");
       const ts = Date.parse(r.date || "");
-      const teamOk = !expectedTeam || String(r.teamId || "") === expectedTeam;
+      const teamOk = String(r.teamId || "") === expectedTeam;
       const compKey = normalizeComp(r.competitionKey || r.competitionName || r.leagueKey || "");
-      const compOk = !allowed.length || allowed.includes(compKey);
-      const seasonOk = String(r.season || "").trim() !== "";
-      const numericOk = [r.ortg, r.drtg, r.pace].every(isUsableNumericObservation);
+      const compOk = !!compKey && allowed.includes(compKey);
+      const seasonStr = String(r.season || "").trim();
+      const seasonYear = parseInt((seasonStr.match(/(19|20)\d{2}/) || [])[0], 10);
+      const dateYear = Number.isFinite(ts) ? new Date(ts).getUTCFullYear() : NaN;
+      /* season must be a real year and consistent with the event date (season labelled by start or end year) */
+      const seasonOk = Number.isFinite(seasonYear) && Number.isFinite(dateYear) && (dateYear === seasonYear || dateYear === seasonYear + 1 || dateYear === seasonYear - 1);
+      const periodOk = !r.period || String(r.period).toLowerCase() === period;
+      const providerOk = !r.provider || String(r.provider) === "espn_summary_boxscore";
+      const numericOk = [r.ortg, r.drtg, r.pace].every(isUsableNumericObservation) &&
+        inRange(r.ortg, rangeFor.rtg[0], rangeFor.rtg[1]) && inRange(r.drtg, rangeFor.rtg[0], rangeFor.rtg[1]) && inRange(r.pace, rangeFor.pace[0], rangeFor.pace[1]);
       const dateOk = Number.isFinite(ts) && ts <= now + maxFutureMs &&
         (typeof isGameOnOrAfter2022 === "function" ? isGameOnOrAfter2022(r.date) : true);
-      if (!id || seen.has(id) || !teamOk || !compOk || !seasonOk || !numericOk || !dateOk) continue;
-      if (!isPlausibleBasketballPace(Number(r.pace))) continue;
+      if (!id || seen.has(id) || !teamOk || !compOk || !seasonOk || !periodOk || !providerOk || !numericOk || !dateOk) continue;
+      if (period === "ft" && !isPlausibleBasketballPace(Number(r.pace))) continue;
       seen.add(id);
-      out.push({ ...r, _period: periodSuffix || "ft" });
+      out.push({ ...r, _period: period });
     }
     return out.length ? out : null;
   };
@@ -25795,6 +26089,26 @@ function getOverallSeries(side, limit, contextData = null, manualOverride = null
   return manualRaw.filter(v => Number.isFinite(v) && v > 0).slice(0, maxN);
 }
 
+/* INTEGRITY: strict numeric conversion — null/undefined/""/booleans/non-numeric never become 0 or 1 */
+function strictNum(v) {
+  if (v === null || v === undefined || typeof v === "boolean") return NaN;
+  if (typeof v === "string") {
+    if (v.trim() === "") return NaN;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : NaN;
+  }
+  if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
+  return NaN;
+}
+/* INTEGRITY: returns a structured volatility rejection code (or "" when usable) */
+function volatilityRejectCode(rawVol, rawLimit) {
+  if (rawVol === null || rawVol === undefined || rawVol === "" || typeof rawVol === "boolean") return "MISSING_REQUIRED_VOLATILITY";
+  if (!Number.isFinite(strictNum(rawVol))) return "MISSING_REQUIRED_VOLATILITY";
+  const lim = strictNum(rawLimit);
+  if (!Number.isFinite(lim) || lim <= 0) return "INVALID_VOLATILITY_LIMIT";
+  return "";
+}
+
 /* CALCULATION SECTION */
 function applyEdgeMult(edge, league, explicitMultiplier = null) {
   if (!Number.isFinite(edge)) return edge;
@@ -25827,12 +26141,15 @@ function getPick(edge, line, league, marketKey, context = {}) {
 
   if (absEdge < 0.5) { if (context) context.noPlayReason = "absolute edge " + absEdge.toFixed(1) + " < 0.5-point floor"; return "NO PLAY"; }
 
-  const suppliedVol = Number(context?.volatility);
-  const suppliedVolLimit = Number(context?.volatilityLimit);
-  if (context?.volatilityRequired === true &&
-      (!Number.isFinite(suppliedVol) || !Number.isFinite(suppliedVolLimit) || suppliedVolLimit <= 0)) {
-    if (context) context.noPlayReason = "volatility data unavailable; selection blocked";
-    return "NO PLAY";
+  const suppliedVol = strictNum(context?.volatility);
+  const suppliedVolLimit = strictNum(context?.volatilityLimit);
+  /* volatility is REQUIRED for every market unless a caller explicitly opts out with volatilityRequired:false */
+  if (!(context && context.volatilityRequired === false)) {
+    const _volCode = volatilityRejectCode(context?.volatility, context?.volatilityLimit);
+    if (_volCode) {
+      if (context) { context.noPlayReason = "volatility data unavailable; selection blocked [" + _volCode + "]"; context.noPlayCode = _volCode; }
+      return "NO PLAY";
+    }
   }
   if (Number.isFinite(suppliedVol) && Number.isFinite(suppliedVolLimit) && suppliedVolLimit > 0) {
     const maxRatioRaw = getParam("selectionVolatilityMaxRatio", league, marketKey);
@@ -26018,8 +26335,10 @@ function computeMarginProjection(teamAProj, teamBProj, options = null) {
 
 /* CALCULATION SECTION */
 function computeCombinedMarginVolatility(stdDevA, stdDevB) {
-  const a = isFinite(stdDevA) ? stdDevA : 0;
-  const b = isFinite(stdDevB) ? stdDevB : 0;
+  /* INTEGRITY: missing team SD must NOT be treated as zero volatility. Zero-covariance assumption retained (documented). */
+  const a = strictNum(stdDevA);
+  const b = strictNum(stdDevB);
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b < 0) return NaN;
   return Math.sqrt(a * a + b * b);
 }
 
@@ -26028,12 +26347,15 @@ function getMarginPick(edge, league, marketKey, context = {}) {
   if (!Number.isFinite(edge)) return "NO PLAY";
   if (edge === 0) return "NO PLAY";
 
-  const suppliedVol = Number(context?.volatility);
-  const suppliedVolLimit = Number(context?.volatilityLimit);
-  if (context?.volatilityRequired === true &&
-      (!Number.isFinite(suppliedVol) || !Number.isFinite(suppliedVolLimit) || suppliedVolLimit <= 0)) {
-    if (context) context.noPlayReason = "volatility data unavailable; selection blocked";
-    return "NO PLAY";
+  const suppliedVol = strictNum(context?.volatility);
+  const suppliedVolLimit = strictNum(context?.volatilityLimit);
+  /* volatility is REQUIRED for every market unless a caller explicitly opts out with volatilityRequired:false */
+  if (!(context && context.volatilityRequired === false)) {
+    const _volCode = volatilityRejectCode(context?.volatility, context?.volatilityLimit);
+    if (_volCode) {
+      if (context) { context.noPlayReason = "volatility data unavailable; selection blocked [" + _volCode + "]"; context.noPlayCode = _volCode; }
+      return "NO PLAY";
+    }
   }
   if (Number.isFinite(suppliedVol) && Number.isFinite(suppliedVolLimit) && suppliedVolLimit > 0) {
     const maxRatioRaw = getParam("selectionVolatilityMaxRatio", league, marketKey);
@@ -28902,6 +29224,17 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
       const _summarySeason = String(
         hc?.season?.year || hc?.season?.slug || ref.season || ""
       ).trim();
+      const _provMeta = {
+        eventId: ref.id || null,
+        date: ref.date || null,
+        teamId: String(tId),
+        opponentId: String(ref.oppId || ""),
+        competitionKey: _summaryCompetitionKey,
+        competitionName: _summaryCompetitionName,
+        leagueKey: String(leagueKey || "").toLowerCase(),
+        season: _summarySeason,
+        provider: "espn_summary_boxscore",
+      };
       const _advancedProvenance = advanced &&
         Number.isFinite(Number(advanced.ortg)) && Number.isFinite(Number(advanced.drtg)) &&
         Number.isFinite(Number(advanced.pace))
@@ -28914,6 +29247,8 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
             competitionName: _summaryCompetitionName,
             leagueKey: String(leagueKey || "").toLowerCase(),
             season: _summarySeason,
+            provider: "espn_summary_boxscore",
+            period: "ft",
             ortg: Number(advanced.ortg),
             drtg: Number(advanced.drtg),
             pace: Number(advanced.pace),
@@ -28931,6 +29266,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         qs: ref.qs,
         advanced: advanced,
         advancedProvenance: _advancedProvenance,
+        provenanceMeta: _provMeta,
         matchup: boxMatchup || null,
         advancedH1: advancedH1,
         advancedH2: advancedH2,
@@ -29018,6 +29354,12 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         advancedSource: "espn_summary_boxscore",
         advancedTeamId: String(tId),
         advancedLeagueKey: String(leagueKey || "").toLowerCase(),
+        advancedProvenance10_h1: buildPeriodProvenance(summaries, "h1", tId, leagueKey),
+        advancedProvenance10_h2: buildPeriodProvenance(summaries, "h2", tId, leagueKey),
+        advancedProvenance10_q1: buildPeriodProvenance(summaries, "q1", tId, leagueKey),
+        advancedProvenance10_q2: buildPeriodProvenance(summaries, "q2", tId, leagueKey),
+        advancedProvenance10_q3: buildPeriodProvenance(summaries, "q3", tId, leagueKey),
+        advancedProvenance10_q4: buildPeriodProvenance(summaries, "q4", tId, leagueKey),
         ortg10: summaries.filter((s) => s && s.advancedProvenance).map((s) => s.advancedProvenance.ortg),
         drtg10: summaries.filter((s) => s && s.advancedProvenance).map((s) => s.advancedProvenance.drtg),
         pace10: summaries.filter((s) => s && s.advancedProvenance).map((s) => s.advancedProvenance.pace),
@@ -30164,6 +30506,12 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
     ortg10: [],
     drtg10: [],
     pace10: [],
+    advancedProvenance10_h1: [],
+    advancedProvenance10_h2: [],
+    advancedProvenance10_q1: [],
+    advancedProvenance10_q2: [],
+    advancedProvenance10_q3: [],
+    advancedProvenance10_q4: [],
     ortg10_h1: [],
     drtg10_h1: [],
     pace10_h1: [],
@@ -33031,6 +33379,12 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         drtg10: aStats?.drtg10 || [],
         pace10: aStats?.pace10 || [],
         advancedProvenance10: aStats?.advancedProvenance10 || [],
+        advancedProvenance10_h1: aStats?.advancedProvenance10_h1 || [],
+        advancedProvenance10_h2: aStats?.advancedProvenance10_h2 || [],
+        advancedProvenance10_q1: aStats?.advancedProvenance10_q1 || [],
+        advancedProvenance10_q2: aStats?.advancedProvenance10_q2 || [],
+        advancedProvenance10_q3: aStats?.advancedProvenance10_q3 || [],
+        advancedProvenance10_q4: aStats?.advancedProvenance10_q4 || [],
         advancedSource: aStats?.advancedSource || "",
         advancedTeamId: aStats?.advancedTeamId || String(teamAId || ""),
         advancedLeagueKey: aStats?.advancedLeagueKey || league,
@@ -33122,6 +33476,12 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         drtg10: bStats?.drtg10 || [],
         pace10: bStats?.pace10 || [],
         advancedProvenance10: bStats?.advancedProvenance10 || [],
+        advancedProvenance10_h1: bStats?.advancedProvenance10_h1 || [],
+        advancedProvenance10_h2: bStats?.advancedProvenance10_h2 || [],
+        advancedProvenance10_q1: bStats?.advancedProvenance10_q1 || [],
+        advancedProvenance10_q2: bStats?.advancedProvenance10_q2 || [],
+        advancedProvenance10_q3: bStats?.advancedProvenance10_q3 || [],
+        advancedProvenance10_q4: bStats?.advancedProvenance10_q4 || [],
         advancedSource: bStats?.advancedSource || "",
         advancedTeamId: bStats?.advancedTeamId || String(teamBId || ""),
         advancedLeagueKey: bStats?.advancedLeagueKey || league,
@@ -33781,7 +34141,7 @@ function getManualSeries(side, marketKey, parsed, contextRoot = null) {
   else if (marketKey === "h2") parsedKey = prefix + "2HScored";
   else if (marketKey.startsWith("q")) parsedKey = prefix + marketKey.toUpperCase() + "Scored";
   const manualValue = Array.isArray(parsed?.[parsedKey]) ? parsed[parsedKey] : null;
-  if (manualValue) return manualValue.map(Number).filter(Number.isFinite);
+  if (manualValue) return manualValue.map(strictNum).filter(Number.isFinite);
   const ctx = root?.[side] || {};
   if (marketKey === "ft") return Array.isArray(ctx?.manualFTScored) ? ctx.manualFTScored.slice() : (Array.isArray(ctx?.overall?.ftScored10) ? ctx.overall.ftScored10.slice() : []);
   if (marketKey === "h1") return Array.isArray(ctx?.h1Scored) ? ctx.h1Scored.slice() : (Array.isArray(ctx?.overall?.h1Scored10) ? ctx.overall.h1Scored10.slice() : []);
@@ -33802,7 +34162,7 @@ function getManualAllowedSeries(side, marketKey, parsed, contextRoot = null) {
   else if (marketKey === "h2") key = prefix + "2HAllowed";
   else if (marketKey.startsWith("q")) key = prefix + marketKey.toUpperCase() + "Allowed";
   const parsedValue = Array.isArray(parsed?.[key]) ? parsed[key] : null;
-  if (parsedValue) return parsedValue.map(Number).filter(Number.isFinite);
+  if (parsedValue) return parsedValue.map(strictNum).filter(Number.isFinite);
   const ctx = root?.[side] || {};
   if (marketKey === "ft") return Array.isArray(ctx?.overall?.ftAllowed10) ? ctx.overall.ftAllowed10.slice() : [];
   if (marketKey === "h1") return Array.isArray(ctx?.h1Allowed) ? ctx.h1Allowed.slice() : (Array.isArray(ctx?.overall?.h1Allowed10) ? ctx.overall.h1Allowed10.slice() : []);
@@ -34509,14 +34869,14 @@ function computeFTProjection({
   const _bVolRatio = getVolatilityRatioForSeries(bFTS, volLimit);
   const _aTotalSd = Number(_aVolRatio) * Number(volLimit);
   const _bTotalSd = Number(_bVolRatio) * Number(volLimit);
-  const _ftTotalSd = Math.sqrt(
-    (isFinite(_aTotalSd) ? _aTotalSd * _aTotalSd : 0) +
-      (isFinite(_bTotalSd) ? _bTotalSd * _bTotalSd : 0),
-  );
+  /* INTEGRITY: a missing team SD is NOT zero; combined volatility is unavailable (NaN) if either side is missing */
+  const _ftTotalSd = (Number.isFinite(_aTotalSd) && Number.isFinite(_bTotalSd))
+    ? Math.sqrt(_aTotalSd * _aTotalSd + _bTotalSd * _bTotalSd)
+    : NaN;
   const _ftVolRatioRaw =
     isFinite(_ftTotalSd) && isFinite(volLimit) && volLimit > 0
       ? clampNumber(_ftTotalSd / volLimit, 0.5, 2.5)
-      : Math.max(_aVolRatio || 0, _bVolRatio || 0);
+      : NaN;
 
                                                                                 
                                                                     
@@ -34524,6 +34884,8 @@ function computeFTProjection({
   if (_missingDefenseA || _missingDefenseB) {
     _ftVolRatio = clampNumber(_ftVolRatio * 1.15, 0, 2.5);
   }
+  /* Projection damping needs a finite neutral value; the PICK GATE still receives the true (possibly NaN) ftVolRatio. */
+  const _ftVolRatioProj = Number.isFinite(_ftVolRatio) ? _ftVolRatio : 1.0;
 
   const aH2H = getH2HSeries("A", "ft", parsed, _ctxRoot);
   const bH2H = getH2HSeries("B", "ft", parsed, _ctxRoot);
@@ -34610,7 +34972,7 @@ function computeFTProjection({
       {
         injMultA,
         injMultB,
-        volRatio: _ftVolRatio,
+        volRatio: _ftVolRatioProj,
         blowoutGap: Math.abs(aS - bS),
         paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
       },
@@ -34665,12 +35027,12 @@ function computeFTProjection({
   projAFT = applyDampedIntelSignal(
     projAFT,
     buildTeamMarketIntelSignal(_fatigueIntelPack, "A").signal,
-    _ftVolRatio,
+    _ftVolRatioProj,
   );
   projBFT = applyDampedIntelSignal(
     projBFT,
     buildTeamMarketIntelSignal(_fatigueIntelPack, "B").signal,
-    _ftVolRatio,
+    _ftVolRatioProj,
   );
   projAFT = clipProjectionToBaseline(projAFT, _ftBaselineBeforeH2H?.a, volLimit);
   projBFT = clipProjectionToBaseline(projBFT, _ftBaselineBeforeH2H?.b, volLimit);
@@ -36518,6 +36880,12 @@ function buildTrackedPickPayload({
             drtg10: Array.isArray(sideObj.drtg10) ? sideObj.drtg10.slice(0, 10) : [],
             pace10: Array.isArray(sideObj.pace10) ? sideObj.pace10.slice(0, 10) : [],
             advancedProvenance10: Array.isArray(sideObj.advancedProvenance10) ? sideObj.advancedProvenance10.slice(0, 10) : [],
+            advancedProvenance10_h1: Array.isArray(sideObj.advancedProvenance10_h1) ? sideObj.advancedProvenance10_h1.slice(0, 10) : [],
+            advancedProvenance10_h2: Array.isArray(sideObj.advancedProvenance10_h2) ? sideObj.advancedProvenance10_h2.slice(0, 10) : [],
+            advancedProvenance10_q1: Array.isArray(sideObj.advancedProvenance10_q1) ? sideObj.advancedProvenance10_q1.slice(0, 10) : [],
+            advancedProvenance10_q2: Array.isArray(sideObj.advancedProvenance10_q2) ? sideObj.advancedProvenance10_q2.slice(0, 10) : [],
+            advancedProvenance10_q3: Array.isArray(sideObj.advancedProvenance10_q3) ? sideObj.advancedProvenance10_q3.slice(0, 10) : [],
+            advancedProvenance10_q4: Array.isArray(sideObj.advancedProvenance10_q4) ? sideObj.advancedProvenance10_q4.slice(0, 10) : [],
             advancedSource: String(sideObj.advancedSource || ""),
             advancedTeamId: String(sideObj.advancedTeamId || ""),
             advancedLeagueKey: String(sideObj.advancedLeagueKey || "").toLowerCase(),
@@ -37530,7 +37898,18 @@ function validateInputIntegrityForRun(extracted, league) {
     ["A", "B"].forEach(side => {
       const p = extracted.parsed;
       const pre = side === "A" ? "a" : "b";
-      const arr = name => Array.isArray(p[name]) ? p[name].map(Number).filter(Number.isFinite) : [];
+      const arr = name => {
+        /* INTEGRITY: validate the ORIGINAL value before conversion; null/blank/boolean are rejected, genuine 0 is kept */
+        if (!Array.isArray(p[name])) return [];
+        const accepted = [];
+        let rejected = 0;
+        p[name].forEach(v => {
+          const n = strictNum(v);
+          if (Number.isFinite(n) && n >= 0 && n <= 400) accepted.push(n); else rejected++;
+        });
+        if (rejected && typeof engineDebug === "function") engineDebug("numeric input rejected [INVALID_NUMERIC_INPUT]", { team: side, series: name, rejected, accepted: accepted.length });
+        return accepted;
+      };
       const ftFetched = isFetchedAuthoritative(side, root, "ft");
       const h1Fetched = isFetchedAuthoritative(side, root, "h1");
       const h2Fetched = isFetchedAuthoritative(side, root, "h2");
@@ -38186,7 +38565,7 @@ async function runEngine() {
         const aVol = getVolatilityRatioForSeries(_h1PreSampleA, volLim);
         const bVol = getVolatilityRatioForSeries(_h1PreSampleB, volLim);
         return clampNumber(
-          Math.sqrt((isFinite(aVol) ? aVol : 0) ** 2 + (isFinite(bVol) ? bVol : 0) ** 2),
+          (Number.isFinite(aVol) && Number.isFinite(bVol)) ? Math.sqrt(aVol ** 2 + bVol ** 2) : NaN,
           0.5,
           2.5,
         );
@@ -38227,7 +38606,7 @@ async function runEngine() {
         const aVol = getVolatilityRatioForSeries(_h2PreSampleA, volLim);
         const bVol = getVolatilityRatioForSeries(_h2PreSampleB, volLim);
         return clampNumber(
-          Math.sqrt((isFinite(aVol) ? aVol : 0) ** 2 + (isFinite(bVol) ? bVol : 0) ** 2),
+          (Number.isFinite(aVol) && Number.isFinite(bVol)) ? Math.sqrt(aVol ** 2 + bVol ** 2) : NaN,
           0.5,
           2.5,
         );
@@ -38308,6 +38687,7 @@ async function runEngine() {
       blowoutGap: ftCalc.blowoutGap,
       volatility: Number.isFinite(ftCalc.ftVolRatio) ? ftCalc.ftVolRatio * getMarketVolLimit(league, "ft") : NaN,
       volatilityLimit: getMarketVolLimit(league, "ft"),
+      volatilityRequired: true,
       _edgeAlreadyScaled: true,
     });
     if (rangeBlocks("ft")) _liveNoPlayReasons.ft = "market range gate";
@@ -38318,6 +38698,7 @@ async function runEngine() {
       blowoutGap: (Number.isFinite(h1Calc.projA1H) && Number.isFinite(h1Calc.projB1H) ? Math.abs(h1Calc.projA1H - h1Calc.projB1H) : NaN),
       volatility: Number.isFinite(_h1VolRatio) ? _h1VolRatio * getMarketVolLimit(league, "h1") : NaN,
       volatilityLimit: getMarketVolLimit(league, "h1"),
+      volatilityRequired: true,
       _edgeAlreadyScaled: true,
     }));
     if (!Number.isFinite(_h1VolRatio)) _liveNoPlayReasons.h1 = "volatility calculation failed";
@@ -38330,6 +38711,7 @@ async function runEngine() {
       blowoutGap: (Number.isFinite(h2Calc.projA2H) && Number.isFinite(h2Calc.projB2H) ? Math.abs(h2Calc.projA2H - h2Calc.projB2H) : NaN),
       volatility: Number.isFinite(_h2VolRatio) ? _h2VolRatio * getMarketVolLimit(league, "h2") : NaN,
       volatilityLimit: getMarketVolLimit(league, "h2"),
+      volatilityRequired: true,
       _edgeAlreadyScaled: true,
     }));
     if (!Number.isFinite(_h2VolRatio)) _liveNoPlayReasons.h2 = "volatility calculation failed";
@@ -38339,6 +38721,7 @@ async function runEngine() {
       blowoutGap: ftCalc.blowoutGap,
       volatility: ftCalc.aVol,
       volatilityLimit: getMarketVolLimit(league, "team_a"),
+      volatilityRequired: true,
       _edgeAlreadyScaled: true,
     });
     g_currentLiveComputeMarket = "team_b";
@@ -38347,6 +38730,7 @@ async function runEngine() {
       blowoutGap: ftCalc.blowoutGap,
       volatility: ftCalc.bVol,
       volatilityLimit: getMarketVolLimit(league, "team_b"),
+      volatilityRequired: true,
       _edgeAlreadyScaled: true,
     });
 
@@ -38366,8 +38750,8 @@ async function runEngine() {
     const _h1VolLimitForMargin = getMarketVolLimit(league, "h1");
     const combinedMarginVolH1 = marketAllowedForLeague("handicap_h1")
       ? computeCombinedMarginVolatility(
-          (h1Calc.aVol1 || 0) * _h1VolLimitForMargin,
-          (h1Calc.bVol1 || 0) * _h1VolLimitForMargin,
+          strictNum(h1Calc.aVol1) * _h1VolLimitForMargin,
+          strictNum(h1Calc.bVol1) * _h1VolLimitForMargin,
         )
       : NaN;
     const handicapH1Edge =
@@ -38379,8 +38763,8 @@ async function runEngine() {
     const marginProjectionH2 = computeMarginProjection(h2Calc.projA2H, h2Calc.projB2H, { contextData: h2Calc?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
     const _h2VolLimitForMargin = getMarketVolLimit(league, "h2");
     const combinedMarginVolH2 = computeCombinedMarginVolatility(
-      (h2Calc.aVol2 || 0) * _h2VolLimitForMargin,
-      (h2Calc.bVol2 || 0) * _h2VolLimitForMargin,
+      strictNum(h2Calc.aVol2) * _h2VolLimitForMargin,
+      strictNum(h2Calc.bVol2) * _h2VolLimitForMargin,
     );
     const handicapH2Edge =
       marketAllowedForLeague("handicap_h2") && isFinite(marginProjectionH2) && isFinite(finalLines.handicapH2Line)
@@ -38421,12 +38805,14 @@ async function runEngine() {
       teamSc: h1Calc.aS1,
       volatility: Number.isFinite(h1Calc.aVol1) ? h1Calc.aVol1 * getMarketVolLimit(league, "h1_team_a") : NaN,
       volatilityLimit: getMarketVolLimit(league, "h1_team_a"),
+      volatilityRequired: true,
       _edgeAlreadyScaled: true,
     });
     let h1bPick = rangeBlocks("h1_team_b") ? "NO PLAY" : getPickForLeague(h1bEdge, finalLines.h1bLine, "h1_team_b", {
       teamSc: h1Calc.bS1,
       volatility: Number.isFinite(h1Calc.bVol1) ? h1Calc.bVol1 * getMarketVolLimit(league, "h1_team_b") : NaN,
       volatilityLimit: getMarketVolLimit(league, "h1_team_b"),
+      volatilityRequired: true,
       _edgeAlreadyScaled: true,
     });
 
@@ -38651,7 +39037,7 @@ async function runEngine() {
     const _lqiShared = (lqA + lqB) / 2;
 
     const ftVolatilityForConf =
-      ftCalc.ftVolRatio != null ? ftCalc.ftVolRatio * getMarketVolLimit(league, "ft") : 0;
+      Number.isFinite(ftCalc.ftVolRatio) ? ftCalc.ftVolRatio * getMarketVolLimit(league, "ft") : NaN;
     const ftTrapMeta =
       typeof detectTrapMeta === "function"
         ? detectTrapMeta(ftCalc.ftEdge, ftLine, ftPick, league, "ft", ftVolatilityForConf)
@@ -40582,12 +40968,7 @@ document.addEventListener("DOMContentLoaded", () => {
       withErrorBoundary(openTrackerModal, "openTrackerModal"),
     );
 
-  const trackerMilitaryRaidBtn = document.getElementById("trackerMilitaryRaidBtn");
-  if (trackerMilitaryRaidBtn)
-    trackerMilitaryRaidBtn.addEventListener("dblclick", (e) => {
-      e.stopImmediatePropagation();
-      toggleTrackerDebugView();
-    });
+  /* Debug navigation now has its own explicit button (#trackerDebugBtn); no double-click dependency. */
 
   const trackerConfigBtn = document.getElementById("trackerConfigBtn");
   if (trackerConfigBtn) trackerConfigBtn.addEventListener("click", toggleTrackerConfigsView);
