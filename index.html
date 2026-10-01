@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -14353,13 +14354,16 @@ async function purgeZombieTrackerStorageKeys(keepKey) {
   return { purged };
 }
 
+let g_zombiePurgeRanThisSession = false;
 async function loadTrackerStateFromLocal() {
   try {
     const keys = getTrackerLocalStateCandidateKeys();
     const candidates = [];
 
-    for (const key of keys) {
-      const raw = await readAsyncStorage(key);
+    const _raws = await Promise.all(keys.map((k) => readAsyncStorage(k).catch(() => undefined)));
+    for (let _ki = 0; _ki < keys.length; _ki++) {
+      const key = keys[_ki];
+      const raw = _raws[_ki];
       if (!raw) continue;
 
       let parsed;
@@ -14394,7 +14398,20 @@ async function loadTrackerStateFromLocal() {
                                                                              
                                                    
     const canonicalKey = getTrackerLocalStateStableKey();
-    purgeZombieTrackerStorageKeys(canonicalKey).catch(() => {});
+    // If the freshest copy lives under a legacy key, copy it to the canonical key BEFORE the purge deletes
+    // the legacy keys — otherwise the purge could delete the only up-to-date copy.
+    let _canonOk = true;
+    if (best && canonicalKey && best.key !== canonicalKey) {
+      try {
+        _canonOk = (await writeAsyncStorage(canonicalKey, JSON.stringify(best.state))) !== false;
+      } catch (_cw) {
+        _canonOk = false;
+      }
+    }
+    if (_canonOk && !g_zombiePurgeRanThisSession) {
+      g_zombiePurgeRanThisSession = true; // the purge is idempotent; once per session is enough
+      purgeZombieTrackerStorageKeys(canonicalKey).catch(() => {});
+    }
 
     return best ? best.state : null;
   } catch (err) {
@@ -14433,18 +14450,8 @@ async function _saveTrackerStateToLocalUnsafe() {
       throw new Error("Tracker persistence verification failed: stored payload does not exactly match the committed payload.");
     }
 
-    try {
-      const _isInDB = await _bbIdbTx("readonly", (store) => store.get(primaryKey), 4000)
-        .then((r) => !!r)
-        .catch(() => false);
-      if (!_isInDB) {
-        trackerDebug("WARN: IndexedDB write not present; verified fallback storage payload instead.");
-      }
-    } catch (_verifyErr) {
-      engineDebug("IndexedDB verify step failed", {
-        error: _verifyErr?.message || String(_verifyErr),
-      });
-    }
+    // (removed: a 3rd full read of the whole payload that only logged a warning — the exact-match
+    //  read-back verification above already proves the data was committed)
     return true;
   } catch (err) {
     console.error("[BB Engine] saveTrackerStateToLocal async failed", err);
@@ -14464,8 +14471,16 @@ async function _saveTrackerStateToLocalUnsafe() {
 
                                                                                       
                                                                           
+let g_trackerLocalSaveQueued = null;
 async function saveTrackerStateToLocal() {
-  const task = g_trackerLocalSaveChain.then(() => _saveTrackerStateToLocalUnsafe());
+  // A save that is queued but has not started yet will read the CURRENT state when it runs, so extra
+  // callers can safely share it instead of each doing their own full write + verify cycle.
+  if (g_trackerLocalSaveQueued) return g_trackerLocalSaveQueued;
+  const task = g_trackerLocalSaveChain.then(() => {
+    g_trackerLocalSaveQueued = null;
+    return _saveTrackerStateToLocalUnsafe();
+  });
+  g_trackerLocalSaveQueued = task;
   g_trackerLocalSaveChain = task.catch(() => {});
   return task;
 }
@@ -15050,6 +15065,7 @@ function rebuildTrackerDerivedState() {
   return AppState.tracker.derived;
 }
 let g_trackerHydratePromise = null;
+let g_trackerServerArchiveStripped = false; // true once a size-reduced push (no archive) has been sent
 let g_trackerFollowupTimer = null;
 let g_trackerSaveTimer = null;
 let g_deletedSigLock = new Set();
@@ -15500,9 +15516,8 @@ const MILITARY_RAID_DEPENDENCIES = [
 function checkMilitaryRaidDependencies() {
   const root = typeof window !== "undefined" ? window : globalThis;
   const missing = MILITARY_RAID_DEPENDENCIES.filter((name) => typeof root[name] !== "function");
-  if (!(typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function")) {
-    missing.push("AFDB.runTestFetch");
-  }
+  // AFDB.runTestFetch is an optional diagnostic hook (not defined in this build) — it is not a
+  // hard dependency, so it no longer triggers a false "missing dependency" error on every raid.
   return missing;
 }
 
@@ -15636,14 +15651,6 @@ async function triggerTrackerMilitaryRaid() {
 
                                                                                
                                                                           
-  await runStage("purge zombie storage", async () => {
-    const canonicalKey = getTrackerLocalStateStableKey();
-    const res = await purgeZombieTrackerStorageKeys(canonicalKey);
-    report.zombieKeysPurged = res?.purged || 0;
-  });
-
-                                                                                 
-                                                  
   await runStage("reconcile buckets", () => {
     const reconciled = reconcileTrackerBucketConflicts(
       AppState.tracker.state.activePicks,
@@ -15656,13 +15663,24 @@ async function triggerTrackerMilitaryRaid() {
 
                                                                               
                                                                         
-  await runStage("force-settle + live sync", async () => {
-    const pendingBefore = countPending();
-    if (typeof refreshTrackedPickResults === "function") await refreshTrackedPickResults();
-    if (typeof pollLiveGameClocks === "function") await pollLiveGameClocks();
-    report.settledThisPass = Math.max(0, pendingBefore - countPending());
-    report.liveGamesSynced = g_liveGameStatus ? g_liveGameStatus.size : 0;
-  });
+  // Zombie-key purge only touches storage keys other than the canonical one, so it is independent of
+  // settlement. Result fetch + live-clock sync are independent network calls. Run all three at once.
+  await Promise.all([
+    runStage("purge zombie storage", async () => {
+      const canonicalKey = getTrackerLocalStateStableKey();
+      const res = await purgeZombieTrackerStorageKeys(canonicalKey);
+      report.zombieKeysPurged = res?.purged || 0;
+    }),
+    runStage("force-settle + live sync", async () => {
+      const pendingBefore = countPending();
+      await Promise.all([
+        typeof refreshTrackedPickResults === "function" ? refreshTrackedPickResults() : null,
+        typeof pollLiveGameClocks === "function" ? pollLiveGameClocks() : null,
+      ]);
+      report.settledThisPass = Math.max(0, pendingBefore - countPending());
+      report.liveGamesSynced = g_liveGameStatus ? g_liveGameStatus.size : 0;
+    }),
+  ]);
 
                                                                               
                                      
@@ -15713,7 +15731,10 @@ async function triggerTrackerMilitaryRaid() {
                                                                           
   await runStage("diagnostic sweep", async () => {
     if (typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function") {
-      await AFDB.runTestFetch();
+      // diagnostics only — never make the raid wait on it
+      Promise.resolve()
+        .then(() => AFDB.runTestFetch())
+        .catch((e) => raidLog("diagnostic_failed", { error: e?.message || String(e) }));
     }
   });
 
@@ -18867,6 +18888,9 @@ async function pushTrackerStateToServer(state, isExit = false) {
         return rest;
       });
       stateToPush = { ...state, activePicks: leanActive, archivedPicks: [], lineMemory: {} };
+      g_trackerServerArchiveStripped = (state.archivedPicks || []).length > 0;
+    } else {
+      g_trackerServerArchiveStripped = false;
     }
 
     let payload;
@@ -18939,7 +18963,8 @@ async function _flushTrackerSaveUnsafe() {
     const snapshot = JSON.parse(JSON.stringify(AppState.tracker.state));
     const pushed = await pushTrackerStateToServer(snapshot);
     if (pushed && pushed.ok && pushed.state) {
-      const merged = mergeTrackerStates(snapshot, pushed.state);
+      // merge into LIVE state, not the pre-push snapshot, or edits made during the POST are wiped
+      const merged = mergeTrackerStates(AppState.tracker.state, pushed.state);
       normalizeTrackerState(merged);
       await saveTrackerStateToLocal();
     }
@@ -19158,7 +19183,18 @@ async function fetchTrackerJson(url, options = {}, timeoutMs = TRACKER_NETWORK_T
 }
 
 window.primeTrackerStateForRun = async function primeTrackerStateForRun() {
-  const localState = await loadTrackerStateFromLocal();
+  let localState = await loadTrackerStateFromLocal();
+  // never replace fresher in-memory state (e.g. a just-settled pick not yet written) with the disk copy
+  try {
+    const _liveNow = AppState.tracker.state;
+    if (localState && _liveNow && !isTrackerStateMeaningfullyEmpty(_liveNow)) {
+      localState = mergeTrackerStates(_liveNow, localState);
+    } else if (!localState && _liveNow && !isTrackerStateMeaningfullyEmpty(_liveNow)) {
+      localState = _liveNow;
+    }
+  } catch (_pm) {
+    engineDebug("primeTrackerStateForRun: live/disk merge failed", { error: _pm?.message || String(_pm) });
+  }
 
   if (localState) {
     normalizeTrackerState(localState);
@@ -19383,7 +19419,16 @@ function scheduleLiveClockPoll(delayMs) {
 
 let _liveClockPollInFlight = false;
 let _liveClockPollAbort = null;
-async function pollLiveGameClocks() {
+let _liveClockPollPromise = null;
+// Callers that arrive while a poll is running now wait for that same poll instead of returning instantly.
+function pollLiveGameClocks() {
+  if (_liveClockPollPromise) return _liveClockPollPromise;
+  _liveClockPollPromise = _pollLiveGameClocksImpl().finally(() => {
+    _liveClockPollPromise = null;
+  });
+  return _liveClockPollPromise;
+}
+async function _pollLiveGameClocksImpl() {
   if (_liveClockPollInFlight) return;
   _liveClockPollInFlight = true;
   if (_liveClockPollAbort) {
@@ -19401,12 +19446,12 @@ async function pollLiveGameClocks() {
     return;
   }
   let didChange = false;
-  for (const [league, eventIds] of byLeague) {
+  await Promise.all([...byLeague].map(async ([league, eventIds]) => {
                                                                                   
     if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
       const _uiLeague = (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
       if (!isIncrowdEuroAutoFetchLeague(_uiLeague)) {
-        continue;
+        return;
       }
       try {
         if (typeof pollIncrowdEuroLiveForLeague === "function") {
@@ -19416,7 +19461,7 @@ async function pollLiveGameClocks() {
       } catch (err) {
         engineDebug("incrowd euro live poll failed", { league, error: err?.message || String(err) });
       }
-      continue;
+      return;
     }
                                                                            
     if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
@@ -19428,19 +19473,29 @@ async function pollLiveGameClocks() {
       } catch (err) {
         engineDebug("kbl live poll failed", { league, error: err?.message || String(err) });
       }
-      continue;
+      return;
     }
     const base = getTrackedLeagueApiBase(league);
-    if (!base) continue;
+    if (!base) return;
     try {
       let data = null;
       try {
-        const res = await fetch(`${base}/scoreboard?_=${Date.now()}`, { cache: "no-store", signal: _liveClockSignal });
-        if (res.ok) data = await res.json();
+        // 8s hard timeout: a stalled mobile connection used to hang the poll forever and kill the chain
+        const _sbCtrl = new AbortController();
+        const _sbTimer = setTimeout(() => _sbCtrl.abort(), 8000);
+        if (_liveClockSignal) {
+          try { _liveClockSignal.addEventListener("abort", () => _sbCtrl.abort(), { once: true }); } catch (_eSig) {}
+        }
+        try {
+          const res = await fetch(`${base}/scoreboard?_=${Date.now()}`, { cache: "no-store", signal: _sbCtrl.signal });
+          if (res.ok) data = await res.json();
+        } finally {
+          clearTimeout(_sbTimer);
+        }
       } catch (e) {
         data = await proxyFetch(`${base}/scoreboard`, 6000).catch(() => null);
       }
-      if (!data) continue;
+      if (!data) return;
       const events = data?.events || [];
       events.forEach((ev) => {
         const eid = String(ev.id || "");
@@ -19545,9 +19600,12 @@ async function pollLiveGameClocks() {
     } catch (err) {
       engineDebug("live game status update failed", { error: err?.message || String(err) });
     }
-  }
+  }));
   if (didChange) renderTrackedPicks();
   scheduleLiveClockPoll();
+  } catch (_pollErr) {
+    engineDebug("pollLiveGameClocks failed — rescheduling", { error: _pollErr?.message || String(_pollErr) });
+    scheduleLiveClockPoll();
   } finally {
     _liveClockPollInFlight = false;
   }
@@ -19560,7 +19618,17 @@ async function hydrateTrackedPicks(force = false) {
   }
   g_trackerHydratePromise = (async () => {
     trackerDebug("hydrate start", { force, key: getTrackerUserKey() });
-    const localState = (await loadTrackerStateFromLocal()) || createEmptyTrackerState();
+    let localState = (await loadTrackerStateFromLocal()) || createEmptyTrackerState();
+    // The disk copy can be OLDER than what is in memory (e.g. a settlement not yet written). Never let it
+    // overwrite fresher in-memory state — that was the "result shows, vanishes, comes back" regression.
+    try {
+      const _liveNow = AppState.tracker.state;
+      if (_liveNow && !isTrackerStateMeaningfullyEmpty(_liveNow)) {
+        localState = mergeTrackerStates(_liveNow, localState);
+      }
+    } catch (_mergeLiveErr) {
+      engineDebug("hydrate: live/disk merge failed", { error: _mergeLiveErr?.message || String(_mergeLiveErr) });
+    }
 
     const hadLocalState =
       !!localState &&
@@ -19619,7 +19687,14 @@ async function hydrateTrackedPicks(force = false) {
         return g_trackerState;
       }
 
-      const mergedState = mergeTrackerStates(localState || {}, serverState);
+      // Merge the server copy into the LIVE state (not the copy captured before the network wait) so any
+      // pick added/settled/deleted while the request was in flight is kept.
+      const mergedState = mergeTrackerStates(
+        AppState.tracker.state && !isTrackerStateMeaningfullyEmpty(AppState.tracker.state)
+          ? AppState.tracker.state
+          : localState || {},
+        serverState,
+      );
       normalizeTrackerState(mergedState);
       await saveTrackerStateToLocal();
       trackerDebug("hydrate merged state", {
@@ -19658,8 +19733,8 @@ async function hydrateTrackedPicks(force = false) {
         mergedPendingActive < serverPendingActive ||
         localPendingActive < serverPendingActive ||
         mergedActiveCount > serverActiveCount ||
-        localArchivedCount > serverArchivedCount ||
-        mergedArchivedCount > serverArchivedCount ||
+        (!g_trackerServerArchiveStripped && localArchivedCount > serverArchivedCount) ||
+        (!g_trackerServerArchiveStripped && mergedArchivedCount > serverArchivedCount) ||
         localSettledCount > serverSettledCount ||
         mergedSettledCount > serverSettledCount ||
         localWins > serverWins ||
@@ -19676,7 +19751,7 @@ async function hydrateTrackedPicks(force = false) {
           const hydrateSnapshot = JSON.parse(JSON.stringify(g_trackerState));
           const pushed = await pushTrackerStateToServer(hydrateSnapshot);
           if (pushed?.ok && pushed?.state) {
-            const hydrateMerged = mergeTrackerStates(hydrateSnapshot, pushed.state);
+            const hydrateMerged = mergeTrackerStates(AppState.tracker.state, pushed.state);
             normalizeTrackerState(hydrateMerged);
             await saveTrackerStateToLocal();
           }
@@ -20177,7 +20252,7 @@ function archiveExpiredTrackedPicks() {
       .slice(0, TRACKER_ARCHIVED_LIMIT);
 
     rebuildTrackerStats();
-    saveTrackerStateToLocal();
+    saveTrackerStateToLocal().catch(() => {}); // failure already raises the storage alert; avoid unhandled rejection
   }
   if (g_settlementDebugLog.size > 200) {
     [...g_settlementDebugLog.keys()]
@@ -20434,6 +20509,7 @@ function closeTrackerModal() {
   unlockPageBehindTracker();
 }
 
+let g_trackerRenderToken = 0;
 function renderTrackedPicks() {
                                                                              
                                                                             
@@ -20577,6 +20653,7 @@ function renderTrackedPicks() {
       ? "No live/recent picks in this window. Older picks are still saved — check Record / wait for game window."
       : "No tracked picks saved yet.";
     wrapEl.style.display = isTrackerPicksView() ? "none" : "block";
+    g_trackerRenderToken++; // cancel any older paint still waiting for its animation frame
     bodyEl.innerHTML = "";
     return;
   }
@@ -20584,7 +20661,9 @@ function renderTrackedPicks() {
   emptyEl.style.display = "none";
   wrapEl.style.display = "block";
 
+  const _renderTok = ++g_trackerRenderToken;
   requestAnimationFrame(() => {
+    if (_renderTok !== g_trackerRenderToken) return; // a newer render superseded this one — don't paint stale rows
     bodyEl.innerHTML = displayPicks
       .map((p) => {
         const status = String(p.resultStatus || "pending").toLowerCase();
@@ -23656,6 +23735,21 @@ function applyAutoSettleStatus(pick, settled, source) {
   return true;
 }
 
+let g_settleSaveTimer = null;
+let g_settleSavePicks = [];
+function queueSettleSave(picks) {
+  g_settleSavePicks.push(...(picks || []));
+  if (g_settleSaveTimer) return;
+  g_settleSaveTimer = setTimeout(() => {
+    g_settleSaveTimer = null;
+    const batch = g_settleSavePicks;
+    g_settleSavePicks = [];
+    Promise.resolve(forceTrackerSaveNow(batch)).catch(function (err) {
+      trackerDebug("live-board settle save failed", { error: String((err && err.message) || err) });
+    });
+  }, 0);
+}
+
 function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
   if (!eventId || !competition) return false;
   const eid = String(eventId);
@@ -23714,11 +23808,7 @@ function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
     g_trackerState.updatedAt = new Date().toISOString();
     try { rebuildTrackerStats(); } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     try {
-      if (typeof forceTrackerSaveNow === "function") {
-        Promise.resolve(forceTrackerSaveNow(changedPicks)).catch(function (err) {
-          trackerDebug("live-board settle save failed", { error: String(err && err.message || err) });
-        });
-      }
+      if (typeof forceTrackerSaveNow === "function") queueSettleSave(changedPicks); // one save for all events settled in this tick
     } catch (_s) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _s); }
   }
   return changed;
@@ -24161,7 +24251,7 @@ async function refreshTrackedPickResults() {
           let data = null;
           try {
             const _directCtrl = new AbortController();
-            const _directTimer = setTimeout(() => _directCtrl.abort(), 8000);
+            const _directTimer = setTimeout(() => _directCtrl.abort(), 5000);
             try {
               const res = await fetch(url, {
                 cache: "no-store",
@@ -24182,7 +24272,26 @@ async function refreshTrackedPickResults() {
 
       const eventMap = new Map(eventResults);
 
-      pendingPicks.forEach((pick) => {
+      // The fetches above can take several seconds. Any save/hydrate/normalize that ran meanwhile replaces
+      // every pick object with a copy, so the picks captured before the await are orphans. Re-resolve each
+      // one against the LIVE state (active wins over archived) so the settlement lands on the real pick.
+      const _liveByKey = new Map();
+      [...(g_trackerState.archivedPicks || []), ...(g_trackerState.activePicks || [])].forEach((lp) => {
+        if (!lp) return;
+        const k = makeTrackerActiveMergeKey(lp);
+        if (k) _liveByKey.set(k, lp);
+      });
+      const _seenLive = new Set();
+      const livePendingPicks = [];
+      pendingPicks.forEach((sp) => {
+        const lp = _liveByKey.get(makeTrackerActiveMergeKey(sp));
+        if (!lp || _seenLive.has(lp)) return;
+        if (lp.resultStatus && lp.resultStatus !== "pending") return; // already settled meanwhile
+        _seenLive.add(lp);
+        livePendingPicks.push(lp);
+      });
+
+      livePendingPicks.forEach((pick) => {
         const data = eventMap.get(pick.eventId);
         const competition = data?.header?.competitions?.[0];
 
@@ -40196,7 +40305,12 @@ const fixtureSelect = document.getElementById("fixtureSelect");
     (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)
   );
 
+  let _lastResumeAt = 0;
   function resumeLiveTrackerNow() {
+    // focus + pageshow + visibilitychange all fire together on app resume; run one refresh, not three
+    const _nowR = Date.now();
+    if (_nowR - _lastResumeAt < 1500) return;
+    _lastResumeAt = _nowR;
     refreshTrackerInBackground(true);
     scheduleLiveClockPoll(0);
     const modalOpen = document.getElementById("trackerModal")?.classList.contains("open");
