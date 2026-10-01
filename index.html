@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15448,6 +15447,130 @@ function renderEngineErrorPage() {
       '<div style="margin-top:12px;font-size:11px;color:#888;line-height:1.45;">Full log is on the Debug page.</div>' +
     '</div>';
 }
+
+/* Auto-Fetch Debugger controller: the overlay existed in the DOM, but the AFDB
+   controller was missing. Keep it independent of the tracker modal so the debug
+   surface can still open when tracker rendering is itself unhealthy. */
+window.AFDB = window.AFDB || (() => {
+  const MAX_LINES = 220;
+  const state = { openedAt: 0 };
+
+  function esc(v) {
+    return _escapeEngineErrorHtml(v == null ? "" : String(v));
+  }
+
+  function collectLines() {
+    const engine = Array.isArray(AppState?.debug?.engineLog) ? AppState.debug.engineLog : [];
+    const tracker = Array.isArray(AppState?.debug?.trackerLog) ? AppState.debug.trackerLog : [];
+    return {
+      engine: engine.slice(0, MAX_LINES),
+      tracker: tracker.slice(0, MAX_LINES),
+    };
+  }
+
+  function render() {
+    const panel = document.getElementById("afdbPanel");
+    if (!panel) return false;
+    const logs = collectLines();
+    const engineHtml = logs.engine.map((x) => `<li>${esc(x)}</li>`).join("");
+    const trackerHtml = logs.tracker.map((x) => `<li>${esc(x)}</li>`).join("");
+    panel.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px;background:#0b0b0b;border-bottom:1px solid #333;flex-shrink:0;">
+        <div>
+          <div style="color:#4ea9ff;font-size:10px;font-weight:900;letter-spacing:.8px;text-transform:uppercase;">Auto-Fetch Debugger</div>
+          <div style="color:#aaa;font-size:11px;margin-top:3px;">Fetch, provenance, fallback and network diagnostics</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;">
+          <button type="button" data-afdb-action="refresh" style="background:#273142;color:#fff;border:1px solid #46546a;padding:7px 10px;font-weight:900;">↻ REFRESH</button>
+          <button type="button" data-afdb-action="fetch" style="background:#4b9f45;color:#fff;border:1px solid #6fbe68;padding:7px 10px;font-weight:900;">📡 FETCH DIAGNOSTIC</button>
+          <button type="button" data-afdb-action="clear" style="background:#3a404c;color:#fff;border:1px solid #596170;padding:7px 10px;font-weight:900;">CLEAR</button>
+          <button type="button" data-afdb-action="close" style="background:#111;color:#ccc;border:1px solid #555;padding:7px 10px;font-weight:900;">✕ CLOSE</button>
+        </div>
+      </div>
+      <div style="flex:1;overflow:auto;padding:10px;background:#050505;">
+        <div style="margin-bottom:12px;">
+          <div style="color:#8cc8ff;font-size:11px;font-weight:900;margin-bottom:6px;">ENGINE ACTIVITY (${logs.engine.length})</div>
+          <ul style="margin:0;padding:0;list-style:none;display:grid;gap:5px;">${engineHtml || '<li style="color:#888;padding:8px;">No engine logs currently in memory.</li>'}</ul>
+        </div>
+        <div>
+          <div style="color:#8cc8ff;font-size:11px;font-weight:900;margin-bottom:6px;">NETWORK / TRACKER (${logs.tracker.length})</div>
+          <ul style="margin:0;padding:0;list-style:none;display:grid;gap:5px;">${trackerHtml || '<li style="color:#888;padding:8px;">No tracker logs currently in memory.</li>'}</ul>
+        </div>
+      </div>`;
+
+    panel.querySelectorAll("[data-afdb-action]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const action = btn.getAttribute("data-afdb-action");
+        if (action === "refresh") return render();
+        if (action === "close") return api.close();
+        if (action === "clear") {
+          AppState.debug.engineLog = [];
+          AppState.debug.trackerLog = [];
+          render();
+          return;
+        }
+        if (action === "fetch") {
+          Promise.resolve()
+            .then(() => api.runTestFetch())
+            .catch((e) => api.log("ERROR", "AFDB", "diagnostic_failed", { error: e?.message || String(e) }))
+            .finally(render);
+        }
+      });
+    });
+    return true;
+  }
+
+  const api = {
+    open() {
+      const overlay = document.getElementById("afdbOverlay");
+      if (!overlay) {
+        if (typeof openTrackerModal === "function") {
+          openTrackerModal();
+          if (typeof setTrackerModalView === "function") setTrackerModalView("debug");
+        }
+        return false;
+      }
+      state.openedAt = Date.now();
+      overlay.style.display = "flex";
+      overlay.setAttribute("aria-hidden", "false");
+      document.body.classList.add("afdb-open");
+      render();
+      return true;
+    },
+    close() {
+      const overlay = document.getElementById("afdbOverlay");
+      if (overlay) {
+        overlay.style.display = "none";
+        overlay.setAttribute("aria-hidden", "true");
+      }
+      document.body.classList.remove("afdb-open");
+      return true;
+    },
+    log(level, source, event, payload) {
+      const prefix = `[${String(level || "INFO").toUpperCase()}] ${source || "AFDB"}: ${event || "event"}`;
+      engineDebug(prefix, payload == null ? null : payload);
+      if (document.getElementById("afdbOverlay")?.style.display !== "none") render();
+    },
+    async runTestFetch() {
+      api.open();
+      api.log("INFO", "AFDB", "diagnostic_start", {
+        league: document.getElementById("leagueSelect")?.value || "",
+        teamA: document.getElementById("teamAName")?.value || "",
+        teamB: document.getElementById("teamBName")?.value || "",
+      });
+      if (typeof fetchESPN !== "function") {
+        api.log("ERROR", "AFDB", "fetch_function_missing", null);
+        return { ok: false, reason: "fetchESPN missing" };
+      }
+      const result = await fetchESPN();
+      api.log("INFO", "AFDB", "diagnostic_complete", { result: result ?? null });
+      return { ok: true, result };
+    },
+    render,
+  };
+
+  return api;
+})();
 
 function openEngineErrorPage() {
                                                                       
