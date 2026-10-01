@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15442,6 +15443,25 @@ function closeEngineErrorPage() {
   renderHeaderErrorState();
 }
 
+/* BB-FIX: AFDB was referenced by the 🔬 button and openEngineErrorDebug() but never defined, so the debug page never opened. */
+window.AFDB = window.AFDB || {
+  open: async function () {
+    try {
+      const modal = document.getElementById("trackerModal");
+      if (modal && !modal.classList.contains("open") && typeof openTrackerModal === "function") {
+        await openTrackerModal();
+      }
+      if (typeof setTrackerModalView === "function") setTrackerModalView("debug");
+    } catch (e) {
+      console.error("[BB Engine] AFDB.open failed", e);
+    }
+  },
+  close: function () { if (typeof closeTrackerModal === "function") closeTrackerModal(); },
+  log: function (level, tag, event, payload) {
+    if (typeof engineDebug === "function") engineDebug("[" + String(tag || "AFDB") + "] " + String(event || ""), payload || null);
+  },
+};
+
 function openEngineErrorDebug() {
   closeEngineErrorPage();
   if (typeof AFDB !== "undefined" && typeof AFDB.open === "function") {
@@ -16261,6 +16281,7 @@ function syncTrackerModalView() {
     panel.classList.add("analytics-view");
   }
   panel.classList.toggle("health-view", g_trackerModalView === "health");
+  try { const _w = document.getElementById("trackedPicksWrap"); if (_w) _w.style.display = "block"; } catch (_e) {} /* BB-FIX */
 }
 
 function setTrackerModalView(view) {
@@ -17581,7 +17602,7 @@ function bbSampleStats(arr) {
   const share = (f) => v.reduce((a, x) => a + f(x), 0) / n;
   return { n, v, mean, sd: Math.max(sd, 1), med, min: v[0], max: v[n - 1], share };
 }
-function bbTrapSample(mk) {
+function bbTrapSample(mk, parsed) {
   try {
     const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || null;
     if (!root) return null;
@@ -17600,8 +17621,31 @@ function bbTrapSample(mk) {
     if (mk === "ft") return tot("A", "ftScored10", "ftAllowed10").concat(tot("B", "ftScored10", "ftAllowed10"));
     if (mk === "h1") return tot("A", "h1Scored10", "h1Allowed10").concat(tot("B", "h1Scored10", "h1Allowed10"));
     if (mk === "h2") return tot("A", "h2Scored10", "h2Allowed10").concat(tot("B", "h2Scored10", "h2Allowed10"));
+    /* BB-FIX: quarters use the same series the quarter projection reads (fetched or manual) */
+    if (/^q[1-4]$/.test(mk) && typeof getManualSeries === "function" && typeof getManualAllowedSeries === "function") {
+      const one = (side) => {
+        const sc = getManualSeries(side, mk, parsed || null, root).map(Number);
+        const al = getManualAllowedSeries(side, mk, parsed || null, root).map(Number);
+        if (!sc.length || sc.length !== al.length) return [];
+        return sc.map((v, i) => v + al[i]).filter((v) => Number.isFinite(v) && v > 0);
+      };
+      return one("A").concat(one("B"));
+    }
   } catch (_e) {}
   return null;
+}
+/* BB-FIX: team A margin history (scored - allowed) for handicap markets. mk: handicap | handicap_h1 | handicap_h2 */
+function bbMarginSample(mk, parsed) {
+  try {
+    const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || null;
+    if (!root || typeof getManualSeries !== "function" || typeof getManualAllowedSeries !== "function") return null;
+    if (typeof resolvePredictionAsOf === "function" && resolvePredictionAsOf(root?.predictionDate || root?.asOf || root?.eventDate, root)) return null;
+    const per = mk === "handicap_h1" ? "h1" : mk === "handicap_h2" ? "h2" : "ft";
+    const sc = getManualSeries("A", per, parsed || null, root).map(Number);
+    const al = getManualAllowedSeries("A", per, parsed || null, root).map(Number);
+    if (!sc.length || sc.length !== al.length) return [];
+    return sc.map((v, i) => v - al[i]).filter((v) => Number.isFinite(v));
+  } catch (_e) { return null; }
 }
 /* BB-FIX: virtual settlement of blocked picks. Call bbShadowSettle(eventId, marketKey, actualValue) after a game ends; bbShadowReport() shows whether blocks were right. */
 function bbShadowSettle(eventId, marketKey, actual) {
@@ -17611,11 +17655,51 @@ function bbShadowSettle(eventId, marketKey, actual) {
       if (e.result || String(e.eventId) !== String(eventId) || e.marketKey !== String(marketKey).toLowerCase() || !Number.isFinite(Number(actual))) return;
       const a = Number(actual);
       e.actual = a;
-      e.result = a === e.line ? "PUSH" : ((e.side === "OVER") === (a > e.line) ? "WOULD_WIN" : "WOULD_LOSE");
+      if (e.side === "HOME" || e.side === "AWAY") { /* handicap: actual = home margin, line = home handicap */
+        const c = a + e.line;
+        e.result = c === 0 ? "PUSH" : ((e.side === "HOME") === (c > 0) ? "WOULD_WIN" : "WOULD_LOSE");
+      } else {
+        e.result = a === e.line ? "PUSH" : ((e.side === "OVER") === (a > e.line) ? "WOULD_WIN" : "WOULD_LOSE");
+      }
+      try { if (typeof engineDebug === "function") engineDebug("Shadow-settled blocked pick: " + e.marketKey + " " + e.side + " " + e.line + " -> " + e.result + " (actual " + a + ")"); } catch (_d) {}
     });
     localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr));
   } catch (_e) {}
 }
+/* BB-FIX: grade blocked picks from a finished scoreboard competition (called from settlePendingPicksFromCompetition) */
+function bbShadowSettleFromCompetition(eventId, competition, final) {
+  try {
+    if (!final || !eventId || !competition) return;
+    const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
+    const open = arr.filter((e) => !e.result && String(e.eventId) === String(eventId));
+    if (!open.length) return;
+    const comps = competition.competitors || [];
+    const home = comps.find((c) => c.homeAway === "home") || comps[0];
+    const away = comps.find((c) => c.homeAway === "away") || comps[1];
+    if (!home || !away) return;
+    const num = (x) => Number(x && typeof x === "object" ? (x.value != null ? x.value : x.displayValue) : x);
+    const sH = num(home.score), sA = num(away.score);
+    if (!Number.isFinite(sH) || !Number.isFinite(sA)) return;
+    const lsH = (home.linescores || []).map(num), lsA = (away.linescores || []).map(num);
+    const hasQ = lsH.length >= 4 && lsA.length >= 4 && lsH.slice(0, 4).every(Number.isFinite) && lsA.slice(0, 4).every(Number.isFinite);
+    const sum = (a, i, j) => a.slice(i, j).reduce((x, y) => x + y, 0);
+    open.forEach((e) => {
+      const mk = e.marketKey; const aHome = e.roleA === "home"; const aKnown = e.roleA === "home" || e.roleA === "away";
+      let actual = NaN;
+      if (mk === "ft") actual = sH + sA;
+      else if (hasQ && mk === "h1") actual = sum(lsH, 0, 2) + sum(lsA, 0, 2);
+      else if (hasQ && mk === "h2") actual = sum(lsH, 2, 4) + sum(lsA, 2, 4);
+      else if (hasQ && /^q[1-4]$/.test(mk)) { const k = Number(mk[1]) - 1; actual = lsH[k] + lsA[k]; }
+      else if (aKnown && (mk === "team_a" || mk === "team_b")) actual = (mk === "team_a") === aHome ? sH : sA;
+      else if (aKnown && hasQ && (mk === "h1_team_a" || mk === "h1_team_b")) actual = (mk === "h1_team_a") === aHome ? sum(lsH, 0, 2) : sum(lsA, 0, 2);
+      else if (mk === "handicap") actual = sH - sA;
+      else if (hasQ && mk === "handicap_h1") actual = sum(lsH, 0, 2) - sum(lsA, 0, 2);
+      else if (hasQ && mk === "handicap_h2") actual = sum(lsH, 2, 4) - sum(lsA, 2, 4);
+      if (Number.isFinite(actual)) bbShadowSettle(eventId, mk, actual);
+    });
+  } catch (_e) {}
+}
+window.bbShadowSettleFromCompetition = bbShadowSettleFromCompetition;
 function bbShadowReport() {
   try {
     const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]").filter((e) => e.result && e.result !== "PUSH");
@@ -17624,7 +17708,7 @@ function bbShadowReport() {
   } catch (_e) { return null; }
 }
 window.bbShadowSettle = bbShadowSettle; window.bbShadowReport = bbShadowReport;
-function applyBBMarketGate(picks, rawMarketInputs, league) {
+function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
   if (!Array.isArray(picks)) return picks;
   const VOL_CAP = { OVER: Number(getParam("maxVolRatioOver", league)) || 1.5, UNDER: Number(getParam("maxVolRatioUnder", league)) || 1.25 };
   picks.forEach((p) => {
@@ -17633,6 +17717,39 @@ function applyBBMarketGate(picks, rawMarketInputs, league) {
       const mk = String(p.marketKey).toLowerCase();
       const txt = String(p.pick || "").toUpperCase();
       const side = txt.startsWith("UNDER") ? "UNDER" : txt.startsWith("OVER") ? "OVER" : "";
+      /* BB-FIX: handicap markets (HOME/AWAY picks). Side-aware margin check; allows or NO PLAYs only, never flips. */
+      if (!side && /^handicap(_h1|_h2)?$/.test(mk) && (txt === "HOME" || txt === "AWAY")) {
+        const Lh = Number(p.line);
+        let roleA = ""; try { roleA = typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : ""; } catch (_r) {}
+        const raw = bbMarginSample(mk, parsed);
+        const hsig = []; let hb = 0, hw = 0;
+        const hadd = (id, level, note) => { hsig.push({ id, level, note }); if (level === "BLOCK") hb++; else if (level === "WARN") hw++; };
+        if (Number.isFinite(Lh) && Array.isArray(raw) && (roleA === "home" || roleA === "away")) {
+          const homeM = raw.map((m) => (roleA === "home" ? m : -m)); /* margin from the home side */
+          if (homeM.length < 5) hadd("T8", "INFO", "thin margin sample n=" + homeM.length);
+          else {
+            const cov = homeM.map((m) => m + Lh); /* >0 home covers, <0 away covers */
+            const rate = cov.reduce((a, c) => a + (txt === "HOME" ? (c > 0 ? 1 : c === 0 ? 0.5 : 0) : (c < 0 ? 1 : c === 0 ? 0.5 : 0)), 0) / cov.length;
+            const never = txt === "HOME" ? Math.max.apply(null, cov) <= 0 : Math.min.apply(null, cov) >= 0;
+            if (never) hadd("T1", "BLOCK", txt + " side would never have covered " + Lh + " in the margin sample");
+            if (rate < 0.45) hadd("T2", "BLOCK", txt + " cover rate " + (rate * 100).toFixed(0) + "% at line " + Lh);
+            else if (rate < 0.55) hadd("T2", "WARN", txt + " cover rate " + (rate * 100).toFixed(0) + "% at line " + Lh);
+          }
+        } else hadd("T8", "INFO", "no margin sample available");
+        const hstatus = hb > 0 || hw >= 2 ? "BLOCK" : hw ? "WARNING" : "CLEAR";
+        p.marketIntegrity = { status: hstatus, side: txt, signals: hsig, baitAligned: false };
+        if (hstatus === "BLOCK") {
+          const why = "TRAP BLOCK: " + hsig.filter((x) => x.level !== "INFO").map((x) => x.note).join("; ");
+          p.blockedPick = p.pick;
+          try {
+            const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
+            arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side: txt, line: Lh, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "" });
+            localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr.slice(-300)));
+          } catch (_e) {}
+          forcePickNoPlayWithNote(p, why);
+        }
+        return;
+      }
       if (!side) return;
       const L = Number(p.line);
       const sig = []; let blocks = 0; let warns = 0; let baitAligned = false;
@@ -17643,10 +17760,11 @@ function applyBBMarketGate(picks, rawMarketInputs, league) {
         const g = String(p.confidenceGrade || p.confidence || "").trim().charAt(0).toUpperCase();
         if (/[ABCD]/.test(g) && getConfidenceRank(g) < getConfidenceRank("B")) add("UNDER_CONF", "BLOCK", "Under needs confidence grade B or better (got " + g + ")");
       }
-      const S = bbSampleStats(bbTrapSample(mk));
+      const _smp = bbTrapSample(mk, parsed);
+      const S = bbSampleStats(_smp);
       if (S.n < 5) {
-        if (bbTrapSample(mk) !== null && side === "UNDER") add("T8", "BLOCK", "insufficient evidence for Under (n=" + S.n + ")");
-        else if (bbTrapSample(mk) !== null) add("T8", "INFO", "thin sample n=" + S.n);
+        if (_smp !== null && side === "UNDER") add("T8", "BLOCK", "insufficient evidence for Under (n=" + S.n + ")");
+        else if (_smp !== null) add("T8", "INFO", "thin sample n=" + S.n);
       } else if (Number.isFinite(L) && L > 0) {
         const win = side === "UNDER" ? S.share((x) => (x < L ? 1 : x === L ? 0.5 : 0)) : S.share((x) => (x > L ? 1 : x === L ? 0.5 : 0));
         if (side === "UNDER" && S.min >= L) add("T1", "BLOCK", "team never scored below " + L + " in sample");
@@ -17674,7 +17792,7 @@ function applyBBMarketGate(picks, rawMarketInputs, league) {
         p.blockedPick = p.pick;
         try {
           const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
-          arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side, line: L, proj: p.proj, reason: why });
+          arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side, line: L, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "" });
           localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr.slice(-300)));
         } catch (_e) {}
         forcePickNoPlayWithNote(p, why);
@@ -20803,7 +20921,7 @@ function renderTrackedPicks() {
     emptyEl.textContent = savedCount
       ? "No live/recent picks in this window. Older picks are still saved — check Record / wait for game window."
       : "No tracked picks saved yet.";
-    wrapEl.style.display = isTrackerPicksView() ? "none" : "block";
+    wrapEl.style.display = "block"; /* BB-FIX: #trackerAnalyticsPanel lives inside this wrapper; hiding it blanked Report/Debug/Configs/Health */
     g_trackerRenderToken++; // cancel any older paint still waiting for its animation frame
     bodyEl.innerHTML = "";
     return;
@@ -23903,6 +24021,10 @@ function queueSettleSave(picks) {
 
 function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
   if (!eventId || !competition) return false;
+  try { /* BB-FIX: grade blocked (shadow) picks even when no tracked pick exists for this event */
+    const _stT = competition?.status?.type || {};
+    bbShadowSettleFromCompetition(eventId, competition, !!(gameFinal || _stT.completed || _stT.state === "post" || _stT.name === "STATUS_FINAL"));
+  } catch (_sh) {}
   const eid = String(eventId);
   const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
   const pending = active.filter(
@@ -39236,7 +39358,7 @@ async function runEngine() {
 
                                                                                                         
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
-    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league);
+    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league, typeof parsed !== "undefined" ? parsed : null);
 
     finalPicksForDisplay.forEach((p) => {
       p.smartLineNoPlay = p.displayPick === "NO PLAY" && p.pick !== "NO PLAY";
@@ -39398,7 +39520,7 @@ async function runEngine() {
                                                                               
                                                                                         
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
-    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league);
+    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league, typeof parsed !== "undefined" ? parsed : null);
 
     const paceIcon = ftCalc.pace > 100 ? "🔥" : "🧊";
 
