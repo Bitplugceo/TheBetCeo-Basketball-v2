@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7014,12 +7013,12 @@ const TUNABLE_PARAM_REGISTRY = {
     lastVerifiedAt: null,
   },
   underEdgeFactor: {
-    value: 1.5,
-    min: 1.3,
-    max: 2.5,
+    value: 1.2,
+    min: 1.0,
+    max: 1.6,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b", "h1_team_a", "h1_team_b"],
+    appliesTo: ["ft", "h1", "q1", "q2", "q3", "q4", "team_a", "team_b"],
     description:
       "ISSUE-030 VERIFY: per-league under threshold multiplier (UNDER harder than OVER). Default 1.2 global; league override path via getParam(underEdgeFactor, league). No silent behavior change — ensure Number.isFinite before multiply.",
     lastVerifiedAt: null,
@@ -7340,30 +7339,6 @@ const TUNABLE_PARAM_REGISTRY = {
     scope: "global",
     appliesTo: ["handicap_h2"],
     description: "Point edge threshold required for 2H Handicap picks (WNBA-only market)",
-    lastVerifiedAt: null,
-  },
-
-  maxVolRatioOver: {
-    value: 1.5, min: 1.0, max: 3.0, type: "scalar", scope: "global",
-    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b"],
-    description: "Volatility-ratio cap above which an Over is forced to NO PLAY (applyBBMarketGate). Provisional - validate on settled data.",
-    lastVerifiedAt: null,
-  },
-  maxVolRatioUnder: {
-    value: 1.25, min: 0.8, max: 3.0, type: "scalar", scope: "global",
-    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b"],
-    description: "Volatility-ratio cap above which an Under is forced to NO PLAY (stricter than Over). Provisional - validate on settled data.",
-    lastVerifiedAt: null,
-  },
-
-  fatigueShortRestPenalty: {
-    value: -1.0,
-    min: -4.0,
-    max: 0,
-    type: "scalar",
-    scope: "global",
-    appliesTo: ["ft", "h1", "h2", "q1", "q2", "q3", "q4", "team_a", "team_b"],
-    description: "Point signal (per team, before market scaling) for 1 day rest after a short previous gap. Live-wired in buildTeamMarketIntelSignal.",
     lastVerifiedAt: null,
   },
 
@@ -8906,7 +8881,7 @@ let INJURY_OPPONENT_BOOST_FACTOR =
   getParam("injuryOppBoostFactor") ?? getTunableConstant("INJURY_OPPONENT_BOOST_FACTOR", 0.2);
 
 /* CALCULATION SECTION */
-let UNDER_EDGE_FACTOR = getParam("underEdgeFactor") ?? getTunableConstant("UNDER_EDGE_FACTOR", 1.5);
+let UNDER_EDGE_FACTOR = getParam("underEdgeFactor") ?? getTunableConstant("UNDER_EDGE_FACTOR", 1.2);
 
                                
 const TUNING_GRID = {
@@ -10686,7 +10661,7 @@ function computeQuarterProjection({
       projA *= injA;
       projB *= injB;
       if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function" && typeof computeIntelligencePack === "function") {
-        const _qIntel = computeIntelligencePack(league, null, _parsed, "q1");
+        const _qIntel = computeIntelligencePack(league, null, _parsed);
         const _qVolR = Number.isFinite(qVolRatio) ? qVolRatio : 1;
         projA = applyDampedIntelSignal(projA, buildTeamMarketIntelSignal(_qIntel, "A").signal, _qVolR);
         projB = applyDampedIntelSignal(projB, buildTeamMarketIntelSignal(_qIntel, "B").signal, _qVolR);
@@ -11219,7 +11194,7 @@ function assertInvariant(condition, label, context) {
 /* CALCULATION SECTION */
 function getMetricForMarket(marketKey) {
   const key = String(marketKey || "").toLowerCase();
-  if (key === "ft" || key === "h1" || key === "team_a" || key === "team_b" || key === "h2" || key === "h1_team_a" || key === "h1_team_b" || key.startsWith("q")) {
+  if (key === "ft" || key === "h1" || key === "team_a" || key === "team_b" || key.startsWith("q")) {
     return { decision: "brier", projection: "rmse" };
   }
 
@@ -11509,7 +11484,7 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
     venueStrongGames: [8, 9, 10, 11, 12],
     venueModerateWeight: [0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
     venueStrongWeight: [0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
-    underEdgeFactor: [1.3, 1.4, 1.5, 1.6, 1.8],
+    underEdgeFactor: [1.0, 1.1, 1.2, 1.3, 1.4],
     injuryOppBoostFactor: [0.1, 0.15, 0.2, 0.25, 0.3],
     edgeFTPointThreshold: [4.0, 5.0, 6.0, 7.0, 8.0],
     edgeH1PointThreshold: [5.0, 6.0, 7.0, 8.0, 9.0],
@@ -14378,16 +14353,13 @@ async function purgeZombieTrackerStorageKeys(keepKey) {
   return { purged };
 }
 
-let g_zombiePurgeRanThisSession = false;
 async function loadTrackerStateFromLocal() {
   try {
     const keys = getTrackerLocalStateCandidateKeys();
     const candidates = [];
 
-    const _raws = await Promise.all(keys.map((k) => readAsyncStorage(k).catch(() => undefined)));
-    for (let _ki = 0; _ki < keys.length; _ki++) {
-      const key = keys[_ki];
-      const raw = _raws[_ki];
+    for (const key of keys) {
+      const raw = await readAsyncStorage(key);
       if (!raw) continue;
 
       let parsed;
@@ -14422,20 +14394,7 @@ async function loadTrackerStateFromLocal() {
                                                                              
                                                    
     const canonicalKey = getTrackerLocalStateStableKey();
-    // If the freshest copy lives under a legacy key, copy it to the canonical key BEFORE the purge deletes
-    // the legacy keys — otherwise the purge could delete the only up-to-date copy.
-    let _canonOk = true;
-    if (best && canonicalKey && best.key !== canonicalKey) {
-      try {
-        _canonOk = (await writeAsyncStorage(canonicalKey, JSON.stringify(best.state))) !== false;
-      } catch (_cw) {
-        _canonOk = false;
-      }
-    }
-    if (_canonOk && !g_zombiePurgeRanThisSession) {
-      g_zombiePurgeRanThisSession = true; // the purge is idempotent; once per session is enough
-      purgeZombieTrackerStorageKeys(canonicalKey).catch(() => {});
-    }
+    purgeZombieTrackerStorageKeys(canonicalKey).catch(() => {});
 
     return best ? best.state : null;
   } catch (err) {
@@ -14474,8 +14433,18 @@ async function _saveTrackerStateToLocalUnsafe() {
       throw new Error("Tracker persistence verification failed: stored payload does not exactly match the committed payload.");
     }
 
-    // (removed: a 3rd full read of the whole payload that only logged a warning — the exact-match
-    //  read-back verification above already proves the data was committed)
+    try {
+      const _isInDB = await _bbIdbTx("readonly", (store) => store.get(primaryKey), 4000)
+        .then((r) => !!r)
+        .catch(() => false);
+      if (!_isInDB) {
+        trackerDebug("WARN: IndexedDB write not present; verified fallback storage payload instead.");
+      }
+    } catch (_verifyErr) {
+      engineDebug("IndexedDB verify step failed", {
+        error: _verifyErr?.message || String(_verifyErr),
+      });
+    }
     return true;
   } catch (err) {
     console.error("[BB Engine] saveTrackerStateToLocal async failed", err);
@@ -14495,16 +14464,8 @@ async function _saveTrackerStateToLocalUnsafe() {
 
                                                                                       
                                                                           
-let g_trackerLocalSaveQueued = null;
 async function saveTrackerStateToLocal() {
-  // A save that is queued but has not started yet will read the CURRENT state when it runs, so extra
-  // callers can safely share it instead of each doing their own full write + verify cycle.
-  if (g_trackerLocalSaveQueued) return g_trackerLocalSaveQueued;
-  const task = g_trackerLocalSaveChain.then(() => {
-    g_trackerLocalSaveQueued = null;
-    return _saveTrackerStateToLocalUnsafe();
-  });
-  g_trackerLocalSaveQueued = task;
+  const task = g_trackerLocalSaveChain.then(() => _saveTrackerStateToLocalUnsafe());
   g_trackerLocalSaveChain = task.catch(() => {});
   return task;
 }
@@ -15089,7 +15050,6 @@ function rebuildTrackerDerivedState() {
   return AppState.tracker.derived;
 }
 let g_trackerHydratePromise = null;
-let g_trackerServerArchiveStripped = false; // true once a size-reduced push (no archive) has been sent
 let g_trackerFollowupTimer = null;
 let g_trackerSaveTimer = null;
 let g_deletedSigLock = new Set();
@@ -15443,25 +15403,6 @@ function closeEngineErrorPage() {
   renderHeaderErrorState();
 }
 
-/* BB-FIX: AFDB was referenced by the 🔬 button and openEngineErrorDebug() but never defined, so the debug page never opened. */
-window.AFDB = window.AFDB || {
-  open: async function () {
-    try {
-      const modal = document.getElementById("trackerModal");
-      if (modal && !modal.classList.contains("open") && typeof openTrackerModal === "function") {
-        await openTrackerModal();
-      }
-      if (typeof setTrackerModalView === "function") setTrackerModalView("debug");
-    } catch (e) {
-      console.error("[BB Engine] AFDB.open failed", e);
-    }
-  },
-  close: function () { if (typeof closeTrackerModal === "function") closeTrackerModal(); },
-  log: function (level, tag, event, payload) {
-    if (typeof engineDebug === "function") engineDebug("[" + String(tag || "AFDB") + "] " + String(event || ""), payload || null);
-  },
-};
-
 function openEngineErrorDebug() {
   closeEngineErrorPage();
   if (typeof AFDB !== "undefined" && typeof AFDB.open === "function") {
@@ -15559,8 +15500,9 @@ const MILITARY_RAID_DEPENDENCIES = [
 function checkMilitaryRaidDependencies() {
   const root = typeof window !== "undefined" ? window : globalThis;
   const missing = MILITARY_RAID_DEPENDENCIES.filter((name) => typeof root[name] !== "function");
-  // AFDB.runTestFetch is an optional diagnostic hook (not defined in this build) — it is not a
-  // hard dependency, so it no longer triggers a false "missing dependency" error on every raid.
+  if (!(typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function")) {
+    missing.push("AFDB.runTestFetch");
+  }
   return missing;
 }
 
@@ -15694,6 +15636,14 @@ async function triggerTrackerMilitaryRaid() {
 
                                                                                
                                                                           
+  await runStage("purge zombie storage", async () => {
+    const canonicalKey = getTrackerLocalStateStableKey();
+    const res = await purgeZombieTrackerStorageKeys(canonicalKey);
+    report.zombieKeysPurged = res?.purged || 0;
+  });
+
+                                                                                 
+                                                  
   await runStage("reconcile buckets", () => {
     const reconciled = reconcileTrackerBucketConflicts(
       AppState.tracker.state.activePicks,
@@ -15706,24 +15656,13 @@ async function triggerTrackerMilitaryRaid() {
 
                                                                               
                                                                         
-  // Zombie-key purge only touches storage keys other than the canonical one, so it is independent of
-  // settlement. Result fetch + live-clock sync are independent network calls. Run all three at once.
-  await Promise.all([
-    runStage("purge zombie storage", async () => {
-      const canonicalKey = getTrackerLocalStateStableKey();
-      const res = await purgeZombieTrackerStorageKeys(canonicalKey);
-      report.zombieKeysPurged = res?.purged || 0;
-    }),
-    runStage("force-settle + live sync", async () => {
-      const pendingBefore = countPending();
-      await Promise.all([
-        typeof refreshTrackedPickResults === "function" ? refreshTrackedPickResults() : null,
-        typeof pollLiveGameClocks === "function" ? pollLiveGameClocks() : null,
-      ]);
-      report.settledThisPass = Math.max(0, pendingBefore - countPending());
-      report.liveGamesSynced = g_liveGameStatus ? g_liveGameStatus.size : 0;
-    }),
-  ]);
+  await runStage("force-settle + live sync", async () => {
+    const pendingBefore = countPending();
+    if (typeof refreshTrackedPickResults === "function") await refreshTrackedPickResults();
+    if (typeof pollLiveGameClocks === "function") await pollLiveGameClocks();
+    report.settledThisPass = Math.max(0, pendingBefore - countPending());
+    report.liveGamesSynced = g_liveGameStatus ? g_liveGameStatus.size : 0;
+  });
 
                                                                               
                                      
@@ -15774,10 +15713,7 @@ async function triggerTrackerMilitaryRaid() {
                                                                           
   await runStage("diagnostic sweep", async () => {
     if (typeof AFDB !== "undefined" && typeof AFDB.runTestFetch === "function") {
-      // diagnostics only — never make the raid wait on it
-      Promise.resolve()
-        .then(() => AFDB.runTestFetch())
-        .catch((e) => raidLog("diagnostic_failed", { error: e?.message || String(e) }));
+      await AFDB.runTestFetch();
     }
   });
 
@@ -16281,7 +16217,6 @@ function syncTrackerModalView() {
     panel.classList.add("analytics-view");
   }
   panel.classList.toggle("health-view", g_trackerModalView === "health");
-  try { const _w = document.getElementById("trackedPicksWrap"); if (_w) _w.style.display = "block"; } catch (_e) {} /* BB-FIX */
 }
 
 function setTrackerModalView(view) {
@@ -17574,231 +17509,6 @@ function applySiblingMarketContradictionGate(picks, rawMarketInputs) {
       forceKeys(["q3", "q4", "h2"], "Market contradiction: Q3+Q4 vs 2H lines");
     }
   }
-  /* BB-FIX: extra cross-market line consistency */
-  const _fin = (v) => Number.isFinite(v);
-  const _ta = lineOf("team_a"), _tb = lineOf("team_b"), _ft = lineOf("ft");
-  if (_fin(_ta) && _fin(_tb) && _fin(_ft) && Math.abs(_ta + _tb - _ft) > 6.0) {
-    forceKeys(["team_a", "team_b", "ft"], "Market contradiction: Team A + Team B vs FT lines");
-  }
-  if (_fin(h1) && _fin(h2) && _fin(_ft) && Math.abs(h1 + h2 - _ft) > 6.0) {
-    forceKeys(["h1", "h2", "ft"], "Market contradiction: 1H + 2H vs FT lines");
-  }
-  const _h1a = lineOf("h1_team_a"), _h1b = lineOf("h1_team_b");
-  if (_fin(_h1a) && _fin(_h1b) && _fin(h1) && Math.abs(_h1a + _h1b - h1) > 4.0) {
-    forceKeys(["h1_team_a", "h1_team_b", "h1"], "Market contradiction: 1H Team A + 1H Team B vs 1H lines");
-  }
-  return picks;
-}
-
-
-/* BB-FIX: Under strictness + volatility gate + market-trap gate. Allows or NO PLAYs only; never flips a pick. */
-function bbSampleStats(arr) {
-  const v = (Array.isArray(arr) ? arr : []).map(Number).filter((x) => Number.isFinite(x) && x > 0).sort((a, b) => a - b);
-  const n = v.length;
-  if (!n) return { n: 0 };
-  const mean = v.reduce((a, b) => a + b, 0) / n;
-  const sd = Math.sqrt(v.reduce((a, b) => a + (b - mean) * (b - mean), 0) / Math.max(1, n - 1));
-  const med = n % 2 ? v[(n - 1) / 2] : (v[n / 2 - 1] + v[n / 2]) / 2;
-  const share = (f) => v.reduce((a, x) => a + f(x), 0) / n;
-  return { n, v, mean, sd: Math.max(sd, 1), med, min: v[0], max: v[n - 1], share };
-}
-function bbTrapSample(mk, parsed) {
-  try {
-    const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || null;
-    if (!root) return null;
-    if (typeof resolvePredictionAsOf === "function" && resolvePredictionAsOf(root?.predictionDate || root?.asOf || root?.eventDate, root)) return null; /* replay: no leakage */
-    const num = (x) => (Array.isArray(x) ? x.map(Number) : []);
-    const tot = (side, sk, ak) => {
-      const o = root?.[side]?.overall || {};
-      const sc = num(o[sk]), al = num(o[ak]);
-      if (!sc.length || sc.length !== al.length) return [];
-      return sc.map((v, i) => v + al[i]).filter((v) => Number.isFinite(v) && v > 0);
-    };
-    if (mk === "team_a") return getOverallSeries("A", 10);
-    if (mk === "team_b") return getOverallSeries("B", 10);
-    if (mk === "h1_team_a") return num(root?.A?.overall?.h1Scored10).filter((v) => v > 0);
-    if (mk === "h1_team_b") return num(root?.B?.overall?.h1Scored10).filter((v) => v > 0);
-    if (mk === "ft") return tot("A", "ftScored10", "ftAllowed10").concat(tot("B", "ftScored10", "ftAllowed10"));
-    if (mk === "h1") return tot("A", "h1Scored10", "h1Allowed10").concat(tot("B", "h1Scored10", "h1Allowed10"));
-    if (mk === "h2") return tot("A", "h2Scored10", "h2Allowed10").concat(tot("B", "h2Scored10", "h2Allowed10"));
-    /* BB-FIX: quarters use the same series the quarter projection reads (fetched or manual) */
-    if (/^q[1-4]$/.test(mk) && typeof getManualSeries === "function" && typeof getManualAllowedSeries === "function") {
-      const one = (side) => {
-        const sc = getManualSeries(side, mk, parsed || null, root).map(Number);
-        const al = getManualAllowedSeries(side, mk, parsed || null, root).map(Number);
-        if (!sc.length || sc.length !== al.length) return [];
-        return sc.map((v, i) => v + al[i]).filter((v) => Number.isFinite(v) && v > 0);
-      };
-      return one("A").concat(one("B"));
-    }
-  } catch (_e) {}
-  return null;
-}
-/* BB-FIX: team A margin history (scored - allowed) for handicap markets. mk: handicap | handicap_h1 | handicap_h2 */
-function bbMarginSample(mk, parsed) {
-  try {
-    const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || null;
-    if (!root || typeof getManualSeries !== "function" || typeof getManualAllowedSeries !== "function") return null;
-    if (typeof resolvePredictionAsOf === "function" && resolvePredictionAsOf(root?.predictionDate || root?.asOf || root?.eventDate, root)) return null;
-    const per = mk === "handicap_h1" ? "h1" : mk === "handicap_h2" ? "h2" : "ft";
-    const sc = getManualSeries("A", per, parsed || null, root).map(Number);
-    const al = getManualAllowedSeries("A", per, parsed || null, root).map(Number);
-    if (!sc.length || sc.length !== al.length) return [];
-    return sc.map((v, i) => v - al[i]).filter((v) => Number.isFinite(v));
-  } catch (_e) { return null; }
-}
-/* BB-FIX: virtual settlement of blocked picks. Call bbShadowSettle(eventId, marketKey, actualValue) after a game ends; bbShadowReport() shows whether blocks were right. */
-function bbShadowSettle(eventId, marketKey, actual) {
-  try {
-    const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
-    arr.forEach((e) => {
-      if (e.result || String(e.eventId) !== String(eventId) || e.marketKey !== String(marketKey).toLowerCase() || !Number.isFinite(Number(actual))) return;
-      const a = Number(actual);
-      e.actual = a;
-      if (e.side === "HOME" || e.side === "AWAY") { /* handicap: actual = home margin, line = home handicap */
-        const c = a + e.line;
-        e.result = c === 0 ? "PUSH" : ((e.side === "HOME") === (c > 0) ? "WOULD_WIN" : "WOULD_LOSE");
-      } else {
-        e.result = a === e.line ? "PUSH" : ((e.side === "OVER") === (a > e.line) ? "WOULD_WIN" : "WOULD_LOSE");
-      }
-      try { if (typeof engineDebug === "function") engineDebug("Shadow-settled blocked pick: " + e.marketKey + " " + e.side + " " + e.line + " -> " + e.result + " (actual " + a + ")"); } catch (_d) {}
-    });
-    localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr));
-  } catch (_e) {}
-}
-/* BB-FIX: grade blocked picks from a finished scoreboard competition (called from settlePendingPicksFromCompetition) */
-function bbShadowSettleFromCompetition(eventId, competition, final) {
-  try {
-    if (!final || !eventId || !competition) return;
-    const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
-    const open = arr.filter((e) => !e.result && String(e.eventId) === String(eventId));
-    if (!open.length) return;
-    const comps = competition.competitors || [];
-    const home = comps.find((c) => c.homeAway === "home") || comps[0];
-    const away = comps.find((c) => c.homeAway === "away") || comps[1];
-    if (!home || !away) return;
-    const num = (x) => Number(x && typeof x === "object" ? (x.value != null ? x.value : x.displayValue) : x);
-    const sH = num(home.score), sA = num(away.score);
-    if (!Number.isFinite(sH) || !Number.isFinite(sA)) return;
-    const lsH = (home.linescores || []).map(num), lsA = (away.linescores || []).map(num);
-    const hasQ = lsH.length >= 4 && lsA.length >= 4 && lsH.slice(0, 4).every(Number.isFinite) && lsA.slice(0, 4).every(Number.isFinite);
-    const sum = (a, i, j) => a.slice(i, j).reduce((x, y) => x + y, 0);
-    open.forEach((e) => {
-      const mk = e.marketKey; const aHome = e.roleA === "home"; const aKnown = e.roleA === "home" || e.roleA === "away";
-      let actual = NaN;
-      if (mk === "ft") actual = sH + sA;
-      else if (hasQ && mk === "h1") actual = sum(lsH, 0, 2) + sum(lsA, 0, 2);
-      else if (hasQ && mk === "h2") actual = sum(lsH, 2, 4) + sum(lsA, 2, 4);
-      else if (hasQ && /^q[1-4]$/.test(mk)) { const k = Number(mk[1]) - 1; actual = lsH[k] + lsA[k]; }
-      else if (aKnown && (mk === "team_a" || mk === "team_b")) actual = (mk === "team_a") === aHome ? sH : sA;
-      else if (aKnown && hasQ && (mk === "h1_team_a" || mk === "h1_team_b")) actual = (mk === "h1_team_a") === aHome ? sum(lsH, 0, 2) : sum(lsA, 0, 2);
-      else if (mk === "handicap") actual = sH - sA;
-      else if (hasQ && mk === "handicap_h1") actual = sum(lsH, 0, 2) - sum(lsA, 0, 2);
-      else if (hasQ && mk === "handicap_h2") actual = sum(lsH, 2, 4) - sum(lsA, 2, 4);
-      if (Number.isFinite(actual)) bbShadowSettle(eventId, mk, actual);
-    });
-  } catch (_e) {}
-}
-window.bbShadowSettleFromCompetition = bbShadowSettleFromCompetition;
-function bbShadowReport() {
-  try {
-    const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]").filter((e) => e.result && e.result !== "PUSH");
-    const w = arr.filter((e) => e.result === "WOULD_WIN").length;
-    return { settled: arr.length, wouldWin: w, wouldLose: arr.length - w, blockCorrectRate: arr.length ? (arr.length - w) / arr.length : null };
-  } catch (_e) { return null; }
-}
-window.bbShadowSettle = bbShadowSettle; window.bbShadowReport = bbShadowReport;
-function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
-  if (!Array.isArray(picks)) return picks;
-  const VOL_CAP = { OVER: Number(getParam("maxVolRatioOver", league)) || 1.5, UNDER: Number(getParam("maxVolRatioUnder", league)) || 1.25 };
-  picks.forEach((p) => {
-    try {
-      if (!p || !p.marketKey || p.pick === "NO PLAY" || p.pick === "—" || p.marketIntegrity) return;
-      const mk = String(p.marketKey).toLowerCase();
-      const txt = String(p.pick || "").toUpperCase();
-      const side = txt.startsWith("UNDER") ? "UNDER" : txt.startsWith("OVER") ? "OVER" : "";
-      /* BB-FIX: handicap markets (HOME/AWAY picks). Side-aware margin check; allows or NO PLAYs only, never flips. */
-      if (!side && /^handicap(_h1|_h2)?$/.test(mk) && (txt === "HOME" || txt === "AWAY")) {
-        const Lh = Number(p.line);
-        let roleA = ""; try { roleA = typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : ""; } catch (_r) {}
-        const raw = bbMarginSample(mk, parsed);
-        const hsig = []; let hb = 0, hw = 0;
-        const hadd = (id, level, note) => { hsig.push({ id, level, note }); if (level === "BLOCK") hb++; else if (level === "WARN") hw++; };
-        if (Number.isFinite(Lh) && Array.isArray(raw) && (roleA === "home" || roleA === "away")) {
-          const homeM = raw.map((m) => (roleA === "home" ? m : -m)); /* margin from the home side */
-          if (homeM.length < 5) hadd("T8", "INFO", "thin margin sample n=" + homeM.length);
-          else {
-            const cov = homeM.map((m) => m + Lh); /* >0 home covers, <0 away covers */
-            const rate = cov.reduce((a, c) => a + (txt === "HOME" ? (c > 0 ? 1 : c === 0 ? 0.5 : 0) : (c < 0 ? 1 : c === 0 ? 0.5 : 0)), 0) / cov.length;
-            const never = txt === "HOME" ? Math.max.apply(null, cov) <= 0 : Math.min.apply(null, cov) >= 0;
-            if (never) hadd("T1", "BLOCK", txt + " side would never have covered " + Lh + " in the margin sample");
-            if (rate < 0.45) hadd("T2", "BLOCK", txt + " cover rate " + (rate * 100).toFixed(0) + "% at line " + Lh);
-            else if (rate < 0.55) hadd("T2", "WARN", txt + " cover rate " + (rate * 100).toFixed(0) + "% at line " + Lh);
-          }
-        } else hadd("T8", "INFO", "no margin sample available");
-        const hstatus = hb > 0 || hw >= 2 ? "BLOCK" : hw ? "WARNING" : "CLEAR";
-        p.marketIntegrity = { status: hstatus, side: txt, signals: hsig, baitAligned: false };
-        if (hstatus === "BLOCK") {
-          const why = "TRAP BLOCK: " + hsig.filter((x) => x.level !== "INFO").map((x) => x.note).join("; ");
-          p.blockedPick = p.pick;
-          try {
-            const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
-            arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side: txt, line: Lh, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "" });
-            localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr.slice(-300)));
-          } catch (_e) {}
-          forcePickNoPlayWithNote(p, why);
-        }
-        return;
-      }
-      if (!side) return;
-      const L = Number(p.line);
-      const sig = []; let blocks = 0; let warns = 0; let baitAligned = false;
-      const add = (id, level, note) => { sig.push({ id, level, note }); if (level === "BLOCK") blocks++; else if (level === "WARN") warns++; };
-      const vr = Number(p.volatility) / Number(p.volLimit);
-      if (Number.isFinite(vr) && vr > VOL_CAP[side]) add("VOL", "BLOCK", "volatility ratio " + vr.toFixed(2) + " > cap " + VOL_CAP[side]);
-      if (side === "UNDER" && typeof getConfidenceRank === "function") {
-        const g = String(p.confidenceGrade || p.confidence || "").trim().charAt(0).toUpperCase();
-        if (/[ABCD]/.test(g) && getConfidenceRank(g) < getConfidenceRank("B")) add("UNDER_CONF", "BLOCK", "Under needs confidence grade B or better (got " + g + ")");
-      }
-      const _smp = bbTrapSample(mk, parsed);
-      const S = bbSampleStats(_smp);
-      if (S.n < 5) {
-        if (_smp !== null && side === "UNDER") add("T8", "BLOCK", "insufficient evidence for Under (n=" + S.n + ")");
-        else if (_smp !== null) add("T8", "INFO", "thin sample n=" + S.n);
-      } else if (Number.isFinite(L) && L > 0) {
-        const win = side === "UNDER" ? S.share((x) => (x < L ? 1 : x === L ? 0.5 : 0)) : S.share((x) => (x > L ? 1 : x === L ? 0.5 : 0));
-        if (side === "UNDER" && S.min >= L) add("T1", "BLOCK", "team never scored below " + L + " in sample");
-        if (side === "OVER" && S.max <= L) add("T1", "BLOCK", "team never scored above " + L + " in sample");
-        const bk = side === "UNDER" ? [0.60, 0.70] : [0.45, 0.55];
-        if (win < bk[0]) add("T2", "BLOCK", side + " hit-rate " + (win * 100).toFixed(0) + "% at line " + L);
-        else if (win < bk[1]) add("T2", "WARN", side + " hit-rate " + (win * 100).toFixed(0) + "% at line " + L);
-        const meta = typeof parseMarketRangeMeta === "function" ? parseMarketRangeMeta((rawMarketInputs || {})[p.marketKey] || "") : null;
-        if (meta && meta.isRange && !meta.invalid) {
-          const pBelowLow = S.share((x) => (x < meta.low ? 1 : 0)), pAboveHigh = S.share((x) => (x > meta.high ? 1 : 0));
-          const pAboveMid = S.share((x) => (x > L ? 1 : 0)), pBelowMid = 1 - pAboveMid;
-          const underBait = pBelowLow <= 0.1 && pAboveMid >= 0.7;
-          const overBait = pAboveHigh <= 0.1 && pBelowMid >= 0.7;
-          if (underBait && side === "UNDER") add("T3", "BLOCK", "range " + meta.low + "-" + meta.high + " looks like Under bait (team rarely < " + meta.low + ")");
-          if (overBait && side === "OVER") add("T3", "BLOCK", "range " + meta.low + "-" + meta.high + " looks like Over bait (team rarely > " + meta.high + ")");
-          if ((underBait && side === "OVER") || (overBait && side === "UNDER")) baitAligned = true;
-        }
-        const adverse = (side === "UNDER" ? S.med - Number(p.proj) : Number(p.proj) - S.med) / S.sd;
-        if (Number.isFinite(adverse)) { if (adverse >= 1.5) add("T4", "BLOCK", "projection disagrees with history by " + adverse.toFixed(1) + " SD"); else if (adverse >= 1.0) add("T4", "WARN", "projection disagrees with history by " + adverse.toFixed(1) + " SD"); }
-      }
-      const status = blocks > 0 || (side === "UNDER" && warns >= 1) || (side === "OVER" && warns >= 2) ? "BLOCK" : warns ? "WARNING" : "CLEAR";
-      p.marketIntegrity = { status, side, signals: sig, baitAligned };
-      if (status === "BLOCK") {
-        const why = "TRAP BLOCK: " + sig.filter((x) => x.level !== "INFO").map((x) => x.note).join("; ");
-        p.blockedPick = p.pick;
-        try {
-          const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
-          arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side, line: L, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "" });
-          localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr.slice(-300)));
-        } catch (_e) {}
-        forcePickNoPlayWithNote(p, why);
-      }
-    } catch (_ge) { if (typeof engineDebug === "function") engineDebug("applyBBMarketGate failed", { error: String(_ge && _ge.message || _ge) }); }
-  });
   return picks;
 }
 
@@ -19157,9 +18867,6 @@ async function pushTrackerStateToServer(state, isExit = false) {
         return rest;
       });
       stateToPush = { ...state, activePicks: leanActive, archivedPicks: [], lineMemory: {} };
-      g_trackerServerArchiveStripped = (state.archivedPicks || []).length > 0;
-    } else {
-      g_trackerServerArchiveStripped = false;
     }
 
     let payload;
@@ -19232,8 +18939,7 @@ async function _flushTrackerSaveUnsafe() {
     const snapshot = JSON.parse(JSON.stringify(AppState.tracker.state));
     const pushed = await pushTrackerStateToServer(snapshot);
     if (pushed && pushed.ok && pushed.state) {
-      // merge into LIVE state, not the pre-push snapshot, or edits made during the POST are wiped
-      const merged = mergeTrackerStates(AppState.tracker.state, pushed.state);
+      const merged = mergeTrackerStates(snapshot, pushed.state);
       normalizeTrackerState(merged);
       await saveTrackerStateToLocal();
     }
@@ -19452,18 +19158,7 @@ async function fetchTrackerJson(url, options = {}, timeoutMs = TRACKER_NETWORK_T
 }
 
 window.primeTrackerStateForRun = async function primeTrackerStateForRun() {
-  let localState = await loadTrackerStateFromLocal();
-  // never replace fresher in-memory state (e.g. a just-settled pick not yet written) with the disk copy
-  try {
-    const _liveNow = AppState.tracker.state;
-    if (localState && _liveNow && !isTrackerStateMeaningfullyEmpty(_liveNow)) {
-      localState = mergeTrackerStates(_liveNow, localState);
-    } else if (!localState && _liveNow && !isTrackerStateMeaningfullyEmpty(_liveNow)) {
-      localState = _liveNow;
-    }
-  } catch (_pm) {
-    engineDebug("primeTrackerStateForRun: live/disk merge failed", { error: _pm?.message || String(_pm) });
-  }
+  const localState = await loadTrackerStateFromLocal();
 
   if (localState) {
     normalizeTrackerState(localState);
@@ -19688,16 +19383,7 @@ function scheduleLiveClockPoll(delayMs) {
 
 let _liveClockPollInFlight = false;
 let _liveClockPollAbort = null;
-let _liveClockPollPromise = null;
-// Callers that arrive while a poll is running now wait for that same poll instead of returning instantly.
-function pollLiveGameClocks() {
-  if (_liveClockPollPromise) return _liveClockPollPromise;
-  _liveClockPollPromise = _pollLiveGameClocksImpl().finally(() => {
-    _liveClockPollPromise = null;
-  });
-  return _liveClockPollPromise;
-}
-async function _pollLiveGameClocksImpl() {
+async function pollLiveGameClocks() {
   if (_liveClockPollInFlight) return;
   _liveClockPollInFlight = true;
   if (_liveClockPollAbort) {
@@ -19715,12 +19401,12 @@ async function _pollLiveGameClocksImpl() {
     return;
   }
   let didChange = false;
-  await Promise.all([...byLeague].map(async ([league, eventIds]) => {
+  for (const [league, eventIds] of byLeague) {
                                                                                   
     if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
       const _uiLeague = (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
       if (!isIncrowdEuroAutoFetchLeague(_uiLeague)) {
-        return;
+        continue;
       }
       try {
         if (typeof pollIncrowdEuroLiveForLeague === "function") {
@@ -19730,7 +19416,7 @@ async function _pollLiveGameClocksImpl() {
       } catch (err) {
         engineDebug("incrowd euro live poll failed", { league, error: err?.message || String(err) });
       }
-      return;
+      continue;
     }
                                                                            
     if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
@@ -19742,29 +19428,19 @@ async function _pollLiveGameClocksImpl() {
       } catch (err) {
         engineDebug("kbl live poll failed", { league, error: err?.message || String(err) });
       }
-      return;
+      continue;
     }
     const base = getTrackedLeagueApiBase(league);
-    if (!base) return;
+    if (!base) continue;
     try {
       let data = null;
       try {
-        // 8s hard timeout: a stalled mobile connection used to hang the poll forever and kill the chain
-        const _sbCtrl = new AbortController();
-        const _sbTimer = setTimeout(() => _sbCtrl.abort(), 8000);
-        if (_liveClockSignal) {
-          try { _liveClockSignal.addEventListener("abort", () => _sbCtrl.abort(), { once: true }); } catch (_eSig) {}
-        }
-        try {
-          const res = await fetch(`${base}/scoreboard?_=${Date.now()}`, { cache: "no-store", signal: _sbCtrl.signal });
-          if (res.ok) data = await res.json();
-        } finally {
-          clearTimeout(_sbTimer);
-        }
+        const res = await fetch(`${base}/scoreboard?_=${Date.now()}`, { cache: "no-store", signal: _liveClockSignal });
+        if (res.ok) data = await res.json();
       } catch (e) {
         data = await proxyFetch(`${base}/scoreboard`, 6000).catch(() => null);
       }
-      if (!data) return;
+      if (!data) continue;
       const events = data?.events || [];
       events.forEach((ev) => {
         const eid = String(ev.id || "");
@@ -19869,12 +19545,9 @@ async function _pollLiveGameClocksImpl() {
     } catch (err) {
       engineDebug("live game status update failed", { error: err?.message || String(err) });
     }
-  }));
+  }
   if (didChange) renderTrackedPicks();
   scheduleLiveClockPoll();
-  } catch (_pollErr) {
-    engineDebug("pollLiveGameClocks failed — rescheduling", { error: _pollErr?.message || String(_pollErr) });
-    scheduleLiveClockPoll();
   } finally {
     _liveClockPollInFlight = false;
   }
@@ -19887,17 +19560,7 @@ async function hydrateTrackedPicks(force = false) {
   }
   g_trackerHydratePromise = (async () => {
     trackerDebug("hydrate start", { force, key: getTrackerUserKey() });
-    let localState = (await loadTrackerStateFromLocal()) || createEmptyTrackerState();
-    // The disk copy can be OLDER than what is in memory (e.g. a settlement not yet written). Never let it
-    // overwrite fresher in-memory state — that was the "result shows, vanishes, comes back" regression.
-    try {
-      const _liveNow = AppState.tracker.state;
-      if (_liveNow && !isTrackerStateMeaningfullyEmpty(_liveNow)) {
-        localState = mergeTrackerStates(_liveNow, localState);
-      }
-    } catch (_mergeLiveErr) {
-      engineDebug("hydrate: live/disk merge failed", { error: _mergeLiveErr?.message || String(_mergeLiveErr) });
-    }
+    const localState = (await loadTrackerStateFromLocal()) || createEmptyTrackerState();
 
     const hadLocalState =
       !!localState &&
@@ -19956,14 +19619,7 @@ async function hydrateTrackedPicks(force = false) {
         return g_trackerState;
       }
 
-      // Merge the server copy into the LIVE state (not the copy captured before the network wait) so any
-      // pick added/settled/deleted while the request was in flight is kept.
-      const mergedState = mergeTrackerStates(
-        AppState.tracker.state && !isTrackerStateMeaningfullyEmpty(AppState.tracker.state)
-          ? AppState.tracker.state
-          : localState || {},
-        serverState,
-      );
+      const mergedState = mergeTrackerStates(localState || {}, serverState);
       normalizeTrackerState(mergedState);
       await saveTrackerStateToLocal();
       trackerDebug("hydrate merged state", {
@@ -20002,8 +19658,8 @@ async function hydrateTrackedPicks(force = false) {
         mergedPendingActive < serverPendingActive ||
         localPendingActive < serverPendingActive ||
         mergedActiveCount > serverActiveCount ||
-        (!g_trackerServerArchiveStripped && localArchivedCount > serverArchivedCount) ||
-        (!g_trackerServerArchiveStripped && mergedArchivedCount > serverArchivedCount) ||
+        localArchivedCount > serverArchivedCount ||
+        mergedArchivedCount > serverArchivedCount ||
         localSettledCount > serverSettledCount ||
         mergedSettledCount > serverSettledCount ||
         localWins > serverWins ||
@@ -20020,7 +19676,7 @@ async function hydrateTrackedPicks(force = false) {
           const hydrateSnapshot = JSON.parse(JSON.stringify(g_trackerState));
           const pushed = await pushTrackerStateToServer(hydrateSnapshot);
           if (pushed?.ok && pushed?.state) {
-            const hydrateMerged = mergeTrackerStates(AppState.tracker.state, pushed.state);
+            const hydrateMerged = mergeTrackerStates(hydrateSnapshot, pushed.state);
             normalizeTrackerState(hydrateMerged);
             await saveTrackerStateToLocal();
           }
@@ -20521,7 +20177,7 @@ function archiveExpiredTrackedPicks() {
       .slice(0, TRACKER_ARCHIVED_LIMIT);
 
     rebuildTrackerStats();
-    saveTrackerStateToLocal().catch(() => {}); // failure already raises the storage alert; avoid unhandled rejection
+    saveTrackerStateToLocal();
   }
   if (g_settlementDebugLog.size > 200) {
     [...g_settlementDebugLog.keys()]
@@ -20778,7 +20434,6 @@ function closeTrackerModal() {
   unlockPageBehindTracker();
 }
 
-let g_trackerRenderToken = 0;
 function renderTrackedPicks() {
                                                                              
                                                                             
@@ -20921,8 +20576,7 @@ function renderTrackedPicks() {
     emptyEl.textContent = savedCount
       ? "No live/recent picks in this window. Older picks are still saved — check Record / wait for game window."
       : "No tracked picks saved yet.";
-    wrapEl.style.display = "block"; /* BB-FIX: #trackerAnalyticsPanel lives inside this wrapper; hiding it blanked Report/Debug/Configs/Health */
-    g_trackerRenderToken++; // cancel any older paint still waiting for its animation frame
+    wrapEl.style.display = isTrackerPicksView() ? "none" : "block";
     bodyEl.innerHTML = "";
     return;
   }
@@ -20930,9 +20584,7 @@ function renderTrackedPicks() {
   emptyEl.style.display = "none";
   wrapEl.style.display = "block";
 
-  const _renderTok = ++g_trackerRenderToken;
   requestAnimationFrame(() => {
-    if (_renderTok !== g_trackerRenderToken) return; // a newer render superseded this one — don't paint stale rows
     bodyEl.innerHTML = displayPicks
       .map((p) => {
         const status = String(p.resultStatus || "pending").toLowerCase();
@@ -24004,27 +23656,8 @@ function applyAutoSettleStatus(pick, settled, source) {
   return true;
 }
 
-let g_settleSaveTimer = null;
-let g_settleSavePicks = [];
-function queueSettleSave(picks) {
-  g_settleSavePicks.push(...(picks || []));
-  if (g_settleSaveTimer) return;
-  g_settleSaveTimer = setTimeout(() => {
-    g_settleSaveTimer = null;
-    const batch = g_settleSavePicks;
-    g_settleSavePicks = [];
-    Promise.resolve(forceTrackerSaveNow(batch)).catch(function (err) {
-      trackerDebug("live-board settle save failed", { error: String((err && err.message) || err) });
-    });
-  }, 0);
-}
-
 function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
   if (!eventId || !competition) return false;
-  try { /* BB-FIX: grade blocked (shadow) picks even when no tracked pick exists for this event */
-    const _stT = competition?.status?.type || {};
-    bbShadowSettleFromCompetition(eventId, competition, !!(gameFinal || _stT.completed || _stT.state === "post" || _stT.name === "STATUS_FINAL"));
-  } catch (_sh) {}
   const eid = String(eventId);
   const active = Array.isArray(g_trackerState?.activePicks) ? g_trackerState.activePicks : [];
   const pending = active.filter(
@@ -24081,7 +23714,11 @@ function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
     g_trackerState.updatedAt = new Date().toISOString();
     try { rebuildTrackerStats(); } catch (_e) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _e); }
     try {
-      if (typeof forceTrackerSaveNow === "function") queueSettleSave(changedPicks); // one save for all events settled in this tick
+      if (typeof forceTrackerSaveNow === "function") {
+        Promise.resolve(forceTrackerSaveNow(changedPicks)).catch(function (err) {
+          trackerDebug("live-board settle save failed", { error: String(err && err.message || err) });
+        });
+      }
     } catch (_s) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _s); }
   }
   return changed;
@@ -24524,7 +24161,7 @@ async function refreshTrackedPickResults() {
           let data = null;
           try {
             const _directCtrl = new AbortController();
-            const _directTimer = setTimeout(() => _directCtrl.abort(), 5000);
+            const _directTimer = setTimeout(() => _directCtrl.abort(), 8000);
             try {
               const res = await fetch(url, {
                 cache: "no-store",
@@ -24545,26 +24182,7 @@ async function refreshTrackedPickResults() {
 
       const eventMap = new Map(eventResults);
 
-      // The fetches above can take several seconds. Any save/hydrate/normalize that ran meanwhile replaces
-      // every pick object with a copy, so the picks captured before the await are orphans. Re-resolve each
-      // one against the LIVE state (active wins over archived) so the settlement lands on the real pick.
-      const _liveByKey = new Map();
-      [...(g_trackerState.archivedPicks || []), ...(g_trackerState.activePicks || [])].forEach((lp) => {
-        if (!lp) return;
-        const k = makeTrackerActiveMergeKey(lp);
-        if (k) _liveByKey.set(k, lp);
-      });
-      const _seenLive = new Set();
-      const livePendingPicks = [];
-      pendingPicks.forEach((sp) => {
-        const lp = _liveByKey.get(makeTrackerActiveMergeKey(sp));
-        if (!lp || _seenLive.has(lp)) return;
-        if (lp.resultStatus && lp.resultStatus !== "pending") return; // already settled meanwhile
-        _seenLive.add(lp);
-        livePendingPicks.push(lp);
-      });
-
-      livePendingPicks.forEach((pick) => {
+      pendingPicks.forEach((pick) => {
         const data = eventMap.get(pick.eventId);
         const competition = data?.header?.competitions?.[0];
 
@@ -25230,20 +24848,8 @@ function selectAutoH2HWindow(games, league) {
   else if (avail >= 5 && stable(m5, m4)) chosen = 5;
   else chosen = Math.min(4, avail);
   if (era.indexOf("2022") >= 0) chosen = Math.min(chosen, 5);
-  let picked = pool.slice(0, Math.max(0, chosen));
-  /* BB-FIX: competition/season-type awareness. Regular season(2) and postseason(3) games are kept; same-type games are preferred when >=3 exist. */
-  const _bbTypes = {};
-  picked.forEach(function (g) { const t = g && g.seasonType != null ? String(g.seasonType) : "?"; _bbTypes[t] = (_bbTypes[t] || 0) + 1; });
-  const _bbKeys = Object.keys(_bbTypes).filter(function (k) { return k !== "?"; });
-  let _bbMixed = _bbKeys.length > 1;
-  if (_bbMixed) {
-    const domKey = _bbKeys.sort(function (a, b) { return _bbTypes[b] - _bbTypes[a]; })[0];
-    const sameType = pool.filter(function (g) { return g && String(g.seasonType) === domKey; });
-    if (sameType.length >= 3) { picked = sameType.slice(0, Math.max(3, chosen)); _bbMixed = false; }
-  }
+  const picked = pool.slice(0, Math.max(0, chosen));
   const decision = {
-    mixedCompetition: _bbMixed,
-    seasonTypeCounts: _bbTypes,
     games: picked,
     n: picked.length,
     era: era,
@@ -25252,8 +24858,7 @@ function selectAutoH2HWindow(games, league) {
       era +
       " auto-n=" +
       picked.length +
-      (Number.isFinite(m4) ? " (last4 total " + m4.toFixed(1) + ")" : "") +
-      (_bbMixed ? " | MIXED season types " + JSON.stringify(_bbTypes) : ""),
+      (Number.isFinite(m4) ? " (last4 total " + m4.toFixed(1) + ")" : ""),
   };
   try { window.__bbAutoH2H = decision; } catch (_e) {}
   return decision;
@@ -25588,7 +25193,7 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
 /* CALCULATION SECTION */
 function getSampleTier(...arrays) {
   if (!arrays.length) return "insufficient";
-  const counts = arrays.map((a) => Array.isArray(a) ? a.reduce((n,v) => n + (bbStrictFinite(v) ? 1 : 0), 0) : 0);
+  const counts = arrays.map((a) => Array.isArray(a) ? a.reduce((n,v) => n + (Number.isFinite(Number(v)) ? 1 : 0), 0) : 0);
   const minCount = Math.min(...counts);
   if (minCount <= 0) return "insufficient";
   if (minCount >= 10) return "full";
@@ -25598,7 +25203,7 @@ function getSampleTier(...arrays) {
 
 /* CALCULATION SECTION */
 function finiteCount(arr) {
-  return Array.isArray(arr) ? arr.reduce((n, v) => n + (bbStrictFinite(v) ? 1 : 0), 0) : 0;
+  return Array.isArray(arr) ? arr.reduce((n, v) => n + (Number.isFinite(Number(v)) ? 1 : 0), 0) : 0;
 }
 
 /* CALCULATION SECTION */
@@ -25811,12 +25416,6 @@ function getOverallSeries(side, limit, contextData = null, manualOverride = null
   return manualRaw.filter(v => Number.isFinite(v) && v > 0).slice(0, maxN);
 }
 
-/* BB-FIX: strict finite check. Number(null)===0, so null/''/false must NOT count as numbers. */
-function bbStrictFinite(v) {
-  if (typeof v === "number") return Number.isFinite(v);
-  if (typeof v === "string") return v.trim() !== "" && Number.isFinite(Number(v));
-  return false;
-}
 /* CALCULATION SECTION */
 function applyEdgeMult(edge, league, explicitMultiplier = null) {
   if (!Number.isFinite(edge)) return edge;
@@ -25854,7 +25453,7 @@ function getPick(edge, line, league, marketKey, context = {}) {
   const _uefRaw = context?.underEdgeFactorOverride != null
     ? context.underEdgeFactorOverride
     : (getParam("underEdgeFactor", league, marketKey) ?? UNDER_EDGE_FACTOR);
-  const _underEdgeFactor = Math.max(1.3, Number.isFinite(Number(_uefRaw)) ? Number(_uefRaw) : 1.5); /* BB-FIX: hard floor 1.3 so no tuner can make Unders easy */
+  const _underEdgeFactor = Number.isFinite(Number(_uefRaw)) ? Number(_uefRaw) : 1.2;
 
   if (edge < 0) pointThreshold *= _underEdgeFactor;
 
@@ -26232,8 +25831,6 @@ function getConfidenceMarketFamily(marketKey) {
   if (mk === "team_a" || mk === "team_b") return "TEAM";
   if (/^q[1-4]$/.test(mk)) return "Q";
   if (mk === "winner" || mk === "handicap" || mk === "handicap_h1" || mk === "handicap_h2") return "MARGIN";
-  if (mk === "h1") return "TOTAL_H1";
-  if (mk === "h2") return "TOTAL_H2";
   return "TOTAL";
 }
 function getConfidenceModelScopeKey(league, marketKey) {
@@ -26273,7 +25870,6 @@ function getConfidenceWinProbability(
     if (_liveBundle && _versionOk && _schemaOk && _liveBundle.coeff) {
       const models = _liveBundle.coeff;
       if (models[_familyScope]) { coeff = models[_familyScope]; _resolvedScope = _familyScope; }
-      else if (_family.indexOf("TOTAL_") === 0 && models[String(league || "global").toLowerCase() + "::TOTAL"]) { _resolvedScope = String(league || "global").toLowerCase() + "::TOTAL"; coeff = models[_resolvedScope]; }
       else if (models[_globalFamilyScope]) { coeff = models[_globalFamilyScope]; _resolvedScope = _globalFamilyScope; }
       else { coeff = {}; _resolvedScope = "family_unfitted:" + _family; }
     } else if (_liveBundle) {
@@ -26401,25 +25997,22 @@ function isConfidenceCoeffFitted(league, marketKey = "ft") {
     const _family = getConfidenceMarketFamily(marketKey);
     const _familyScope = getConfidenceModelScopeKey(league, marketKey);
     const _globalFamilyScope = "global::" + _family;
-    const _legacyTotalScope = String(league || "global").toLowerCase() + "::TOTAL";
-    const _resolvedScope = models[_familyScope] ? _familyScope : (_family.indexOf("TOTAL_") === 0 && models[_legacyTotalScope] ? _legacyTotalScope : _globalFamilyScope);
+    const _resolvedScope = models[_familyScope] ? _familyScope : _globalFamilyScope;
     const coeff = models[_resolvedScope] || null;
     const _requiredCoeffKeys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
     const _keysFitted = !!(coeff && _requiredCoeffKeys.every((k) => Number.isFinite(coeff[k])));
     if (!_keysFitted) return false;
     let _coeffN = 0;
-    let _bbTooFew = false;
     try {
       const nMap = JSON.parse(localStorage.getItem("BB_CONFIDENCE_MODEL_COEFF_N") || "{}");
                                                                                           
                                                                                       
       _coeffN = Number(nMap[_resolvedScope] || 0);
-      if (Object.prototype.hasOwnProperty.call(nMap, _resolvedScope) && _coeffN < 50) _bbTooFew = true; /* BB-FIX: min 50 samples */
     } catch (_e) {
       _coeffN = 0;
     }
                                                                               
-    return !!_keysFitted && !_bbTooFew;
+    return !!_keysFitted;
   } catch (e) {
     engineDebug("isConfidenceCoeffFitted failed", { league, error: e?.message || String(e) });
     return false;
@@ -27017,10 +26610,10 @@ function buildTeamMarketIntelSignal(pack, teamSide) {
     ? Number(pack.marketScale || 1)
     : 1;
   if (Number.isFinite(restDays) && restDays < 1) {
-    signal -= Math.abs(Number(getParam("fatigueB2BPenalty") ?? -2.5)) * scale;
+    signal -= 2.0 * scale;
   } else if (Number.isFinite(restDays) && restDays === 1) {
     const prevGap = Number(teamSide === "A" ? pack.previousGapDaysA : pack.previousGapDaysB);
-    if (Number.isFinite(prevGap) && prevGap < 2) signal -= Math.abs(Number(getParam("fatigueShortRestPenalty") ?? -1.0)) * scale;
+    if (Number.isFinite(prevGap) && prevGap < 2) signal -= 1.0 * scale;
   }
   return { signal: clampNumber(signal, -3 * scale, 0) };
 }
@@ -27187,7 +26780,7 @@ function computeIntelligencePack(league, lines = {}, parsedInput = null, marketK
     restDaysA,
     restDaysB,
     backToBack,
-    marketScale: (function (m) { m = String(m || "ft").toLowerCase(); return m === "ft" ? 1 : (/^q[1-4]$/.test(m) || m === "q" ? 0.25 : 0.5); })(marketKey),
+    marketScale: String(marketKey || "ft").toLowerCase() === "ft" ? 1 : 0.5,
     previousGapDaysA: ctxA.previousGapDays,
     previousGapDaysB: ctxB.previousGapDays,
     hasAnyData: ctxA.restDays != null || ctxB.restDays != null,
@@ -28825,7 +28418,6 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         advancedQ: advancedQ,
 
         date: ref.date || null,
-        seasonType: ref.seasonType ?? null,
         venueCity: ref.venueCity || null,
         venueState: ref.venueState || null,
       };
@@ -29052,9 +28644,6 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
         comp?.status?.type?.state === "post";
 
       if (!done) return;
-      /* BB-FIX: exclude preseason (season type 1) from H2H unless the league itself is preseason/friendly/summer */
-      const _bbSt = Number(ev?.seasonType?.type ?? ev?.season?.type);
-      if (_bbSt === 1 && !/pre|friendly|summer/i.test(String(leagueKey))) return;
 
       const competitors = comp?.competitors || [];
       if (competitors.length < 2) return;
@@ -29070,7 +28659,6 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
       candidateMap.set(String(ev.id), {
         id: String(ev.id),
         date: rawDate,
-        seasonType: Number.isFinite(_bbSt) ? _bbSt : null,
       });
     });
   });
@@ -34247,12 +33835,7 @@ function computeFTProjection({
     isFinite(avgOrNaN(ctxB.ortg10)) &&
     isFinite(avgOrNaN(ctxB.drtg10)) &&
     finiteCount(ctxA.ortg10) >= 5 &&
-    finiteCount(ctxB.ortg10) >= 5 &&
-    finiteCount(ctxA.drtg10) >= 5 &&
-    finiteCount(ctxB.drtg10) >= 5 &&
-    isFetchedAuthoritative("A", _ctxRoot) &&
-    isFetchedAuthoritative("B", _ctxRoot);
-  try { window.__bbAdvDiag = { market: "ft", league: league, enabled: !!(hasRealRatings && hasRealPace && isEspnLeague), reason: (hasRealRatings && hasRealPace && isEspnLeague) ? "all checks passed" : (!isEspnLeague ? "league has no advanced-stat feed" : (!hasRealRatings ? "ORTG/DRTG <5 per team or source not fetched" : "pace sample <5 or implausible")), fallback: (hasRealRatings && hasRealPace && isEspnLeague) ? "none" : "STANDARD PROJECTION" }; } catch (_e) {}
+    finiteCount(ctxB.ortg10) >= 5;
 
   engineDebug("FT advanced stats availability", {
     hasRealPace,
@@ -34701,7 +34284,6 @@ function compute1HProjection({
     ? getPeriodAdvancedSeries(ctxB, "h1")
     : { ortg: [], drtg: [], pace: [], source: "none" };
   const _nativeAdvH1 = _advA1.source === "h1" && _advB1.source === "h1" &&
-    isFetchedAuthoritative("A", _ctxRoot, "h1") && isFetchedAuthoritative("B", _ctxRoot, "h1") &&
     Number.isFinite(avgOrNaN(_advA1.ortg)) && Number.isFinite(avgOrNaN(_advA1.drtg)) &&
     Number.isFinite(avgOrNaN(_advB1.ortg)) && Number.isFinite(avgOrNaN(_advB1.drtg));
   const _pA1 = avgOrNaN(getPaceSeriesValue(_advA1.pace, _advA1.paceUnit || "possessions_per_game"));
@@ -34885,7 +34467,7 @@ function compute1HProjection({
       : (Number.isFinite(Number((_ctxRoot.A || {}).restDays)) ? Number((_ctxRoot.A || {}).restDays) : null);
     const _restB1 = Number.isFinite(Number(config?.restDaysB)) ? Number(config.restDaysB)
       : (Number.isFinite(Number((_ctxRoot.B || {}).restDays)) ? Number((_ctxRoot.B || {}).restDays) : null);
-    const _intelPack1 = { restDaysA: _restA1, restDaysB: _restB1, marketScale: 0.5, previousGapDaysA: (_ctxRoot.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot.B||{}).previousGapDays };
+    const _intelPack1 = { restDaysA: _restA1, restDaysB: _restB1, marketScale: 1, previousGapDaysA: (_ctxRoot.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot.B||{}).previousGapDays };
     const _volR1 = Number.isFinite(combinedVol) ? combinedVol : 1;
     if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function") {
       projA1H = applyDampedIntelSignal(projA1H, buildTeamMarketIntelSignal(_intelPack1, "A").signal, _volR1);
@@ -35021,7 +34603,6 @@ function compute2HProjection({
     ? getPeriodAdvancedSeries(ctxB, "h2")
     : { ortg: [], drtg: [], pace: [], source: "none" };
   const _nativeAdvH2 = _advA2.source === "h2" && _advB2.source === "h2" &&
-    isFetchedAuthoritative("A", _ctxRoot2H, "h2") && isFetchedAuthoritative("B", _ctxRoot2H, "h2") &&
     Number.isFinite(avgOrNaN(_advA2.ortg)) && Number.isFinite(avgOrNaN(_advA2.drtg)) &&
     Number.isFinite(avgOrNaN(_advB2.ortg)) && Number.isFinite(avgOrNaN(_advB2.drtg));
   const _pA2 = avgOrNaN(getPaceSeriesValue(_advA2.pace, _advA2.paceUnit || "possessions_per_game"));
@@ -35209,7 +34790,7 @@ function compute2HProjection({
       : (Number.isFinite(Number((_ctxRoot2H.A || {}).restDays)) ? Number((_ctxRoot2H.A || {}).restDays) : null);
     const _restB2 = Number.isFinite(Number(config?.restDaysB)) ? Number(config.restDaysB)
       : (Number.isFinite(Number((_ctxRoot2H.B || {}).restDays)) ? Number((_ctxRoot2H.B || {}).restDays) : null);
-    const _intelPack2 = { restDaysA: _restA2, restDaysB: _restB2, marketScale: 0.5, previousGapDaysA: (_ctxRoot2H.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot2H.B||{}).previousGapDays };
+    const _intelPack2 = { restDaysA: _restA2, restDaysB: _restB2, marketScale: 1, previousGapDaysA: (_ctxRoot2H.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot2H.B||{}).previousGapDays };
     const _volR2 = Number.isFinite(combinedVol2) ? combinedVol2 : 1;
     if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function") {
       projA2H = applyDampedIntelSignal(projA2H, buildTeamMarketIntelSignal(_intelPack2, "A").signal, _volR2);
@@ -35754,7 +35335,7 @@ function calibrateConfidenceModel() {
 
   const models = {};
   const modelSampleSizes = {};
-  const _families = ["TOTAL", "TOTAL_H1", "TOTAL_H2", "TEAM", "Q", "MARGIN"];
+  const _families = ["TOTAL", "TEAM", "Q", "MARGIN"];
   const _scopeForPick = (p) => getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
   const _globalFamilyScope = (family) => "global::" + family;
 
@@ -35775,7 +35356,7 @@ function calibrateConfidenceModel() {
       const lm = runGD(ld);
       const base = models[_globalFamilyScope(family)];
       if (lm && base) {
-        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TOTAL_H1" ? "h1" : family === "TOTAL_H2" ? "h2" : family === "TEAM" ? "team_a" : family === "Q" ? "q1" : "winner");
+        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TEAM" ? "team_a" : family === "Q" ? "q1" : "winner");
         models[key] = empiricalBayesShrink(lm, ld.length, base, 40);
         modelSampleSizes[key] = ld.length;
       } else if (lm) {
@@ -39358,7 +38939,6 @@ async function runEngine() {
 
                                                                                                         
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
-    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league, typeof parsed !== "undefined" ? parsed : null);
 
     finalPicksForDisplay.forEach((p) => {
       p.smartLineNoPlay = p.displayPick === "NO PLAY" && p.pick !== "NO PLAY";
@@ -39520,7 +39100,6 @@ async function runEngine() {
                                                                               
                                                                                         
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
-    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league, typeof parsed !== "undefined" ? parsed : null);
 
     const paceIcon = ftCalc.pace > 100 ? "🔥" : "🧊";
 
@@ -39583,7 +39162,7 @@ async function runEngine() {
       const errors = [];
       const warnings = [];
       const rows = Array.isArray(picks) ? picks : [];
-      const finite = (v) => bbStrictFinite(v);
+      const finite = (v) => Number.isFinite(Number(v));
       const prov = getConfidenceModelProvenance(leagueKey, "ft");
       if (!meta || !meta.homeTeam || !meta.awayTeam) {
         warnings.push("teams/events not identified");
@@ -40617,12 +40196,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
     (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)
   );
 
-  let _lastResumeAt = 0;
   function resumeLiveTrackerNow() {
-    // focus + pageshow + visibilitychange all fire together on app resume; run one refresh, not three
-    const _nowR = Date.now();
-    if (_nowR - _lastResumeAt < 1500) return;
-    _lastResumeAt = _nowR;
     refreshTrackerInBackground(true);
     scheduleLiveClockPoll(0);
     const modalOpen = document.getElementById("trackerModal")?.classList.contains("open");
