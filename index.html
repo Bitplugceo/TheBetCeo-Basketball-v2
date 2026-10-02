@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4491,6 +4490,10 @@ const MARKET_SEMANTICS = {
 window.MARKET_SEMANTICS = MARKET_SEMANTICS;
 const STANDALONE_BUILD_MARKER = "bb_engine_standalone_build";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
+/* SofaScore: api.sofascore.com now returns 403 {"reason":"challenge"} (anti-bot).
+   The website's own API path on www.sofascore.com is used first; api.* kept as fallback. */
+const SOFA_API_BASE = "https://www.sofascore.com/api/v1";
+const SOFA_API_BASE_LEGACY = "https://api.sofascore.com/api/v1";
 
                                                                 
                                                                                         
@@ -4515,38 +4518,6 @@ const CLIENT_RATE_GATE_TOKEN = (function () {
 })();
                                                                         
 const WORKER_SHARED_SECRET = CLIENT_RATE_GATE_TOKEN;
-
-// SofaScore began enforcing an XHR challenge on its unofficial /api/v1 surface.
-// Keep one session-scoped X-Requested-With value and send it on every direct
-// SofaScore request.  The value is intentionally not hard-coded so a stale
-// token cannot be baked into the standalone build.
-let __sofaXRequestedWith = null;
-function getSofascoreRequestHeaders() {
-  if (!__sofaXRequestedWith) {
-    try {
-      if (globalThis.crypto && typeof globalThis.crypto.getRandomValues === "function") {
-        const bytes = new Uint8Array(6);
-        globalThis.crypto.getRandomValues(bytes);
-        __sofaXRequestedWith = Array.from(bytes, function (b) {
-          return b.toString(16).padStart(2, "0");
-        }).join("");
-      }
-    } catch (_cryptoErr) {
-      __sofaXRequestedWith = null;
-    }
-    if (!__sofaXRequestedWith) {
-      __sofaXRequestedWith = Math.random().toString(16).slice(2, 14);
-    }
-  }
-  return {
-    Accept: "application/json, text/plain, */*",
-    "X-Requested-With": __sofaXRequestedWith,
-  };
-}
-
-function isSofascoreUrl(url) {
-  return /https?:\/\/(?:api\.)?sofascore\.(?:com|app)(?:\/|$)/i.test(String(url || ""));
-}
 
 const SS_BASKETBALL_SPORT_IDS = new Set([2, 128, 129, 155, 156, 157, 158]);
 
@@ -4969,120 +4940,64 @@ function clearPasteJSON(side) {
 }
 
 
-async function ssLoadTeamEventsIntoPaste(side, page, ev) {
-  if (ev && typeof ev.preventDefault === "function") ev.preventDefault();
-  const idInput = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
-  const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
-  const st = document.getElementById("ssFetchStatus");
-  const idVal = String(idInput?.value || "").trim();
-  const pageNo = Math.max(0, Number(page) || 0);
-  if (!/^\d+$/.test(idVal)) {
-    if (st) {
-      st.style.color = "#d92d2a";
-      st.textContent = "❌ Enter a valid SofaScore team ID first.";
-    }
-    return false;
-  }
-  if (st) {
-    st.style.color = "#d98a00";
-    st.textContent = "⏳ Fetching SofaScore team events page " + pageNo + "…";
-  }
-  try {
-    const payload = await proxyFetch(
-      "https://api.sofascore.com/api/v1/team/" + idVal + "/events/last/" + pageNo,
-      12000,
-    );
-    if (!payload || typeof payload !== "object") throw new Error("Empty SofaScore response");
-    if (pasteEl) {
-      pasteEl.value = JSON.stringify(payload);
-      pasteEl.dispatchEvent(new Event("input", { bubbles: true }));
-    }
-    if (st) {
-      st.style.color = "#2f8f4a";
-      st.textContent = "✅ SofaScore page " + pageNo + " loaded into " + side + ".";
-    }
-    return true;
-  } catch (err) {
-    if (st) {
-      st.style.color = "#d92d2a";
-      st.textContent = "❌ SofaScore page " + pageNo + " failed: " + (err?.message || String(err));
-    }
-    if (typeof reportSoftFailure === "function") reportSoftFailure("ssLoadTeamEventsIntoPaste", err);
-    return false;
-  }
-}
-
 function updateSofascoreLinks(side) {
+                                                             
   const idInput = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
   const linkEl = document.getElementById(side === "A" ? "ssTeamALink" : "ssTeamBLink");
   if (!idInput || !linkEl) return;
   const idVal = idInput.value.trim();
   const prefix = side === "A" ? "ssTeamALink" : "ssTeamBLink";
-  const ids = [prefix, prefix + "1", prefix + "2", prefix + "3"];
   if (idVal && /^\d+$/.test(idVal)) {
-    ids.forEach(function (id, idx) {
-      const el = document.getElementById(id);
-      if (!el) return;
-      el.href = "#";
-      el.target = "_self";
-      el.onclick = function (event) {
-        return ssLoadTeamEventsIntoPaste(side, idx, event);
-      };
-      el.title = "Load SofaScore events page " + idx + " into the paste box";
-      el.style.display = "inline-block";
-    });
-  } else {
-    ids.forEach(function (id) {
-      const el = document.getElementById(id);
+    linkEl.href = SOFA_API_BASE + "/team/" + idVal + "/events/last/0";
+    linkEl.style.display = "inline-block";
+    for (let p = 1; p <= 3; p++) {
+      const el = document.getElementById(prefix + p) || document.getElementById("ssTeam" + side + "Link" + p);
       if (el) {
-        el.href = "#";
-        el.onclick = null;
-        el.style.display = "none";
+        el.href = SOFA_API_BASE + "/team/" + idVal + "/events/last/" + p;
+        el.style.display = "inline-block";
       }
+    }
+                           
+    if (side === "B") {
+      ["ssTeamBLink1", "ssTeamBLink2", "ssTeamBLink3"].forEach(function (id, idx) {
+        const el = document.getElementById(id);
+        if (el) {
+          el.href = SOFA_API_BASE + "/team/" + idVal + "/events/last/" + (idx + 1);
+          el.style.display = "inline-block";
+        }
+      });
+    }
+  } else {
+    linkEl.style.display = "none";
+    ["ssTeamALink1", "ssTeamALink2", "ssTeamALink3", "ssTeamBLink1", "ssTeamBLink2", "ssTeamBLink3"].forEach(function (id) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = "none";
     });
   }
 }
 
-async function searchSofascorePlayer(side) {
+function searchSofascorePlayer(side) {
   const nameEl = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
   const mainEl = document.getElementById(side === "A" ? "teamAName" : "teamBName");
-  const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
-  const st = document.getElementById("ssFetchStatus");
   const rawName = (nameEl?.value || mainEl?.value || "").trim();
   if (!rawName) {
     alert("Enter a player/team name first.");
     return;
   }
   const searchName = rawName.split(",")[0].trim();
+
   const searchUrl =
-    "https://api.sofascore.com/api/v1/search/teams?q=" +
+    SOFA_API_BASE + "/search/teams?q=" +
     encodeURIComponent(searchName) +
     "&sport=basketball";
-
+  window.open(searchUrl, "_blank");
+  const st = document.getElementById("ssFetchStatus");
   if (st) {
     st.style.color = "#d98a00";
-    st.textContent = "⏳ Searching SofaScore for " + searchName + "…";
-  }
-  try {
-    const payload = await proxyFetch(searchUrl, 12000);
-    if (!payload || typeof payload !== "object") throw new Error("Empty SofaScore search response");
-    if (pasteEl) {
-      pasteEl.value = JSON.stringify(payload);
-    }
-    await ssApplySearchPaste(side, payload, st);
-    if (st && !String(st.textContent || "").includes("locked")) {
-      st.style.color = "#2f8f4a";
-      st.textContent = "✅ SofaScore search loaded for " + side + ".";
-    }
-  } catch (err) {
-    if (st) {
-      st.style.color = "#d92d2a";
-      st.textContent =
-        "❌ SofaScore search failed: " +
-        (err?.message || String(err)) +
-        " — use the ID box or paste SofaScore JSON manually.";
-    }
-    if (typeof reportSoftFailure === "function") reportSoftFailure("searchSofascorePlayer", err);
+    st.textContent =
+      "🔍 Basketball-only search opened for " +
+      side +
+      " — paste that search JSON here, or copy the team ID into the ID box.";
   }
 }
 
@@ -6033,9 +5948,12 @@ async function ssFetchTeamLastEvents(teamId) {
   try {
     for (let page = 0; page <= 3; page++) {
       try {
-        const payload = await proxyFetch(
-          "https://api.sofascore.com/api/v1/team/" + id + "/events/last/" + page,
-        );
+        let payload = null;
+        try {
+          payload = await proxyFetch(SOFA_API_BASE + "/team/" + id + "/events/last/" + page);
+        } catch (_eWww) {
+          payload = await proxyFetch(SOFA_API_BASE_LEGACY + "/team/" + id + "/events/last/" + page);
+        }
         if (!payload) break;
         pages.push(payload);
                                                                                 
@@ -6195,6 +6113,11 @@ async function parseSofascoreIndividual(side) {
       }
     } else {
       parsed = JSON.parse(rawText);
+    }
+    if (parsed && parsed.error && String(parsed.error.reason || "").toLowerCase() === "challenge") {
+      throw new Error(
+        "SofaScore returned a 403 anti-bot challenge, not data. Open the link from the www.sofascore.com host (the buttons now do this), or try again from a desktop/other browser.",
+      );
     }
     let events = ssExtractPastedEvents(parsed);
     if (!events.length) {
@@ -17633,7 +17556,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
     if (/site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com/i.test(u)) {
       return "DirectESPN";
     }
-    if (/api\.sofascore\.com|api\.sofascore\.app|www\.sofascore\.com/i.test(u)) {
+    if (/api\.sofascore\.com|www\.sofascore\.com|api\.sofascore\.app/i.test(u)) {
       return "DirectSofa";
     }
     if (/feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net/i.test(u)) {
@@ -17707,7 +17630,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
       throw new Error("proxyFetch: URL unparseable");
     }
     const _allowedHost =
-      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|api\.sofascore\.app|www\.sofascore\.com|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net|api\.kbl\.or\.kr)$/i.test(_host);
+      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|www\.sofascore\.com|api\.sofascore\.app|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net|api\.kbl\.or\.kr)$/i.test(_host);
     if (!_allowedHost) {
       engineDebug("proxyFetch blocked non-allowlisted host", { request: fetchLabel, host: _host });
       throw new Error("proxyFetch: target host not allowlisted");
@@ -17717,18 +17640,16 @@ async function proxyFetch(url, timeoutMs = 12000) {
                                                                                                
                                                                                            
     const _directLabel = proxyFetchDirectLabel(url);
-    const _requestHeaders = /api\.kbl\.or\.kr/i.test(_host)
+    const _kblHeaders = /api\.kbl\.or\.kr/i.test(_host)
       ? {
           Channel: "WEB",
           TeamCode: "XX",
           lang: "ko",
           "X-Requested-With": "XMLHttpRequest",
         }
-      : isSofascoreUrl(url)
-        ? getSofascoreRequestHeaders()
-        : undefined;
+      : undefined;
     try {
-      const directData = await fetchJson(url, _directLabel, _requestHeaders);
+      const directData = await fetchJson(url, _directLabel, _kblHeaders);
       if (String(url).includes("/summary?event=")) {
         trackerDebug("summary fetch ok via direct", {
           event: String(url).split("event=")[1]?.split("&")[0] || "",
@@ -17739,35 +17660,6 @@ async function proxyFetch(url, timeoutMs = 12000) {
       _proxyFetchCacheEvictIfNeeded();
       return directData;
     } catch (directErr) {
-      // SofaScore has used both api.sofascore.com and www.sofascore.com for
-      // the same /api/v1 surface. If the API hostname returns the challenge,
-      // make one browser-style retry against the site hostname before using
-      // the server-side Worker fallback. This is intentionally limited to a
-      // single retry so a 403 cannot create a request loop.
-      if (isSofascoreUrl(url) && /HTTP 403\b/i.test(String(directErr?.message || directErr))) {
-        try {
-          const _apiHostRetryUrl = String(url).replace(
-            /^https?:\/\/api\.sofascore\.(com|app)/i,
-            "https://www.sofascore.com",
-          );
-          if (_apiHostRetryUrl !== String(url)) {
-            const _wwwData = await fetchJson(
-              _apiHostRetryUrl,
-              "DirectSofaWWW",
-              getSofascoreRequestHeaders(),
-              Math.min(8000, Math.max(1000, Number(timeoutMs) || 8000)),
-            );
-            _proxyFetchCache.set(cacheKey, { data: _wwwData, timestamp: Date.now() });
-            _proxyFetchCacheEvictIfNeeded();
-            return _wwwData;
-          }
-        } catch (_wwwRetryErr) {
-          engineDebug("SofaScore www retry failed; using Worker fallback", {
-            request: fetchLabel,
-            error: _wwwRetryErr?.message || String(_wwwRetryErr),
-          });
-        }
-      }
       const _bigEuroFeed = /feeds\.incrowdsports\.com.*\/(games|clubs)/i.test(String(url));
       const workerTimeoutMs = Math.min(_bigEuroFeed ? 25000 : 4000, Math.max(1, Number(timeoutMs) || 4000));
       try {
