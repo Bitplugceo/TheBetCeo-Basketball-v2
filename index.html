@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -44,7 +45,12 @@ if ("serviceWorker" in navigator) {
         var ae = document.activeElement;
         var tag = ae && ae.tagName ? String(ae.tagName).toUpperCase() : "";
         var typing = tag === "INPUT" || tag === "TEXTAREA" || (ae && ae.isContentEditable);
-        if (document.hasFocus() && typing) {
+        /* FIX #18: never auto-reload while a run, a manual settlement or a tracker save is in progress */
+        var busy = !!(window.__engineRunInProgress ||
+          (typeof g_manualSettleInFlight !== "undefined" && g_manualSettleInFlight) ||
+          (typeof g_trackerSaveInFlight !== "undefined" && g_trackerSaveInFlight));
+        if ((document.hasFocus() && typing) || busy) {
+          if (busy) setTimeout(_bbTrySwReload, 3000);
           var btn = document.getElementById("bbSwReloadBtn");
           if (!btn) {
             btn = document.createElement("button");
@@ -3058,7 +3064,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
       class="header-icon-btn"
       type="button"
       id="engineRelockBtn"
-      title="Lock the engine"
+      title="Show the privacy screen (cosmetic local gate, not security)"
       onclick="
         localStorage.removeItem('engineUnlocked');
         location.reload();
@@ -4174,6 +4180,9 @@ const BB_LOCK_REGISTRY = Object.freeze([
                                                                                                           
                                                                                                   
                                                                      
+  /* FIX #4: COSMETIC CLIENT-SIDE GATE — NOT ACCESS CONTROL. The salted hash, the salt and the unlock flag
+     all live in this page/localStorage; anyone with the file can bypass or brute-force it. It is only a
+     privacy screen against casual shoulder-surfing. Do not rely on it to protect the engine. */
   const ENGINE_LOCK_PIN_HASH = "dc69839a54b801d7badf5c5d5a64ad5800f49c2cb4cca4f99a1767940240b711";
   const ENGINE_LOCK_SALT = "bb_engine_lock_v1";
   const overlay = document.getElementById("engineLockOverlay");
@@ -6680,7 +6689,7 @@ function applyDampedIntelSignal(baseProj, rawSignal, opponentVolRatio) {
   if (!bbStrictFinite(rawSignal) || Number(rawSignal) === 0) return Number(baseProj);
   const pts = Math.max(-8, Math.min(8, Number(rawSignal)));
   const _volR = bbStrictFinite(opponentVolRatio) ? Number(opponentVolRatio) : NaN;
-  if (!Number.isFinite(_volR) || _volR < 0) return NaN;
+  if (!Number.isFinite(_volR) || _volR < 0) return Number(baseProj); /* FIX #10: missing vol -> skip the fatigue adjust, keep the projection */
   const dampening = Math.max(0.3, 1.0 - _volR * 0.5);
   return Number(baseProj) + pts * dampening;
 }
@@ -10916,7 +10925,7 @@ function computeQuarterProjection({
         marketKey: qKey,
         injMultA: injA,
         injMultB: injB,
-        injuryFetchFailed: !!(typeof AppState !== "undefined" && AppState.injuries && ((AppState.injuries.A && AppState.injuries.A.fetchFailed) || (AppState.injuries.B && AppState.injuries.B.fetchFailed))),
+        injuryFetchFailed: !!(typeof AppState !== "undefined" && AppState.injuries && ((AppState.injuries.A && (AppState.injuries.A.fetchFailed || AppState.injuries.A.emptyFeed)) || (AppState.injuries.B && (AppState.injuries.B.fetchFailed || AppState.injuries.B.emptyFeed)))),
         hasH2H: hasH2H,
 
         siblingEdge: siblingEdge,
@@ -11188,7 +11197,7 @@ function evaluatePickWithParams(pick, paramOverrides) {
     const edgePct = Math.abs(edge / lineVal);
     const volLimit = getMarketVolLimit(league, marketKey);
     const volRatio =
-      isFinite(pick.volatility) && isFinite(volLimit) && volLimit > 0
+      bbStrictFinite(pick.volatility) && Number.isFinite(volLimit) && volLimit > 0 /* FIX #8: null volatility must not become 0 */
         ? Number(pick.volatility) / volLimit
         : NaN;
     const sampleTier = pick.sampleTier || "unknown";
@@ -17927,6 +17936,7 @@ function forcePickNoPlayWithNote(pickRow, noteText) {
     pickRow.noPlayReason = reason;
     pickRow.whyPick = reason;
   }
+  if (pickRow.note) pickRow.noteBeforeNoPlay = pickRow.note; /* FIX #17: keep the prior note for audit; display hides it */
   pickRow.note = null;
   pickRow.intelligenceNote = null;
   pickRow.reconNote = null;
@@ -18181,6 +18191,10 @@ function bbMergeT6IntoIntegrity(picks) {
       if (hasBlock) mi.status = "BLOCK";
       else if (mi.status === "CLEAR") mi.status = "WARNING";
       p.marketIntegrity = mi;
+      if (hasBlock && p.pick && p.pick !== "NO PLAY" && p.pick !== "—" && p.pick !== "NaN") { /* FIX N3: status BLOCK always means NO PLAY */
+        p.blockedPick = p.pick;
+        forcePickNoPlayWithNote(p, "TRAP BLOCK: " + sigs.filter((x) => x.level === "BLOCK").map((x) => x.note).join("; "));
+      }
     } catch (_e) {}
   });
   return picks;
@@ -24452,7 +24466,9 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus, extra
   }
 
   rebuildTrackerStats();
-  await forceTrackerSaveNow([updatedPick]);
+  /* FIX SETTLE-2: show the settlement immediately; persistence (one local write+verify, one server push)
+     runs in the background and no longer gates the UI. Heavy follow-ups run when the browser is idle. */
+  renderTrackedPicks();
   trackerDebug("manual settle applied", {
     league: touchedPick?.league || "",
     eventId: touchedPick?.eventId || "",
@@ -24463,15 +24479,36 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus, extra
     bucket: "active_until_10h_after_settlement",
   });
 
+  try {
+    clearTrackerFollowupRefresh();
+    if (g_trackerSaveTimer) {
+      clearTimeout(g_trackerSaveTimer);
+      g_trackerSaveTimer = null;
+    }
+    g_trackerSaveVersion = Math.max(g_trackerSaveVersion + 1, g_trackerPersistedVersion + 1);
+  } catch (_sv) {}
+  flushTrackerSave()
+    .then(() => renderTrackedPicks())
+    .catch((err) => {
+      console.error("[BB Engine] manual settle background sync failed", err);
+      trackerDebug("manual settle background sync failed — retry scheduled", {
+        result: normalizedStatus,
+        error: String(err?.message || err),
+      });
+      try { scheduleTrackerSave(3000); } catch (_rs) {}
+    });
+
+  const _bbIdle = (fn) =>
+    typeof window.requestIdleCallback === "function"
+      ? window.requestIdleCallback(fn, { timeout: 3000 })
+      : setTimeout(fn, 300);
+
   if (["win", "loss", "push"].includes(normalizedStatus) && updatedPick.snapshot) {
     try {
       const _rKey = "BB_RETRO_SETTLE_COUNT";
       const _rCount = (parseInt(localStorage.getItem(_rKey) || "0", 10) || 0) + 1;
       localStorage.setItem(_rKey, String(_rCount));
-                                                                                      
-                                                                                   
-                                                                                    
-      setTimeout(async () => {
+      _bbIdle(async () => {
         try {
           await runRetrospectiveAnalysis(updatedPick);
           const _oosResult2 = runOutOfSampleValidation(updatedPick.league);
@@ -24480,14 +24517,13 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus, extra
         } catch (err) {
           engineDebug("Retrospective analysis error", err.message);
         }
-      }, 100);
+      });
     } catch (_retroErr) {
       engineDebug("Retrospective analysis outer error", {
         error: _retroErr?.message || String(_retroErr),
       });
     }
   }
-
 
   if (
     touchedPick &&
@@ -24497,7 +24533,7 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus, extra
     touchedPick.league !== "wnba_pre" &&
     touchedPick.league !== "ncaa"
   ) {
-    setTimeout(() => {
+    _bbIdle(() => {
       try {
         if (typeof window.runPhase2Simulator === "function") {
           window.runPhase2Simulator(touchedPick.league);
@@ -24505,24 +24541,9 @@ async function applyManualSettlementToTrackedPick(signature, resultStatus, extra
       } catch (e) {
         engineDebug("Phase 2 simulator error (non-critical)", e.message);
       }
-    }, 1000);
-  }
-
-  renderTrackedPicks();
-
-  try {
-    await forceTrackerSaveNow();
-  } catch (err) {
-    console.error("[BB Engine] manual settle durable sync failed", err);
-    trackerDebug("manual settle durable sync failed", {
-      result: normalizedStatus,
-      error: String(err?.message || err),
     });
-                                                                              
-                                                                                       
   }
 
-  renderTrackedPicks();
   return true;
 }
 
@@ -24743,12 +24764,8 @@ function handleTrackedPicksActionClick(event) {
   const settle = async () => {
     g_manualSettleInFlight = true;
     try {
-      let waited = 0;
-      while ((g_trackerSaveInFlight || g_refreshTrackedPicksInFlight) && waited < 5000) {
-        engineDebug("Manual settle waiting for save/refresh to complete...");
-        await new Promise((r) => setTimeout(r, 100));
-        waited += 100;
-      }
+      /* FIX SETTLE-1: no busy-wait for in-flight save/refresh. refreshTrackedPickResults and hydrate re-resolve
+         against the LIVE state and merges honour manualSettledAt, so the score prompt opens immediately. */
       const ok = await settleTrackedPick(signature, resultStatus);
       if (!ok) {
         trackerDebug("manual settle did not apply", { signature, result: resultStatus });
@@ -26277,7 +26294,7 @@ function clipProjectionToBaseline(proj, baseline, leagueVolLimit) {
 
 /* CALCULATION SECTION */
 function getVolatilityRatioForSeries(series, leagueVolLimit) {
-  const cleanSeries = Array.isArray(series) ? series.map(Number).filter((v) => isFinite(v)) : [];
+  const cleanSeries = Array.isArray(series) ? series.filter((v) => bbStrictFinite(v)).map(Number) : []; /* FIX #9: null/'' are missing, not 0 */
 
   if (cleanSeries.length < 3) return 1.35;
   const sd = stdDev(cleanSeries);
@@ -26954,8 +26971,9 @@ function detectTrap(edge, line, pick, league, marketType, vol) {
                                
 function selectLock(markets) {
   const candidates = Array.isArray(markets) ? markets : [];
-  const getLockWinProbability = (m) => { const p = Number(m?.winProbability); return Number.isFinite(p) && p >= 0 && p <= 1 ? p : NaN; };
-  const valid = candidates.filter((m) => m && m.pick !== "NO PLAY" && m.pick !== "—" && isFinite(Number(m.edge)) && (Number(m.line) > 0 || isFinite(Number(m.marginEdgePct))) && !m.lockRestricted && isFinite(getLockWinProbability(m)));
+  /* FIX #8 (cross-check): strict finite checks so null edge / null winProbability are not read as 0 */
+  const getLockWinProbability = (m) => { if (!bbStrictFinite(m?.winProbability)) return NaN; const p = Number(m.winProbability); return p >= 0 && p <= 1 ? p : NaN; };
+  const valid = candidates.filter((m) => m && m.pick !== "NO PLAY" && m.pick !== "—" && bbStrictFinite(m.edge) && (Number(m.line) > 0 || bbStrictFinite(m.marginEdgePct)) && !m.lockRestricted && isFinite(getLockWinProbability(m)));
   if (!valid.length) return -1;
   const nonWinner = valid.filter((m) => String(m.marketKey || "").toLowerCase() !== "winner");
   const lockPool = valid.length >= 2 && nonWinner.length ? nonWinner : valid;
@@ -26965,13 +26983,13 @@ function selectLock(markets) {
     if (Math.abs(bp-ap)>0.000001) return bp>ap?b:a;
     const ag=getConfidenceRank(a.confidenceGrade||a.confidence||""), bg=getConfidenceRank(b.confidenceGrade||b.confidence||"");
     if(bg!==ag) return bg>ag?b:a;
-    const ae=isFinite(Number(a.marginEdgePct))?Number(a.marginEdgePct)*100:Number(a.line)>0?Math.abs(Number(a.edge)/Number(a.line))*100:0;
-    const be=isFinite(Number(b.marginEdgePct))?Number(b.marginEdgePct)*100:Number(b.line)>0?Math.abs(Number(b.edge)/Number(b.line))*100:0;
+    const ae=bbStrictFinite(a.marginEdgePct)?Number(a.marginEdgePct)*100:Number(a.line)>0?Math.abs(Number(a.edge)/Number(a.line))*100:0;
+    const be=bbStrictFinite(b.marginEdgePct)?Number(b.marginEdgePct)*100:Number(b.line)>0?Math.abs(Number(b.edge)/Number(b.line))*100:0;
     if(Math.abs(be-ae)>0.0001)return be>ae?b:a;
     if(!!b.fullModel!==!!a.fullModel)return b.fullModel?b:a;
     if(!!b.hasH2H!==!!a.hasH2H)return b.hasH2H?b:a;
-    const av=isFinite(Number(a.volatility))&&isFinite(Number(a.volLimit))&&Number(a.volLimit)>0?Number(a.volatility)/Number(a.volLimit):Infinity;
-    const bv=isFinite(Number(b.volatility))&&isFinite(Number(b.volLimit))&&Number(b.volLimit)>0?Number(b.volatility)/Number(b.volLimit):Infinity;
+    const av=bbStrictFinite(a.volatility)&&bbStrictFinite(a.volLimit)&&Number(a.volLimit)>0?Number(a.volatility)/Number(a.volLimit):Infinity;
+    const bv=bbStrictFinite(b.volatility)&&bbStrictFinite(b.volLimit)&&Number(b.volLimit)>0?Number(b.volatility)/Number(b.volLimit):Infinity;
     if(Math.abs(av-bv)>0.0001)return bv<av?b:a;
     const as=isFinite(Number(a.lockStrength))?Number(a.lockStrength):0, bs=isFinite(Number(b.lockStrength))?Number(b.lockStrength):0;
     if(Math.abs(bs-as)>0.0001)return bs>as?b:a;
@@ -27117,8 +27135,10 @@ function blendConfidenceAndDistribution(distProb, modelProb) {
 }
 /* CALCULATION SECTION */
 function distributionWinProbability(meanEdge, leagueVolLimit, volRatio) {
-  if (!isFinite(meanEdge) || !isFinite(leagueVolLimit) || leagueVolLimit <= 0) return null;
-  const sd = leagueVolLimit * Math.max(0.5, isFinite(volRatio) ? volRatio : 1.0);
+  /* FIX #8: strict finite checks — isFinite(null) is true and would turn a missing edge into a 50% coin flip,
+     and a null volRatio into the 0.5 floor (halved SD). Missing volRatio keeps the documented 1.0 default. */
+  if (!bbStrictFinite(meanEdge) || !bbStrictFinite(leagueVolLimit) || Number(leagueVolLimit) <= 0) return null;
+  const sd = Number(leagueVolLimit) * Math.max(0.5, bbStrictFinite(volRatio) ? Number(volRatio) : 1.0);
   if (!isFinite(sd) || sd <= 0) return null;
   const z = Number(meanEdge) / sd;
   return clampNumber(_normalCdf(z), 1e-6, 1 - 1e-6);
@@ -27132,7 +27152,7 @@ function selectedSideEdgeForProbability(edge, side) {
 /* CALCULATION SECTION */
 function getDistributionWinProbabilityForPick(p, leagueKey) {
   
-  if (!p || !isFinite(Number(p.edge))) return null;
+  if (!p || !bbStrictFinite(p.edge)) return null; /* FIX #8: Number(null) is 0 — check before coercing */
   const mk = p.marketKey || "ft";
   const volLimit =
     typeof getMarketVolLimit === "function" ? getMarketVolLimit(leagueKey || p.league || "", mk) || 12 : 12;
@@ -27140,7 +27160,7 @@ function getDistributionWinProbabilityForPick(p, leagueKey) {
   const vol = Number(p.volatility);
   const volRatio = vol / volLimit;
   const side = p.side || (typeof getPickSideFromText === "function" ? getPickSideFromText(p.pick) : "");
-  const selectedEdge = selectedSideEdgeForProbability(Number(p.edge), side);
+  const selectedEdge = selectedSideEdgeForProbability(p.edge, side);
   if (!Number.isFinite(selectedEdge)) return null;
   return distributionWinProbability(selectedEdge, volLimit, volRatio);
 }
@@ -27533,7 +27553,16 @@ function getConfidenceModelProvenance(league, marketKey = "ft") {
 }
 
 /* CALCULATION SECTION */
+/* FIX N1: a grade call that fails must not leave an older (previous run / previous game) served probability
+   behind for the same market. Only clears when the caller names the market explicitly. */
+function bbClearServedConfidence(params) {
+  try {
+    const mk = params && params.marketKey ? String(params.marketKey) : "";
+    if (mk && typeof window !== "undefined" && window.__BB_CONFIDENCE_SERVING) delete window.__BB_CONFIDENCE_SERVING[mk];
+  } catch (_e) {}
+}
 function getConfidenceGrade(params) {
+  bbClearServedConfidence(params);
   const {
     pick,
     note,
@@ -27563,17 +27592,16 @@ function getConfidenceGrade(params) {
   if (
     !pick ||
     pick === "NO PLAY" ||
-    line === null ||
-    !isFinite(line) ||
+    !bbStrictFinite(line) ||
     line <= 0 ||
-    !isFinite(edge)
+    !bbStrictFinite(edge) /* FIX #8 */
   ) {
     return "NaN";
   }
 
   const edgePct = Math.abs(edge / line);
-  if (!isFinite(volatility) || !isFinite(volLimit) || volLimit <= 0) return "NaN";
-  const volRatio = volatility / volLimit;
+  if (!bbStrictFinite(volatility) || !bbStrictFinite(volLimit) || Number(volLimit) <= 0) return "NaN"; /* FIX #8: null volatility must not mean "calm" */
+  const volRatio = Number(volatility) / Number(volLimit);
   const _pickSide = typeof getPickSideFromText === "function" ? getPickSideFromText(pick) : "";
   let winProb = getConfidenceWinProbability(
     null,
@@ -27743,6 +27771,7 @@ function getConfidenceGrade(params) {
 
 /* CALCULATION SECTION */
 function getMarginConfidenceGrade(params) {
+  bbClearServedConfidence(params); /* FIX N1 */
   const {
     pick,
     marginEdgePct,
@@ -27756,11 +27785,11 @@ function getMarginConfidenceGrade(params) {
     injuryFetchFailed = false,
   } = params || {};
 
-  if (!pick || pick === "NO PLAY" || !isFinite(marginEdgePct)) {
+  if (!pick || pick === "NO PLAY" || !bbStrictFinite(marginEdgePct)) {
     return "NaN";
   }
 
-  const volRatio = isFinite(marginVolRatio) ? marginVolRatio : NaN;
+  const volRatio = bbStrictFinite(marginVolRatio) ? Number(marginVolRatio) : NaN; /* FIX #8 */
   let winProb = getConfidenceWinProbability(
     null,
     marginEdgePct,
@@ -27774,9 +27803,9 @@ function getMarginConfidenceGrade(params) {
                                                                    
 
   try {
-    const edgePts = isFinite(marginEdgePts)
+    const edgePts = bbStrictFinite(marginEdgePts)
       ? marginEdgePts
-      : isFinite(marginEdgePct)
+      : bbStrictFinite(marginEdgePct)
         ? marginEdgePct
         : NaN;
     const _volLim =
@@ -27787,7 +27816,7 @@ function getMarginConfidenceGrade(params) {
             getMarketVolLimit(league, "ft") ||
             12
           : 12;
-    if (isFinite(marginEdgePts) && isFinite(_volLim)) {
+    if (bbStrictFinite(marginEdgePts) && isFinite(_volLim)) {
       const _distProb = distributionWinProbability(selectedSideEdgeForProbability(marginEdgePts, params?.pick || params?.side || (marginEdgePts >= 0 ? "home" : "away")), _volLim, volRatio);
       if (Number.isFinite(_distProb)) {
         
@@ -27821,7 +27850,7 @@ function getMarginConfidenceGrade(params) {
         ? volLimitPts
         : (typeof getMarketVolLimit === "function" ? getMarketVolLimit(league, params?.marketKey || "winner") || 12 : 12)
     );
-    const _marginEdgePts = isFinite(marginEdgePts) ? Number(marginEdgePts) : null;
+    const _marginEdgePts = bbStrictFinite(marginEdgePts) ? Number(marginEdgePts) : null;
     const _marginSd = _marginEdgePts != null && _marginVolLimit > 0
       ? _marginVolLimit * Math.max(0.5, Number.isFinite(volRatio) ? Number(volRatio) : 1)
       : null;
@@ -29169,6 +29198,28 @@ async function searchTeamFromAPI(base, name, league) {
   }
 }
 
+/* FIX #16: exact injury-status classification (no substring matching). Returns { isOut, isDTD, away, label }. */
+function bbClassifyInjuryStatus(inj) {
+  const cands = [];
+  if (inj && typeof inj.status === "string") cands.push(inj.status);
+  else if (inj && inj.status && typeof inj.status === "object") cands.push(inj.status.name, inj.status.description, inj.status.type);
+  if (inj && inj.type && typeof inj.type === "object") cands.push(inj.type.description, inj.type.name);
+  else if (inj && typeof inj.type === "string") cands.push(inj.type);
+  const norm = (s) => String(s == null ? "" : s).toLowerCase().replace(/^injury[_\s-]*status[_\s-]*/, "").replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  const OUT = new Set(["out", "out for season", "out indefinitely", "injured reserve", "ir", "suspension", "suspended",
+    "not with team", "inactive", "pregnancy", "maternity", "maternity leave"]);
+  const AWAY = new Set(["national team", "national team duty", "fiba", "world cup", "international duty"]);
+  const DTD = new Set(["questionable", "doubtful", "day to day", "daytoday"]);
+  for (const c of cands) {
+    const s = norm(c);
+    if (!s) continue;
+    if (OUT.has(s)) return { isOut: true, isDTD: false, away: false, label: s };
+    if (AWAY.has(s)) return { isOut: true, isDTD: false, away: true, label: s };
+    if (DTD.has(s)) return { isOut: false, isDTD: true, away: false, label: s };
+  }
+  return { isOut: false, isDTD: false, away: false, label: norm(cands.find((c) => norm(c)) || "") };
+}
+
 async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
   const result = {
     scoringMult: 1,
@@ -29189,58 +29240,41 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
   try {
     const data = await proxyFetch(`${base}/teams/${teamId}/injuries`).catch(() => null);
     if (data == null) {
-      
-      result.scoringMult = 0.94; 
+      /* FIX #1: a failed fetch is UNKNOWN availability, not a 6% offensive loss. No haircut; grades are capped
+         downstream via injuryFetchFailed (winProb <= 0.62). */
+      result.scoringMult = 1;
       result.fetchFailed = true;
       result.highUncertainty = true;
       result.minutesUnknownDTD = true;
       result.countsConfirmed = false;
-      result.notes.push({ type: "meta", text: "Injury fetch failed — treating impact as unknown; offense haircut 0.94" });
+      result.notes.push({ type: "meta", text: "Injury fetch failed — availability unknown; no offense haircut applied, grades capped" });
       return result;
     }
     const items = data?.injuries || data?.items || [];
     if (!items.length) {
-                                                                                         
-                                                                                        
-                                                                                            
-                                                                                        
-                                                                                         
-                                                                                           
-                                                                                             
-                                                                                   
-      result.scoringMult = 0.94;
-      result.confirmedNone = false;                                                                          
+      /* FIX #1: the feed parsed and listed nobody. That is not a haircut. scoringMult stays 1; confirmedNone is set.
+         emptyFeed stays true so the existing "grades capped / confirm roster" warning and grade cap still apply. */
+      result.scoringMult = 1;
+      result.confirmedNone = true;
       result.emptyFeed = true;
-      result.fetchFailed = true;                                                            
+      result.fetchFailed = false;
       result.highUncertainty = true;
-      result.countsConfirmed = false;
+      result.countsConfirmed = true;
       result.notes.push({
         type: "meta",
-        text: "Injury feed empty — availability unconfirmed, not full strength; offense haircut 0.94, grades capped",
+        text: "Injury feed empty — no absences listed; no offense haircut applied, grades capped until roster confirmed",
       });
       return result;
     }
 
-    const avgPPG = isFinite(teamAvgScored) && teamAvgScored > 0 ? teamAvgScored : 80;
+    /* FIX #15: no invented 80-point team average; without a real average the per-player share is unknown */
+    const avgPPG = bbStrictFinite(teamAvgScored) && Number(teamAvgScored) > 0 ? Number(teamAvgScored) : NaN;
     let totalReduction = 0;
 
     for (const inj of items) {
-      const status = (inj?.status || inj?.type?.description || "").toLowerCase();
-      const isOut =
-        status.includes("out") ||
-        status.includes("injured reserve") ||
-        status.includes("suspended") ||
-        status.includes("not with team") ||
-        status.includes("not_with_team") ||
-        status.includes("fiba") ||
-        status.includes("world cup") ||
-        status.includes("national team") ||
-        status.includes("pregnancy") ||
-        status.includes("maternity");
-      const isDTD =
-        status.includes("questionable") ||
-        status.includes("doubtful") ||
-        status.includes("day-to-day");
+      const _cls = bbClassifyInjuryStatus(inj); /* FIX #16: exact status match */
+      const isOut = _cls.isOut;
+      const isDTD = _cls.isDTD;
       if (!isOut && !isDTD) continue;
 
       const athlete = inj?.athlete || inj?.person || {};
@@ -29260,7 +29294,7 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
         }
       }
 
-      if (ppg <= 0) {
+      if (ppg <= 0 || !Number.isFinite(avgPPG)) { /* FIX #15: unknown team average -> treat as unknown impact */
         result.unknownImpactCount++;
 
         const _posAbbr = String(athlete?.position?.abbreviation || "").toUpperCase();
@@ -29377,12 +29411,12 @@ async function fetchInjuryMeta(base, teamId, teamAvgScored, league) {
   } catch (e) {
     
     logDebug("fetchInjuryMeta failed", e);
-    result.scoringMult = 0.94;
+    result.scoringMult = 1; /* FIX #1: error = unknown, not a haircut */
     result.fetchFailed = true;
     result.highUncertainty = true;
     result.minutesUnknownDTD = true;
     result.countsConfirmed = false;
-    result.notes.push({ type: "meta", text: "Injury fetch error — impact unknown; offense haircut 0.94" });
+    result.notes.push({ type: "meta", text: "Injury fetch error — availability unknown; no offense haircut applied, grades capped" });
   }
 
   return result;
@@ -35153,11 +35187,14 @@ function validateRequiredPredictionData(league, marketKey, parsed, contextData =
   return { ok, marketKey: mk, minRequired, counts, reason: ok ? null : "required_full_statistics_unavailable" };
 }
 
-function normalizeBasketballPace(value, unit = "possessions_per_game", periodMinutes = 48) {
+/* FIX #20: the engine's own pace (calculateAdvancedMetrics) is possessions per 48 minutes for every league
+   (poss * 48 / regulation minutes; OT games are excluded upstream). The default label now says so.
+   "possessions_per_game" is kept as a legacy alias that is treated as per-48 (unchanged behaviour). */
+function normalizeBasketballPace(value, unit = "possessions_per_48", periodMinutes = 48) {
   if (value == null) return NaN;
   let n = Number(value);
   if (!Number.isFinite(n)) return NaN;
-  const u = String(unit || "possessions_per_game").toLowerCase().replace(/[\s-]+/g, "_");
+  const u = String(unit || "possessions_per_48").toLowerCase().replace(/[\s-]+/g, "_");
   if (u === "possessions_per_game" || u === "possessions_48" || u === "possessions_per_48") return n;
   if (u === "possessions_per_40" || u === "possessions_40") return n * (48 / 40);
   if (u === "possessions_per_36" || u === "possessions_36") return n * (48 / 36);
@@ -35165,7 +35202,7 @@ function normalizeBasketballPace(value, unit = "possessions_per_game", periodMin
   return NaN;
 }
 
-function getPaceSeriesValue(raw, defaultUnit = "possessions_per_game") {
+function getPaceSeriesValue(raw, defaultUnit = "possessions_per_48") {
   if (Array.isArray(raw)) {
     return raw.map((v) => {
       if (v && typeof v === "object") return normalizeBasketballPace(v.value ?? v.pace, v.unit || defaultUnit, v.periodMinutes || 48);
@@ -35259,8 +35296,8 @@ function getAdvancedStatsEligibility(league, ctxA, ctxB, marketKey = "ft", conte
   if (!averages.every(plausibleRating)) return { eligible: false, reason: "advanced rating outside plausibility band", market: mk, counts };
   const _obsOk = (ser) => (Array.isArray(ser) ? ser : []).every((v) => bbStrictFinite(v) && Number(v) >= 30 && Number(v) <= 200);
   if (![a.ortg, a.drtg, b.ortg, b.drtg].every(_obsOk)) return { eligible: false, reason: "advanced rating observation outside plausibility band", market: mk, counts }; /* BB-FIX #19 per-game check */
-  const paceA = getPaceSeriesValue(a.pace, a.paceUnit || "possessions_per_game");
-  const paceB = getPaceSeriesValue(b.pace, b.paceUnit || "possessions_per_game");
+  const paceA = getPaceSeriesValue(a.pace, a.paceUnit || "possessions_per_48");
+  const paceB = getPaceSeriesValue(b.pace, b.paceUnit || "possessions_per_48");
   const paceAAvg = avgOrNaN(paceA), paceBAvg = avgOrNaN(paceB);
   counts.paceA = paceA.length; counts.paceB = paceB.length;
   if (paceA.length < 5 || paceB.length < 5) return { eligible: false, reason: "pace sample requires at least 5 finite values per team", market: mk, counts };
@@ -35378,8 +35415,8 @@ function computeFTProjection({
 
   const ctxA = _ctxRoot.A || {};
   const ctxB = _ctxRoot.B || {};
-  const _paceSeriesA = getPaceSeriesValue(bbAdvSeries(ctxA, "pace10"), ctxA.paceUnit || ctxA.pace10Unit || "possessions_per_game");
-  const _paceSeriesB = getPaceSeriesValue(bbAdvSeries(ctxB, "pace10"), ctxB.paceUnit || ctxB.pace10Unit || "possessions_per_game");
+  const _paceSeriesA = getPaceSeriesValue(bbAdvSeries(ctxA, "pace10"), ctxA.paceUnit || ctxA.pace10Unit || "possessions_per_48");
+  const _paceSeriesB = getPaceSeriesValue(bbAdvSeries(ctxB, "pace10"), ctxB.paceUnit || ctxB.pace10Unit || "possessions_per_48");
   const avgPaceA = avgOrNaN(_paceSeriesA);
   const avgPaceB = avgOrNaN(_paceSeriesB);
 
@@ -35884,8 +35921,8 @@ function compute1HProjection({
     : { ortg: [], drtg: [], pace: [], source: "none" };
   const _advEligibilityH1 = getAdvancedStatsEligibility(league, ctxA, ctxB, "h1", _ctxRoot);
   const _nativeAdvH1 = _advEligibilityH1.eligible;
-  const _pA1 = avgOrNaN(getPaceSeriesValue(_advA1.pace, _advA1.paceUnit || "possessions_per_game"));
-  const _pB1 = avgOrNaN(getPaceSeriesValue(_advB1.pace, _advB1.paceUnit || "possessions_per_game"));
+  const _pA1 = avgOrNaN(getPaceSeriesValue(_advA1.pace, _advA1.paceUnit || "possessions_per_48"));
+  const _pB1 = avgOrNaN(getPaceSeriesValue(_advB1.pace, _advB1.paceUnit || "possessions_per_48"));
   const avgPaceA = Number.isFinite(_pA1) && _pA1 > 0 ? _pA1 : NaN;
   const avgPaceB = Number.isFinite(_pB1) && _pB1 > 0 ? _pB1 : NaN;
   const hasRealPace = isPlausibleBasketballPace(avgPaceA) && isPlausibleBasketballPace(avgPaceB);
@@ -36235,8 +36272,8 @@ function compute2HProjection({
     : { ortg: [], drtg: [], pace: [], source: "none" };
   const _advEligibilityH2 = getAdvancedStatsEligibility(league, ctxA, ctxB, "h2", _ctxRoot2H);
   const _nativeAdvH2 = _advEligibilityH2.eligible;
-  const _pA2 = avgOrNaN(getPaceSeriesValue(_advA2.pace, _advA2.paceUnit || "possessions_per_game"));
-  const _pB2 = avgOrNaN(getPaceSeriesValue(_advB2.pace, _advB2.paceUnit || "possessions_per_game"));
+  const _pA2 = avgOrNaN(getPaceSeriesValue(_advA2.pace, _advA2.paceUnit || "possessions_per_48"));
+  const _pB2 = avgOrNaN(getPaceSeriesValue(_advB2.pace, _advB2.paceUnit || "possessions_per_48"));
   const avgPaceA = Number.isFinite(_pA2) && _pA2 > 0 ? _pA2 : NaN;
   const avgPaceB = Number.isFinite(_pB2) && _pB2 > 0 ? _pB2 : NaN;
   let hasRealPace = Number.isFinite(avgPaceA) && Number.isFinite(avgPaceB);
@@ -38102,7 +38139,8 @@ function suppressCorrelatedHalfPlays(picks) {
   const h1 = picks.find(function (p) { return p.marketKey === "h1" && live(p); });
   if (!q1 || !h1) return picks;
   if (!sideOf(q1) || sideOf(q1) !== sideOf(h1)) return picks;
-  const drop = Math.abs(Number(q1.edge) || 0) >= Math.abs(Number(h1.edge) || 0) ? h1 : q1;
+  const _sEdge = (p) => (bbStrictFinite(p.edge) ? Math.abs(Number(p.edge)) : 0); /* FIX #12: strict edge read */
+  const drop = _sEdge(q1) >= _sEdge(h1) ? h1 : q1;
   const keep = drop === h1 ? q1 : h1;
   drop.pick = "NO PLAY";
   drop.displayPick = "NO PLAY";
@@ -38138,7 +38176,7 @@ function getAllowedMarketsForLeague(league) {
 
                                      
 function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diagnostics }) {
-  suppressCorrelatedHalfPlays(finalPicks);
+  /* FIX #12: correlated-half suppression runs once in runEngine, before selectLock (second call removed) */
   const tracked = [];
   table.style.display = "table";
   table.innerHTML =
@@ -38150,7 +38188,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
   );
 
   leagueFinalPicks.forEach((p, idx) => {
-    const isLock = idx === lockIdx && p.pick !== "NO PLAY" && p.pick !== "NaN";
+    const isLock = !!p.isLock && p.pick !== "NO PLAY" && p.pick !== "NaN"; /* FIX #13: lock identity is a flag on the pick, not an array index */
     const isNoPlay = p.pick === "NO PLAY" || p.pick === "NaN" || !p.pick;
     const isLean =
       !isNoPlay &&
@@ -38244,11 +38282,11 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       p.line,
     );
 
-    const confText = isNoPlay
-      ? "NaN"
-      : p.confidence === "—" || p.confidence === "NaN"
-        ? "NaN"
-        : (p.confidenceDisplay || p.confidence || "D");
+    const confText = isNoPlay /* FIX #7: never print the string "NaN" as a grade */
+      ? "—"
+      : p.confidence === "—" || p.confidence === "NaN" || !p.confidence
+        ? "—"
+        : (p.confidenceDisplay && p.confidenceDisplay !== "NaN" ? p.confidenceDisplay : p.confidence);
 
     const shownLine = p.line;
     const shownEdge = p.edge;
@@ -38311,7 +38349,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
     row.appendChild(tdEdge);
 
     const tdConf = document.createElement("td");
-    const _confDisplay = isNoPlay ? "NaN" : confText;
+    const _confDisplay = isNoPlay ? "—" : confText;
     tdConf.className = isNoPlay ? "conf-none" : getConfidenceClass(confText);
     tdConf.textContent = _confDisplay;
     row.appendChild(tdConf);
@@ -38847,6 +38885,13 @@ function scrollResultsIntoViewNow(table) {
 
                               
 async function runEngine() {
+  /* FIX #19: one run owns the globals. Re-entry is refused; a watchdog-abandoned run discards its late results. */
+  if (window.__engineRunInProgress) {
+    try { engineDebug("runEngine: re-entry refused — a run is already in progress"); } catch (_re) {}
+    return;
+  }
+  const _bbRunId = (window.__bbRunSeq = (window.__bbRunSeq || 0) + 1);
+  const _bbRunAbandoned = () => _bbRunId !== window.__bbRunSeq;
   window.__engineInvariantFailed = false;
   window.__engineInvariantFailure = null;
   try {
@@ -38860,6 +38905,7 @@ async function runEngine() {
     }
   } catch (_snap) {}
   try { window.__bbAdvDiagByMarket = {}; window.__bbAdvDiag = null; } catch (_rst) {} /* BB-FIX2: advanced-model diagnostics are per run */
+  try { window.__BB_CONFIDENCE_SERVING = {}; } catch (_rsv) {} /* FIX N1: served probabilities are per run */
   if (typeof applyAvailabilityLayer === "function") applyAvailabilityLayer();
   if (typeof renderQualityPaceCard === "function") renderQualityPaceCard();
   const runBtn = document.getElementById("runBtn");
@@ -39039,6 +39085,7 @@ async function runEngine() {
   let _runWatchdog = setTimeout(() => {
     _runWatchdog = null;
     try {
+      window.__bbRunSeq = (window.__bbRunSeq || 0) + 1; /* FIX #19: abandon this run before releasing the button */
       window.__engineRunInProgress = false;
       const _rb = document.getElementById("runBtn");
       if (_rb) _rb.disabled = false;
@@ -39049,6 +39096,7 @@ async function runEngine() {
 
   try {
     const _localState = await bbWithTimeout(loadTrackerStateFromLocal(), 5000, "loadTrackerStateFromLocal", null);
+    if (_bbRunAbandoned()) return; /* FIX #19 */
     if (_localState) {
       const _merged = mergeTrackerStates(g_trackerState, _localState);
       normalizeTrackerState(_merged);
@@ -39260,16 +39308,7 @@ async function runEngine() {
       _liveNoPlayReasons.team_b = "insufficient sample tier";
     }
 
-    function forcePickNoPlayWithNote(row, reason) {
-  if (!row) return row;
-  row.pick = "NO PLAY";
-  row.displayPick = "NO PLAY";
-  row.bufferedPickText = "NO PLAY";
-  const r = String(reason || row.noPlayReason || row.whyPick || "NO PLAY");
-  row.noPlayReason = r;
-  row.whyPick = r;
-  return row;
-}
+    /* FIX #6: the inner forcePickNoPlayWithNote copy was removed; every NO PLAY uses the single top-level writer */
 
 /* CALCULATION SECTION */
     const ftCalc = computeFTProjection({
@@ -39775,7 +39814,7 @@ async function runEngine() {
       injuryNotes: [],
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed),
+      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
       paceGapRisk: ftCalc.paceGapRisk,
       defensiveFloorFlag: ftCalc.defensiveFloorFlag,
       blowoutGap: ftCalc.blowoutGap,
@@ -39816,7 +39855,7 @@ async function runEngine() {
 
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed),
+      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
       league,
     });
 
@@ -39848,7 +39887,7 @@ async function runEngine() {
       lineupQuality: _lqiShared,
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed),
+      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
       league,
     }) : "NaN";
 
@@ -39903,7 +39942,7 @@ async function runEngine() {
       lineupQuality: lqA,
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed),
+      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
     });
 
     const bTrap = detectTrap(ftCalc.bEdge, bLine, bPick, league, "team_b", _bVolTeamScale);
@@ -39928,7 +39967,7 @@ async function runEngine() {
       lineupQuality: lqB,
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed),
+      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
     });
 
     const h1aVolatilityForConf = h1Calc.aVol1 * getMarketVolLimit(league, "h1");
@@ -39961,7 +40000,7 @@ async function runEngine() {
 
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed),
+      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
       league,
     }) : "NaN";
 
@@ -39995,7 +40034,7 @@ async function runEngine() {
 
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed),
+      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
       league,
     }) : "NaN";
 
@@ -40560,14 +40599,14 @@ async function runEngine() {
         picks.forEach((p) => {
       if (!p) return;
       const proj = Number(p.proj != null ? p.proj : p.projection);
-      const edge = Number(p.edge);
+      const edge = bbStrictFinite(p.edge) ? Number(p.edge) : NaN; /* FIX #8: null edge is missing, not 0 */
       const missingDef = !!(p.missingDefense || (p.modelStatus && p.modelStatus.defenseComplete === false));
                                                                                                  
       const needsNumericProj = String(p.marketKey || "") !== "winner";
       if (p.pick && p.pick !== "NO PLAY" && ((needsNumericProj && !Number.isFinite(proj)) || !Number.isFinite(edge) || missingDef)) {
         if (typeof forcePickNoPlayWithNote === "function") forcePickNoPlayWithNote(p, missingDef ? "missing defense" : "non-finite projection/edge");
         else { p.pick = "NO PLAY"; p.noPlayReason = "non-finite projection/edge"; }
-        p.confidence = "NaN";
+        p.confidence = null; /* FIX #7: no "NaN" grade */
       }
       p.modelStatus = {
         fullModel: !!p.fullModel && !missingDef,
@@ -40643,9 +40682,7 @@ async function runEngine() {
          Never falls back to the preFatigue* fields (those still contain injury effects). Missing -> null -> T10 WARN for Unders. */
       p.preAdjustmentProj = bbPreAdjustmentForMarket(mk, c);
     });
-    applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
-    applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league, typeof parsed !== "undefined" ? parsed : null);
-    bbMergeT6IntoIntegrity(finalPicksForDisplay);
+    /* FIX #5: market gates moved below the grade/serving loops so they judge the FINAL grade and their caps stick */
 
     finalPicksForDisplay.forEach((p) => {
       p.smartLineNoPlay = p.displayPick === "NO PLAY" && p.pick !== "NO PLAY";
@@ -40728,6 +40765,17 @@ async function runEngine() {
       });
     }
 
+    /* FIX N2: caps that must survive any re-grade from probability (recon-gap downgrade, integrity cap) */
+    const _bbCapGrade = (p, g) => {
+      if (!g || g === "NaN") return g;
+      let out = g;
+      if (_reconGapSevere && ["ft", "h1", "h2"].includes(String(p.marketKey || "")) && typeof downgradeConfidenceForReconGap === "function") {
+        out = downgradeConfidenceForReconGap(out);
+      }
+      const cap = p.integrityConfidenceCap;
+      if (cap && typeof getConfidenceRank === "function" && /^[ABCD]/.test(String(out)) && getConfidenceRank(String(out).charAt(0)) > getConfidenceRank(cap)) out = cap;
+      return out;
+    };
     {
                                                                                             
                                                                                               
@@ -40749,19 +40797,18 @@ async function runEngine() {
             p.winProbability = Number(p.distributionWinProbability);
             if (typeof resolveConfidenceGradeFromWinProbability === "function") {
               const _g = resolveConfidenceGradeFromWinProbability(p.winProbability, p.league || league, p.marketKey);
-              if (_g && _g !== "NaN") p.confidence = _g;
+              if (_g && _g !== "NaN") { p.confidence = _bbCapGrade(p, _g); p.confidenceDisplay = p.confidence; }
             }
             p.modelType = p.modelType || "fallback";
             p.fallbackReason = p.fallbackReason || "distribution_only_settled_not_required";
           } else {
+            /* FIX #7: a live pick with no probability is a NO PLAY, never a "NaN" grade */
             p.winProbability = NaN;
-            p.confidence = "NaN";
-            p.confidenceDisplay = "NaN";
+            forcePickNoPlayWithNote(p, "probability unavailable");
           }
         } catch (_serveSync) {
           p.winProbability = NaN;
-          p.confidence = "NaN";
-          p.confidenceDisplay = "NaN";
+          forcePickNoPlayWithNote(p, "probability unavailable (confidence sync error)");
         }
       });
     }
@@ -40784,8 +40831,7 @@ async function runEngine() {
             : Number(p.confidenceTrace?.finalWinProbability);
           if (!Number.isFinite(_servedWinProb)) {
             p.winProbability = NaN;
-            p.confidence = "NaN";
-            p.confidenceDisplay = "NaN";
+            forcePickNoPlayWithNote(p, "probability unavailable"); /* FIX #7 */
             return;
           }
           p.winProbability = _servedWinProb;
@@ -40797,13 +40843,25 @@ async function runEngine() {
               p.league || league,
               p.marketKey,
             );
-            if (_syncedGrade && _syncedGrade !== "NaN") p.confidence = _syncedGrade;
+            if (_syncedGrade && _syncedGrade !== "NaN") p.confidence = _bbCapGrade(p, _syncedGrade); /* FIX N2 */
           }
           p.confidenceDisplay = p.confidence;
         }
       });
     }
 
+    /* FIX #7: every live pick ends with a letter grade backed by a finite probability, or becomes NO PLAY */
+    finalPicksForDisplay.forEach((p) => {
+      if (!p || p.pick === "NO PLAY") return;
+      if (!/^[ABCD]/.test(String(p.confidence || ""))) {
+        const _g2 = bbStrictFinite(p.winProbability) && typeof resolveConfidenceGradeFromWinProbability === "function"
+          ? resolveConfidenceGradeFromWinProbability(Number(p.winProbability), p.league || league, p.marketKey)
+          : null;
+        if (_g2 && _g2 !== "NaN") p.confidence = _bbCapGrade(p, _g2);
+        else { forcePickNoPlayWithNote(p, "probability unavailable"); return; }
+      }
+      if (!p.confidenceDisplay || p.confidenceDisplay === "NaN" || p.confidenceDisplay === "—") p.confidenceDisplay = p.confidence;
+    });
                                                                               
                                                                                         
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
@@ -40941,7 +40999,9 @@ async function runEngine() {
           ? Number(ftCalc.ftProj) - Number(h1Calc.h1Proj) - Number(h2Row.proj)
           : NaN;
         if (finite(independentGap) && Math.abs(independentGap) > getReconGapThreshold(ftCalc.ftProj)) {
-          warnings.push("independent FT/H1/H2 gap exceeds reconciliation warning threshold: " + independentGap.toFixed(2));
+          warnings.push("independent FT/H1/H2 gap exceeds reconciliation threshold: " + independentGap.toFixed(2) + " — H2 set to NO PLAY");
+          /* FIX #11: halves must add up — do not bet an H2 that disagrees with FT − H1 */
+          forcePickNoPlayWithNote(h2Row, "FT/H1/H2 reconciliation gap " + independentGap.toFixed(2) + " exceeds threshold — H2 not bet");
         }
       }
       const eventDateAvailable = !!(meta && meta.eventDate);
@@ -40996,8 +41056,8 @@ async function runEngine() {
                                               
     let lockIdx = selectLock(
       finalPicksForDisplay.map((p) => ({
-        edge: isFinite(p.displayEdge) ? p.displayEdge : p.edge,
-        line: isFinite(p.displayLineUsed) ? p.displayLineUsed : p.line,
+        edge: bbStrictFinite(p.displayEdge) ? p.displayEdge : p.edge, /* FIX #8 */
+        line: bbStrictFinite(p.displayLineUsed) ? p.displayLineUsed : p.line,
         pick: p.pick,
         fullModel: p.fullModel,
         confidence: p.confidence,
@@ -41027,8 +41087,8 @@ async function runEngine() {
     ) {
       lockIdx = selectLock(
         finalPicksForDisplay.map((p) => ({
-          edge: isFinite(p.displayEdge) ? p.displayEdge : p.edge,
-          line: isFinite(p.displayLineUsed) ? p.displayLineUsed : p.line,
+          edge: bbStrictFinite(p.displayEdge) ? p.displayEdge : p.edge, /* FIX #8 */
+          line: bbStrictFinite(p.displayLineUsed) ? p.displayLineUsed : p.line,
           pick: p.pick,
           fullModel: p.fullModel,
           confidence: p.confidence,
@@ -41048,17 +41108,15 @@ async function runEngine() {
       );
     }
 
-    const displayablePicks = (finalPicksForDisplay || []).map((p) => {
-      if (!p || typeof p !== "object") return p;
-      p.note = null;
-      p.intelligenceNote = null;
-      p.reconNote = null;
-      p.ftNote = null;
-      p.h1Note = null;
-      p.h2Note = null;
-      p.projectionNote = null;
-      return p;
-    });
+    /* FIX #13: mark the lock on the chosen object itself */
+    finalPicksForDisplay.forEach((p) => { if (p && typeof p === "object") p.isLock = false; });
+    if (Number.isFinite(lockIdx) && lockIdx >= 0 && finalPicksForDisplay[lockIdx] &&
+        finalPicksForDisplay[lockIdx].pick !== "NO PLAY" && finalPicksForDisplay[lockIdx].pick !== "NaN") {
+      finalPicksForDisplay[lockIdx].isLock = true;
+    }
+
+    /* FIX #17: notes are no longer nulled on the shared pick objects (they are also the tracker/debug source).
+       The result table does not render these note fields, so nothing extra is displayed. */
 
                                                     
     finalPicksForDisplay.forEach((p) => {
@@ -41070,6 +41128,7 @@ async function runEngine() {
       }
     });
 
+    if (_bbRunAbandoned()) { engineDebug("run abandoned by watchdog — late results discarded"); return; } /* FIX #19 */
     const trackedToSave = buildResultRows({
       table,
       finalPicks: finalPicksForDisplay,
@@ -41109,7 +41168,12 @@ async function runEngine() {
         bVol1: h1Calc.bVol1,
         netA: typeof netA !== "undefined" ? Number(netA) : null,
         netB: typeof netB !== "undefined" ? Number(netB) : null,
-        injuryAdjustment: "DISABLED_PERMANENTLY",
+        injuryAdjustment: (function () { /* FIX #2: actual status, not a constant */
+          const s = (i) => !i ? "none" : i.fetchFailed ? "failed_no_haircut" : i.emptyFeed ? "empty_feed_no_haircut"
+            : Number(i.scoringMult) < 0.999 ? "applied" : i.countsConfirmed ? "confirmed_none" : "none";
+          const m = (i) => (i && bbStrictFinite(i.scoringMult) ? Number(i.scoringMult).toFixed(3) : "1.000");
+          return "A:" + s(g_injA) + "(" + m(g_injA) + ")|B:" + s(g_injB) + "(" + m(g_injB) + ")";
+        })(),
         restDaysAdjustment: "ENABLED",
 
         ftFullModel: ftCalc.ftFullModel,
@@ -41170,7 +41234,9 @@ async function runEngine() {
                                                                                 
                                                                     
       await bbWithTimeout(addTrackedPicks(persistableTrackedPicks), 8000, "addTrackedPicks", null);
+      if (_bbRunAbandoned()) return; /* FIX #19 */
       await bbWithTimeout(forceTrackerSaveNow(persistableTrackedPicks), 10000, "forceTrackerSaveNow", null);
+      if (_bbRunAbandoned()) return; /* FIX #19 */
 
                                                                                           
                                                                                           
@@ -41215,9 +41281,11 @@ async function runEngine() {
         const missingSummary = missingTracked
           .map((p) => `${p.marketKey || "unknown"}:${p.eventId || "no-event"}:${p.line ?? "no-line"}`)
           .join(", ");
-        throw new Error(
-          `Tracker persistence coverage failure: ${missingTracked.length}/${persistableTrackedPicks.length} actionable predictions missing after verified save. ${missingSummary}`,
+        /* FIX #3: a save miss must not erase a finished prediction — keep the table, warn instead of throwing */
+        engineDebug(
+          `Tracker persistence coverage WARNING: ${missingTracked.length}/${persistableTrackedPicks.length} actionable predictions missing after verified save. ${missingSummary}`,
         );
+        try { setStatusText("⚠ Prediction shown, but " + missingTracked.length + " pick(s) were not saved to the tracker — see Debug", "err"); } catch (_st) {}
       }
       engineDebug("tracked picks durably saved", {
         persistableTrackedPicks: persistableTrackedPicks.length,
@@ -41241,6 +41309,10 @@ async function runEngine() {
     });
 
   } catch (err) {
+    if (_bbRunAbandoned()) { /* FIX #19: late failure of an abandoned run must not repaint the table */
+      console.error("[BB Engine] abandoned run failed", err);
+      return;
+    }
     if (err && err.name === "EngineInvariantError") {
       console.error("[BB Engine] invariant safety stop", err);
       engineDebug("CRITICAL: Engine invariant failed; prediction suppressed.", {
@@ -41295,10 +41367,15 @@ async function runEngine() {
       clearTimeout(_runWatchdog);
       _runWatchdog = null;
     }
-    window.__engineRunInProgress = false;
-    MODEL_TUNING.recencyWeights = _savedRecencyWeights;
-    engineDebug("run finally", { trackerState: getTrackerStateDebugScore(g_trackerState) });
-    if (runBtn) runBtn.disabled = false;
+    /* FIX #19: an abandoned run must not reset the state of a newer run */
+    if (!_bbRunAbandoned()) {
+      window.__engineRunInProgress = false;
+      MODEL_TUNING.recencyWeights = _savedRecencyWeights;
+      if (runBtn) runBtn.disabled = false;
+    } else if (!window.__engineRunInProgress) {
+      MODEL_TUNING.recencyWeights = _savedRecencyWeights;
+    }
+    engineDebug("run finally", { trackerState: getTrackerStateDebugScore(g_trackerState), abandoned: _bbRunAbandoned() });
   }
 }
 
