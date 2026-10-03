@@ -1,9 +1,8 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
                        
-  <meta name="generator" content="bb-engine-h2h-season-type-20261003" />
+  <meta name="generator" content="bb-engine-strict-competition-20261003" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -6476,6 +6475,11 @@ function extractH2HFromPastedEvents() {
       const _specPersist = SOFA_LEAGUE_MATCH[_leagueKeyH2HPaste];
       if (_h2hTournamentId && _specPersist && Array.isArray(_specPersist.ids) && !_specPersist.ids.map(String).includes(String(_h2hTournamentId))) _specPersist.ids.push(String(_h2hTournamentId));
     } catch (_ePersistTid) {}
+    /* STRICT COMPETITION: without a tournament id the games cannot be tied to one competition, so H2H is left out */
+    if (_h2hTournamentId == null) {
+      clearAutoH2HState();
+      return;
+    }
   }
 
   let h2hMatches = uniqueEvents
@@ -6548,6 +6552,7 @@ function extractH2HFromPastedEvents() {
         newEntries.push({
           id: m.id,
           ts: m.startTimestamp || 0,
+          competitionScoped: true, /* already filtered to the one tournament id above */
           aFT: myFT,
           bFT: oppFT,
           aH1: _twoP ? mQ1 : (Number.isFinite(mQ1) && Number.isFinite(mQ2) ? mQ1 + mQ2 : NaN),
@@ -6592,6 +6597,10 @@ function extractH2HFromPastedEvents() {
       return;
     }
     window.__h2hEntryCache = takeSelectedH2H(newEntries);
+    if (window.__h2hEntryCache.length < 2) {
+      clearAutoH2HState();
+      return;
+    }
 
     const merged = window.__h2hEntryCache;
     const h2hA = merged.map((e) => e.aFT);
@@ -13966,7 +13975,7 @@ let g_injA = defaultInjuryMeta();
 let g_injB = defaultInjuryMeta();
 
 function defaultMassacreFetchContext() {
-  try { window.__bbAutoH2H = null; } catch (_rstH) {} /* BB-FIX2: a fresh fetch context must not inherit the previous fixture's H2H mix decision */
+  try { window.__bbAutoH2H = null; window.__bbResolvedSeasonType = null; } catch (_rstH) {} /* BB-FIX2: a fresh fetch context must not inherit the previous fixture's H2H decision or season type */
   return {
     league: "",
     eventDate: "",
@@ -18093,10 +18102,8 @@ function buildFetchAuditIssues({ league, teamAName, teamBName, aStats, bStats, h
     );
   }
 
-  if ((h2hGames?.length || 0) === 0) {
-    issues.push("No 2022+ H2H games were found for this matchup.");
-  } else if ((h2hGames?.length || 0) === 1) {
-    issues.push("Only 1 H2H game was found, so H2H is not fully confirmed.");
+  if ((h2hGames?.length || 0) < 2) {
+    issues.push("0 same-competition H2H games (min 2) for this matchup, so H2H is left out.");
   }
 
   return issues;
@@ -19375,16 +19382,18 @@ function bbSampleStats(arr) {
 function filterSeriesForCurrentCompetition(series, contextRoot = null) {
   if (!Array.isArray(series)) return [];
   const tags = Array.isArray(series.__bbCompetitionTags) ? series.__bbCompetitionTags : null;
-  if (!tags || tags.length !== series.length) return series.slice();
+  if (!tags || tags.length !== series.length) return series.slice(); /* feed carries no competition tags (single-competition feed): nothing to classify */
   const current = getCurrentCompetitionIdentity((contextRoot || {}).league || "", contextRoot);
-  if (current.competitionId == null && current.seasonType == null && !current.competitionName) return series.slice(); /* BB-FIX2: current competition unknown, cannot classify games */
-  const match = (t) => sameCompetitionTag(current, t);
-  const same = series.filter((_, i) => match(tags[i]));
-  if (same.length < 2) return [];
+  if (current.seasonType == null) return series.slice(); /* current competition unknown, cannot classify games */
+  /* STRICT COMPETITION: same season type only (1 preseason, 2 regular, 3 playoffs). tag.competitionId is never used:
+     ESPN's comp.id is the event id. Fewer than 2 same-competition games does NOT pull in other competitions. */
+  const same = series.filter((_, i) => {
+    const t = tags[i];
+    return !!t && bbCoerceSeasonType(t.seasonType) === Number(current.seasonType);
+  });
   const out = same.slice(0, 10);
-  out.__bbWeights = out.map(() => 1);
   out.__bbMixedCompetition = false;
-  out.__bbSameCompetitionCount = out.length;
+  out.__bbSameCompetitionCount = same.length;
   return out;
 }
 
@@ -19689,11 +19698,7 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
         if (_move?.available && _move.adverse) add("T7", "WARN", "line moved against this side from first-seen line (Δ " + Number(_move.delta).toFixed(2) + ")");
         else if (_move?.available && Math.abs(Number(_move.delta || 0)) < 0.001) sig.push({ id: "T7", level: "INFO", note: "first-seen line" });
       } catch (_t7) {}
-      if (S && S.mixedCompetition) sig.push({ id: "T9S", level: side === "UNDER" ? "WARN" : "INFO", note: "history sample mixes competitions (other-competition games weighted 0.5)" });
-      try {
-        const _mix = window.__bbAutoH2H;
-        if (_mix?.mixedCompetition) add("T9", "WARN", "mixed-competition H2H (n_same=" + Number(_mix.sameCompetitionCount || 0) + ", n_other=" + Number(_mix.otherCompetitionCount || 0) + ", fallback weight 0.5)");
-      } catch (_t9) {}
+      /* T9/T9S (mixed-competition samples) removed: form and H2H are strictly same-competition, nothing is mixed in. */
       if (side === "UNDER" && bbStrictFinite(p.preAdjustmentProj) && bbStrictFinite(p.line)) {
         const preEdge = Number(p.preAdjustmentProj) - Number(p.line);
         const baseThreshold = Number(getLeagueEdgePointThreshold(league, mk));
@@ -23182,6 +23187,7 @@ function getCurrentFixtureMeta() {
       ? matchedOpt.dataset.awayId || String(selectedTeamIds.B || "")
       : String(selectedTeamIds.B || ""),
     homeAwayReversedWarning: !!homeAwayReversedWarning,
+    seasonType: bbCoerceSeasonType(matchedOpt ? matchedOpt.dataset.seasonType : autoFetchMeta?.seasonType),
   };
 }
 
@@ -27893,19 +27899,38 @@ function h2hGameTotalPts(g) {
   const b = Number(g.scoreB ?? g.bFT ?? g.oppFT);
   return Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0 ? a + b : NaN;
 }
+/* STRICT COMPETITION (season type): ESPN season type 1 = preseason, 2 = regular season, 3 = playoffs.
+   A competition is identified by its season type ONLY. ESPN's comp.id is the EVENT id (different for every
+   game), never a tournament id, so it must never be used to decide whether two games share a competition. */
+function bbCoerceSeasonType(v) {
+  if (v == null || v === "") return null;
+  const n = Number(v);
+  return n === 1 || n === 2 || n === 3 ? n : null;
+}
+function bbSeasonTypeLabel(t) {
+  const n = bbCoerceSeasonType(t);
+  return n === 1 ? "preseason" : n === 2 ? "regular season" : n === 3 ? "playoffs" : "";
+}
 function getCurrentCompetitionIdentity(league, contextRoot = null) {
   const root = contextRoot || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {};
   const meta = typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}) : {};
   const raw = root?.competition || root?.fixtureCompetition || meta?.competition || meta?.comp || meta?.dataset?.competition || null;
-  const seasonType = Number(raw?.seasonType?.type ?? raw?.seasonType ?? raw?.season?.type ?? meta?.seasonType?.type ?? meta?.seasonType);
-  const competitionId = raw?.id ?? raw?.competitionId ?? meta?.competitionId ?? meta?.compId ?? null;
-  const competitionName = raw?.name ?? raw?.abbreviation ?? raw?.displayName ?? meta?.competitionName ?? null;
-  return {
-    seasonType: Number.isFinite(seasonType) ? seasonType : null,
-    competitionId: competitionId != null ? String(competitionId) : null,
-    competitionName: competitionName ? String(competitionName).trim().toLowerCase() : null,
-    league: String(league || root?.league || "").trim().toLowerCase(),
-  };
+  const lk = String(league || root?.league || "").trim().toLowerCase();
+  const candidates = [
+    raw?.seasonType?.type, raw?.seasonType, raw?.season?.type,
+    meta?.seasonType?.type, meta?.seasonType,
+    typeof window !== "undefined" ? window.__bbResolvedSeasonType : null,
+  ];
+  let seasonType = null;
+  for (let i = 0; i < candidates.length && seasonType == null; i++) seasonType = bbCoerceSeasonType(candidates[i]);
+  if (seasonType == null) {
+    /* a league whose feed only carries one season type (e.g. wnba_pre = preseason) identifies itself */
+    try {
+      const types = typeof LEAGUE_FETCH_RULES === "object" && LEAGUE_FETCH_RULES[lk] ? LEAGUE_FETCH_RULES[lk].h2hScheduleTypes : null;
+      if (Array.isArray(types) && types.length === 1) seasonType = bbCoerceSeasonType(types[0]);
+    } catch (_eLk) {}
+  }
+  return { seasonType: seasonType, competitionId: null, competitionName: null, league: lk };
 }
 
 /* BB-FIX #13: competition class for every tagged game: domestic | european | friendly | preseason (derived from the feed's own season type and name) */
@@ -27918,22 +27943,22 @@ function bbCompetitionClass(g) {
   if (/euroleague|eurocup|champions league|fiba|basketball champions|europe/.test(name)) return "european";
   return "domestic";
 }
-function sameCompetitionTag(current, g) {
-  if (!current || !g) return false;
-  /* ESPN comp.id is the event id, not a tournament id. Never match on it. */
-  if (current.seasonType != null && g.seasonType != null && g.seasonType !== "") return Number(g.seasonType) === Number(current.seasonType);
-  const name = String(g.competitionName || g.competition || "").trim().toLowerCase();
-  if (current.competitionName && name) return name === current.competitionName;
-  return false;
-}
 function h2hCompetitionKey(game) {
   if (!game) return "?";
-  if (game.competitionId != null && String(game.competitionId) !== "") return "id:" + String(game.competitionId);
+  if (game.competitionScoped === true) return "feed:" + String(game.competition || game.competitionName || "scoped").trim().toLowerCase();
   if (game.seasonType != null && String(game.seasonType) !== "") return "season:" + String(game.seasonType);
-  if (game.competition != null && String(game.competition) !== "") return "name:" + String(game.competition).trim().toLowerCase();
-  if (game.competitionName != null && String(game.competitionName) !== "") return "name:" + String(game.competitionName).trim().toLowerCase();
-  if (game.competitionClass != null && String(game.competitionClass) !== "") return "class:" + String(game.competitionClass);
   return "?";
+}
+
+/* A game is in the current competition only when its season type equals the current fixture's season type.
+   Games from a feed that is already scoped to ONE competition (EuroLeague/EuroCup feed, KBL feed, Sofascore
+   games pre-filtered to one tournament id) carry competitionScoped = true. Anything else is NOT the same competition. */
+function bbGameInCurrentCompetition(g, current) {
+  if (!g) return false;
+  if (g.competitionScoped === true) return true;
+  if (!current || current.seasonType == null) return false;
+  const gt = bbCoerceSeasonType(g.seasonType);
+  return gt != null && gt === Number(current.seasonType);
 }
 
 function selectAutoH2HWindow(games, league, contextRoot = null) {
@@ -27948,9 +27973,15 @@ function selectAutoH2HWindow(games, league, contextRoot = null) {
     "ncaa", "ncaaw", "wnba", "wnba_pre", "nba_gl", "nba_summer",
     "intl_friendly", "club_friendly",
   ].includes(lk);
-  const list = (Array.isArray(games) ? games : []).filter(Boolean).slice().sort(function (a, b) {
+  /* STRICT COMPETITION: head-to-head uses ONLY games from the exact current competition (same season type),
+     the same rule as recent form. Other leagues, cups and season types are never a fallback and are never
+     weighted in. With fewer than 2 same-competition games, head-to-head is left out entirely. */
+  const _currentComp = getCurrentCompetitionIdentity(lk, contextRoot);
+  const all = (Array.isArray(games) ? games : []).filter(Boolean).slice().sort(function (a, b) {
     return h2hGameTimeMs(b) - h2hGameTimeMs(a);
   });
+  const list = all.filter(function (g) { return bbGameInCurrentCompetition(g, _currentComp); });
+  const _excluded = all.length - list.length;
   const y2025 = Date.UTC(2025, 0, 1);
   const y2024 = Date.UTC(2024, 0, 1);
   const dated = list.filter(function (g) { return h2hGameTimeMs(g) > 0; });
@@ -27986,40 +28017,25 @@ function selectAutoH2HWindow(games, league, contextRoot = null) {
   else chosen = Math.min(4, avail);
   if (era.indexOf("2022") >= 0) chosen = Math.min(chosen, 5);
   let picked = pool.slice(0, Math.max(0, chosen));
-  /* Competition-aware H2H: current competition first; if <3 same-competition games exist,
-     retain other competitions at provisional 0.5 influence. */
-  const _currentComp = getCurrentCompetitionIdentity(lk, contextRoot);
-  const _sameCurrent = (g) => sameCompetitionTag(_currentComp, g);
-  try {
-    if (typeof engineDebug === "function") engineDebug("H2H competition check", {
-      current: _currentComp,
-      games: pool.slice(0, 8).map((g) => ({ id: g?.id || g?.eventId || null, competitionId: g?.competitionId || null, seasonType: g?.seasonType ?? null, competitionName: g?.competitionName || g?.competition || null, same: _sameCurrent(g) })),
-    });
-  } catch (_h2hLog) {}
-  const _samePool = pool.filter(_sameCurrent);
-  const _sameNPool = _samePool.length;
-  let _bbMixed = false;
-  let _bbSame = 0;
-  let _bbOther = 0;
-  let _bbDominantType = _currentComp.seasonType != null ? String(_currentComp.seasonType) : (_currentComp.competitionName || _currentComp.competitionId || lk || "?");
-  picked = _samePool.length >= 2 ? _samePool.slice(0, Math.max(0, chosen)) : [];
-  _bbSame = picked.length;
-  _bbOther = 0;
-  _bbMixed = false;
-  const _bbTypes = {};
-  picked.forEach((g) => { const k = h2hCompetitionKey(g); _bbTypes[k] = (_bbTypes[k] || 0) + 1; });
+  const _insufficient = list.length < 2 || picked.length < 2;
+  if (_insufficient) picked = [];
+  const _types = {};
+  picked.forEach((g) => { const k = h2hCompetitionKey(g); _types[k] = (_types[k] || 0) + 1; });
   const decision = {
-    mixedCompetition: _bbMixed,
-    dominantSeasonType: _bbDominantType,
+    strictCompetition: true,
+    insufficient: _insufficient,
+    mixedCompetition: false,
+    fallbackWeight: 1,
     currentCompetition: _currentComp,
-    sameCompetitionCount: _bbSame,
-    otherCompetitionCount: _bbOther,
-    fallbackWeight: _bbMixed ? 0.5 : 1,
-    seasonTypeCounts: _bbTypes,
+    currentSeasonType: _currentComp.seasonType,
+    currentCompetitionKnown: _currentComp.seasonType != null,
+    dominantSeasonType: _currentComp.seasonType != null ? String(_currentComp.seasonType) : (lk || "?"),
+    sameCompetitionCount: list.length,
+    otherCompetitionCount: 0,
+    excludedOtherCompetitionCount: _excluded,
+    sameCompetitionGames: _insufficient ? [] : list.slice(0, 10),
+    seasonTypeCounts: _types,
     games: picked,
-    competitionWeights: picked.map(function (g) {
-      return _sameCurrent(g) ? 1 : (_bbMixed ? 0.5 : 1);
-    }),
     n: picked.length,
     era: era,
     league: lk,
@@ -28028,10 +28044,76 @@ function selectAutoH2HWindow(games, league, contextRoot = null) {
       " auto-n=" +
       picked.length +
       (Number.isFinite(m4) ? " (last4 total " + m4.toFixed(1) + ")" : "") +
-      (_bbMixed ? " | MIXED season types " + JSON.stringify(_bbTypes) : ""),
+      " | same-competition only (" + (bbSeasonTypeLabel(_currentComp.seasonType) || "competition unknown") + ")" +
+      (_excluded ? " | " + _excluded + " other-competition game(s) excluded" : ""),
   };
   try { window.__bbAutoH2H = decision; } catch (_e) {}
   return decision;
+}
+/* One status line for the fetch panel. Green check only when real same-competition games are in the boxes. */
+function bbH2HStatusMessage(d) {
+  const same = Number(d?.sameCompetitionCount || 0);
+  const ex = Number(d?.excludedOtherCompetitionCount || 0);
+  const label = bbSeasonTypeLabel(d?.currentSeasonType);
+  if (!d || d.insufficient || !(Number(d.n) >= 2)) {
+    return "H2H: " + same + " same-competition game" + (same === 1 ? "" : "s") +
+      (label ? " (" + label + ")" : "") + " — H2H left out (min 2)" +
+      (ex ? " · " + ex + " other-competition game" + (ex === 1 ? "" : "s") + " ignored" : "") +
+      (d && d.currentCompetitionKnown === false ? " · current competition unknown" : "") + " ❌";
+  }
+  return "H2H: " + d.n + " " + (d.era || "auto") + " games · same-competition" + (label ? " (" + label + ")" : "") + " ✅";
+}
+/* Fills the H2H boxes from the SELECTED same-competition games only (never from the raw fetched pool) and
+   always wipes every box and checkbox first, so a 0-game result cannot leave values from an earlier fetch. */
+function bbApplyAutoH2HToBoxes(h2hGames, teamAId, opts) {
+  opts = opts || {};
+  const isTeamA = typeof opts.isTeamA === "function" ? opts.isTeamA : function (id) { return String(id) === String(teamAId); };
+  clearH2HFields();
+  try { window.__h2hEntryCache = []; } catch (_eC) {}
+  const picked = takeSelectedH2H(Array.isArray(h2hGames) ? h2hGames : []);
+  const d = window.__bbAutoH2H || null;
+  const message = bbH2HStatusMessage(d);
+  if (picked.length < 2) return { ok: false, stale: false, picked: [], sameGames: [], message: message };
+  if (typeof opts.isStillValid === "function" && !opts.isStillValid()) {
+    return { ok: false, stale: true, picked: [], sameGames: [], message: "" };
+  }
+  const mine = function (g, a, b) { return isTeamA(g.teamAId) ? g[a] : g[b]; };
+  const setBox = function (id, arr) { const el = document.getElementById(id); if (el) el.value = arr.join(","); };
+  const pairs = function (aKey, bKey, bKeyOpp) {
+    const A = [], B = [];
+    picked.forEach(function (g) {
+      const x = Number(mine(g, aKey, bKey)), y = Number(mine(g, bKey, aKey));
+      if (x > 0 && y > 0) { A.push(x); B.push(y); }
+    });
+    return { A: A, B: B };
+  };
+  const ft = { A: [], B: [] };
+  picked.forEach(function (g) {
+    ft.A.push(isTeamA(g.teamAId) ? g.scoreA : g.scoreB);
+    ft.B.push(isTeamA(g.teamAId) ? g.scoreB : g.scoreA);
+  });
+  setBox("aFTH2H", ft.A);
+  setBox("bFTH2H", ft.B);
+  syncH2HCheckbox("ft", false);
+  const tag = document.getElementById("h2hAutoTag");
+  if (tag) tag.style.display = "inline";
+  const h1 = pairs("h1A", "h1B");
+  if (h1.A.length >= 2 && h1.B.length >= 2) {
+    setBox("a1HH2H", h1.A);
+    setBox("b1HH2H", h1.B);
+    syncH2HCheckbox("h1", false);
+  }
+  for (let q = 1; q <= 4; q++) {
+    const key = "q" + q;
+    const qp = pairs(key + "A", key + "B");
+    if (qp.A.length >= 2 && qp.B.length >= 2) {
+      setBox("aQ" + q + "H2H", qp.A);
+      setBox("bQ" + q + "H2H", qp.B);
+      if (opts.syncQuarters !== false) syncH2HCheckbox(key, false);
+    }
+  }
+  if (opts.syncQuarters !== false) queueH2HCheckboxSync(false);
+  return { ok: true, stale: false, picked: picked, sameGames: (d && Array.isArray(d.sameCompetitionGames)) ? d.sameCompetitionGames.slice(0, 10) : picked.slice(), message: message };
 }
 function takeSelectedH2H(games, league) {
   return selectAutoH2HWindow(games, league, (typeof AppState !== "undefined" ? AppState.context?.data : null)).games;
@@ -28083,20 +28165,8 @@ function getH2HWeight(
   if (minLen < 2) return 0;
   const _h2hCap = getParam("h2hMaxWeight", league) ?? 0.3;
   let weight = (Math.log1p(minLen - 1) / Math.log1p(9)) * _h2hCap;
-  /* BB-FIX #12: per-game competition weights from the auto H2H window; effectiveN = sum of weights */
-  const _bbAuto = typeof window !== "undefined" && window.__bbAutoH2H ? window.__bbAutoH2H : null;
-  const _cx = Object.assign({}, _bbAuto || {}, context || {});
-  const _cw = Array.isArray(_cx.competitionWeights) ? _cx.competitionWeights.map(Number).filter((w) => Number.isFinite(w) && w >= 0) : null;
-  if (_cw && _cw.length) {
-    const effectiveN = _cw.reduce((a, b) => a + b, 0);
-    weight *= Math.min(1, effectiveN / _cw.length);
-  } else if (_cx.mixedCompetition) {
-    const sameN = Math.max(0, Number(_cx.sameCompetitionCount) || 0);
-    const otherN = Math.max(0, Number(_cx.otherCompetitionCount) || 0);
-    const effectiveN = sameN + 0.5 * otherN;
-    if (effectiveN > 0 && minLen > 0) weight *= Math.min(1, effectiveN / minLen);
-  }
-
+  /* STRICT COMPETITION: H2H holds only same-competition games, so there is no per-game competition weighting
+     (the old 0.5 other-competition fallback was removed). */
   const tier = String(sampleTier || "thin").toLowerCase();
   const tierPenalty =
     tier === "insufficient"
@@ -30390,8 +30460,12 @@ function clearH2HFields() {
 
   g_h2hManualPreference.ft = null;
   g_h2hManualPreference.h1 = null;
+  g_h2hManualPreference.q1 = null;
+  g_h2hManualPreference.q2 = null;
+  g_h2hManualPreference.q3 = null;
+  g_h2hManualPreference.q4 = null;
 
-  ["useFTH2H", "use1HH2H"].forEach((id) => {
+  ["useFTH2H", "use1HH2H", "useQ1H2H", "useQ2H2H", "useQ3H2H", "useQ4H2H"].forEach((id) => {
     const cb = document.getElementById(id);
     if (cb) cb.checked = false;
   });
@@ -31503,8 +31577,9 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
           venue: mine?.homeAway || "",
           oppId: String(opp?.team?.id || ""),
           seasonType: bbStrictFinite(ev?.seasonType?.type ?? ev?.season?.type ?? comp?.season?.type)
-            ? Number(ev?.seasonType?.type ?? ev?.season?.type ?? comp?.season?.type) : null,
-          competitionId: String(ev?.league?.id || ""),
+            ? Number(ev?.seasonType?.type ?? ev?.season?.type ?? comp?.season?.type)
+            : (bbStrictFinite(_schedMeta[_schedIdx]?.stype) ? Number(_schedMeta[_schedIdx].stype) : null),
+          competitionId: null, /* comp.id is the EVENT id, never a tournament id: competitions are matched on season type only */
           competitionName: String(ev?.league?.name || ev?.league?.abbreviation || comp?.type?.text || ""),
         });
       }
@@ -31930,9 +32005,13 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
   const minDateTs = HARD_MIN_TS;
 
   const scheduleJobs = [];
+  const scheduleJobTypes = [];
+  /* STRICT COMPETITION: when the current fixture's season type is known, only that season type is scanned. */
+  const _bbCurST = (getCurrentCompetitionIdentity(leagueKey) || {}).seasonType;
+  const _bbScanTypes = _bbCurST != null ? [String(_bbCurST)] : rules.h2hScheduleTypes.map(String);
 
   for (let season = currentSeason; season >= minSeason; season--) {
-    for (const stype of rules.h2hScheduleTypes) {
+    for (const stype of _bbScanTypes) {
       const key = `${base}:sched:${tA}:${season}:${stype}`;
       const req = _schedCache.has(key)
         ? _schedCache.get(key)
@@ -31953,13 +32032,16 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
           return null;
         }),
       );
+      scheduleJobTypes.push(Number(stype));
     }
   }
 
   const schedulePayloads = await Promise.all(scheduleJobs);
   const candidateMap = new Map();
 
-  schedulePayloads.filter(Boolean).forEach((r) => {
+  schedulePayloads.forEach((r, _pIdx) => {
+    if (!r) return;
+    const _jobST = scheduleJobTypes[_pIdx];
     const events = [...(r?.events || []), ...(r?.team?.schedule?.events || [])];
 
     events.forEach((ev) => {
@@ -31972,9 +32054,12 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
         comp?.status?.type?.state === "post";
 
       if (!done) return;
-      /* BB-FIX: exclude preseason (season type 1) from H2H unless the league itself is preseason/friendly/summer */
-      const _bbSt = Number(ev?.seasonType?.type ?? ev?.season?.type);
-      if (_bbSt === 1 && !/pre|friendly|summer/i.test(String(leagueKey))) return;
+      /* STRICT COMPETITION: tag every game with its season type (the event's own, else the season type that was queried).
+         Preseason is no longer dropped here: a preseason fixture uses preseason games only, a regular-season fixture
+         regular-season games only, and the strict same-season-type filter decides. */
+      const _bbStRaw = bbCoerceSeasonType(ev?.seasonType?.type ?? ev?.season?.type);
+      const _bbSt = _bbStRaw != null ? _bbStRaw : bbCoerceSeasonType(_jobST);
+      if (_bbCurST != null && _bbSt != null && _bbSt !== Number(_bbCurST)) return;
 
       const competitors = comp?.competitors || [];
       if (competitors.length < 2) return;
@@ -32100,6 +32185,7 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
           q4A: rules.regulationPeriods >= 4 ? readVal(lA[3]) : NaN,
           q4B: rules.regulationPeriods >= 4 ? readVal(lB[3]) : NaN, 
           date: gameDate,
+          seasonType: bbCoerceSeasonType(ref.seasonType) ?? bbCoerceSeasonType(data?.header?.season?.type),
         };
       } catch (e) {
         logDebug("fetchH2HCore summary failed", e);
@@ -33032,6 +33118,7 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
         competition: "euroleague",
         competitionName: "euroleague",
         competitionClass: "european",
+        competitionScoped: true, /* the EuroLeague/EuroCup feed is already one competition */
         teamAId: tA,
         teamBId: tB,
         scoreA: Math.round(scoreA),
@@ -33506,74 +33593,15 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
       logDebug(_euroLabel + " H2H failed", e);
     }
 
-    if (h2hGames.length >= 2) {
-      clearH2HFields();
-      const tA = String(teamAId);
-      const h2hA = [];
-      const h2hB = [];
-      const _h2hPick = takeSelectedH2H(h2hGames);
-      for (const g of _h2hPick) {
-        if (String(g.teamAId).toUpperCase() === tA) {
-          h2hA.push(g.scoreA);
-          h2hB.push(g.scoreB);
-        } else {
-          h2hA.push(g.scoreB);
-          h2hB.push(g.scoreA);
-        }
-      }
-      if (!_stillValid(teamAId, teamBId)) return;
-      document.getElementById("aFTH2H").value = h2hA.join(",");
-      document.getElementById("bFTH2H").value = h2hB.join(",");
-      syncH2HCheckbox("ft", false);
-      queueH2HCheckboxSync(false);
-      document.getElementById("h2hAutoTag").style.display = "inline";
-
-      const h2hA1H = h2hGames
-        .slice(0, 5)
-        .map((g) => (String(g.teamAId).toUpperCase() === tA ? g.h1A : g.h1B))
-        .filter((v) => v > 0);
-      const h2hB1H = h2hGames
-        .slice(0, 5)
-        .map((g) => (String(g.teamAId).toUpperCase() === tA ? g.h1B : g.h1A))
-        .filter((v) => v > 0);
-      if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
-        document.getElementById("a1HH2H").value = h2hA1H.join(",");
-        document.getElementById("b1HH2H").value = h2hB1H.join(",");
-        syncH2HCheckbox("h1", false);
-        queueH2HCheckboxSync(false);
-      }
-      for (let q = 1; q <= 4; q++) {
-        const key = "q" + q;
-        const h2hAQ = h2hGames
-          .slice(0, 5)
-          .map((g) => (String(g.teamAId).toUpperCase() === tA ? g[key + "A"] : g[key + "B"]))
-          .filter((v) => v > 0);
-        const h2hBQ = h2hGames
-          .slice(0, 5)
-          .map((g) => (String(g.teamAId).toUpperCase() === tA ? g[key + "B"] : g[key + "A"]))
-          .filter((v) => v > 0);
-        if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
-          document.getElementById("a" + key.toUpperCase() + "H2H").value = h2hAQ.join(",");
-          document.getElementById("b" + key.toUpperCase() + "H2H").value = h2hBQ.join(",");
-          syncH2HCheckbox(key, false);
-        }
-      }
-      queueH2HCheckboxSync(false);
-      messages.push("H2H: " + ((window.__bbAutoH2H && window.__bbAutoH2H.n) || _h2hPick.length) + " " + ((window.__bbAutoH2H && window.__bbAutoH2H.era) || "auto") + " games" +
-        (window.__bbAutoH2H?.mixedCompetition
-          ? " · mixed-competition H2H (n_same=" + Number(window.__bbAutoH2H.sameCompetitionCount || 0) + ", n_other=" + Number(window.__bbAutoH2H.otherCompetitionCount || 0) + ", fallback weight 0.5)"
-          : " · same-competition") + " ✅");
-    } else if (h2hGames.length === 1) {
-      clearH2HFields();
-      const tA = String(teamAId);
-      const g = h2hGames[0];
-      document.getElementById("aFTH2H").value = String(g.teamAId).toUpperCase() === tA ? g.scoreA : g.scoreB;
-      document.getElementById("bFTH2H").value = String(g.teamAId).toUpperCase() === tA ? g.scoreB : g.scoreA;
-      syncAllH2HCheckboxes(false);
-      queueH2HCheckboxSync(false);
-      messages.push("H2H: 1 game found from 2022+ (min 2 to auto-enable)");
-    } else {
-      messages.push("H2H: no 2022+ games found" + (_failedSeasons.length ? " (feed failed: " + _failedSeasons.join(", ") + ")" : ""));
+    {
+      const _h2hRes = bbApplyAutoH2HToBoxes(h2hGames, teamAId, {
+        isTeamA: (id) => String(id).toUpperCase() === String(teamAId),
+        isStillValid: () => _stillValid(teamAId, teamBId),
+        syncQuarters: true,
+      });
+      if (_h2hRes.stale) return;
+      messages.push(_h2hRes.message + (!_h2hRes.ok && _failedSeasons.length ? " (feed failed: " + _failedSeasons.join(", ") + ")" : ""));
+      h2hGames = _h2hRes.sameGames; /* context + audit see only same-competition games */
     }
 
                                                                                       
@@ -34378,6 +34406,7 @@ function buildKblH2H(teamACode, teamBCode, allGames) {
         competition: "korea_kbl",
         competitionName: "korea_kbl",
         competitionClass: "domestic",
+        competitionScoped: true, /* the KBL feed is already one competition */
         date: g.date || g.gameDate || "",
         teamAId: tA,
         teamBId: tB,
@@ -34913,64 +34942,15 @@ async function fetchKblCore(league, teamAName, teamBName) {
       logDebug("KBL H2H failed", e);
     }
 
-    if (h2hGames.length >= 2) {
-      clearH2HFields();
-      const tA = String(teamAId);
-      const h2hA = [];
-      const h2hB = [];
-      const _h2hPick = takeSelectedH2H(h2hGames);
-      for (const g of _h2hPick) {
-        if (String(g.teamAId) === tA) {
-          h2hA.push(g.scoreA);
-          h2hB.push(g.scoreB);
-        } else {
-          h2hA.push(g.scoreB);
-          h2hB.push(g.scoreA);
-        }
-      }
-      if (!_stillValid(teamAId, teamBId)) return;
-      document.getElementById("aFTH2H").value = h2hA.join(",");
-      document.getElementById("bFTH2H").value = h2hB.join(",");
-      syncH2HCheckbox("ft", false);
-      queueH2HCheckboxSync(false);
-      document.getElementById("h2hAutoTag").style.display = "inline";
-
-      const h2hA1H = h2hGames
-        .slice(0, 5)
-        .map((g) => (String(g.teamAId) === tA ? g.h1A : g.h1B))
-        .filter((v) => v > 0);
-      const h2hB1H = h2hGames
-        .slice(0, 5)
-        .map((g) => (String(g.teamAId) === tA ? g.h1B : g.h1A))
-        .filter((v) => v > 0);
-      if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
-        document.getElementById("a1HH2H").value = h2hA1H.join(",");
-        document.getElementById("b1HH2H").value = h2hB1H.join(",");
-        syncH2HCheckbox("h1", false);
-        queueH2HCheckboxSync(false);
-      }
-      for (let q = 1; q <= 4; q++) {
-        const key = "q" + q;
-        const h2hAQ = h2hGames
-          .slice(0, 5)
-          .map((g) => (String(g.teamAId) === tA ? g[key + "A"] : g[key + "B"]))
-          .filter((v) => v > 0);
-        const h2hBQ = h2hGames
-          .slice(0, 5)
-          .map((g) => (String(g.teamAId) === tA ? g[key + "B"] : g[key + "A"]))
-          .filter((v) => v > 0);
-        if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
-          const aEl = document.getElementById("aQ" + q + "H2H");
-          const bEl = document.getElementById("bQ" + q + "H2H");
-          if (aEl && bEl) {
-            aEl.value = h2hAQ.join(",");
-            bEl.value = h2hBQ.join(",");
-          }
-        }
-      }
-      messages.push("H2H: " + Math.min(5, h2hGames.length) + " games ✅");
-    } else {
-      messages.push("H2H: insufficient ❌");
+    {
+      const _h2hRes = bbApplyAutoH2HToBoxes(h2hGames, teamAId, {
+        isTeamA: (id) => String(id) === String(teamAId),
+        isStillValid: () => _stillValid(teamAId, teamBId),
+        syncQuarters: false,
+      });
+      if (_h2hRes.stale) return;
+      messages.push(_h2hRes.message);
+      h2hGames = _h2hRes.sameGames;
     }
 
                                                                                                      
@@ -35168,9 +35148,11 @@ async function loadFixturesESPN(league, offset, myToken, absoluteDateKey) {
     const seen = new Set();
     const merged = [];
     payloads.forEach((data) => {
+      const _lgST = data?.leagues?.[0]?.season?.type?.type;
       (data?.events || []).forEach((ev) => {
         if (!ev?.id || seen.has(ev.id)) return;
         seen.add(ev.id);
+        if (_lgST != null && ev.__bbLeagueSeasonType == null) { try { ev.__bbLeagueSeasonType = _lgST; } catch (_eLs) {} }
         merged.push(ev);
       });
     });
@@ -35239,6 +35221,9 @@ async function loadFixturesESPN(league, offset, myToken, absoluteDateKey) {
       }
       opt.dataset.venueCity = comp?.venue?.address?.city || "";
       opt.dataset.venueState = comp?.venue?.address?.state || "";
+      /* season type of THIS game: 1 preseason, 2 regular season, 3 playoffs (the competition it is part of) */
+      const _fixST = bbCoerceSeasonType(ev?.season?.type ?? ev?.seasonType?.type ?? comp?.season?.type ?? ev?.__bbLeagueSeasonType);
+      opt.dataset.seasonType = _fixST != null ? String(_fixST) : "";
       sel.appendChild(opt);
     });
   } catch (e) {
@@ -35407,7 +35392,11 @@ async function resolveAutoFetchEventMeta(espnBase, teamAId, teamBId) {
         if (competitors.length < 2) continue;
         const ids = competitors.map((c) => String(c?.team?.id || ""));
         if (ids.includes(String(teamAId)) && ids.includes(String(teamBId))) {
-          return { eventId: String(ev.id || ""), eventDate: ev.date || "" };
+          return {
+            eventId: String(ev.id || ""),
+            eventDate: ev.date || "",
+            seasonType: bbCoerceSeasonType(ev?.season?.type ?? ev?.seasonType?.type ?? comp?.season?.type ?? data?.leagues?.[0]?.season?.type?.type),
+          };
         }
       }
     }
@@ -35489,6 +35478,21 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       : await resolveAutoFetchEventMeta(espnBase, teamAId, teamBId);
 
     const selectedFixture = getSelectedFixtureOption();
+    /* STRICT COMPETITION: resolve the competition (season type) of the game being predicted before any H2H/form work */
+    try {
+      window.__bbResolvedSeasonType = null;
+      let _bbST = bbCoerceSeasonType(selectedFixture?.dataset?.seasonType);
+      if (_bbST == null) _bbST = bbCoerceSeasonType(window.__autoFetchEventMeta?.seasonType);
+      if (_bbST == null) {
+        const _bbTypes = LEAGUE_FETCH_RULES[league] && LEAGUE_FETCH_RULES[league].h2hScheduleTypes;
+        if (Array.isArray(_bbTypes) && _bbTypes.length === 1) _bbST = bbCoerceSeasonType(_bbTypes[0]);
+      }
+      if (_bbST == null) {
+        const _bbSb = await proxyFetch(espnBase + "/scoreboard").catch(() => null);
+        _bbST = bbCoerceSeasonType(_bbSb?.leagues?.[0]?.season?.type?.type);
+      }
+      window.__bbResolvedSeasonType = _bbST;
+    } catch (_eBbST) { window.__bbResolvedSeasonType = null; }
     const teamAVenue =
       selectedFixture && String(selectedFixture.dataset.homeId || "") === String(teamAId)
         ? "home"
@@ -35723,75 +35727,15 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       logDebug("H2H fetch failed", e);
     }
 
-    if (h2hGames.length >= 2) {
-      clearH2HFields();
-      const tA = String(teamAId);
-      const h2hA = [],
-        h2hB = [];
-      const _h2hPick = takeSelectedH2H(h2hGames);
-      for (const g of _h2hPick) {
-        if (normalizeId(g.teamAId) === tA) {
-          h2hA.push(g.scoreA);
-          h2hB.push(g.scoreB);
-        } else {
-          h2hA.push(g.scoreB);
-          h2hB.push(g.scoreA);
-        }
-      }
-      if (!_espnFetchStillValid(teamAId, teamBId)) return;
-      document.getElementById("aFTH2H").value = h2hA.join(",");
-      document.getElementById("bFTH2H").value = h2hB.join(",");
-      syncH2HCheckbox("ft", false);
-      queueH2HCheckboxSync(false);
-      document.getElementById("h2hAutoTag").style.display = "inline";
-
-      const h2hA1H = h2hGames
-        .slice(0, 5)
-        .map((g) => (normalizeId(g.teamAId) === tA ? g.h1A : g.h1B))
-        .filter((v) => v > 0);
-      const h2hB1H = h2hGames
-        .slice(0, 5)
-        .map((g) => (normalizeId(g.teamAId) === tA ? g.h1B : g.h1A))
-        .filter((v) => v > 0);
-      if (h2hA1H.length >= 2 && h2hB1H.length >= 2) {
-        document.getElementById("a1HH2H").value = h2hA1H.join(",");
-        document.getElementById("b1HH2H").value = h2hB1H.join(",");
-        syncH2HCheckbox("h1", false);
-        queueH2HCheckboxSync(false);
-      }
-
-      for (let q = 1; q <= 4; q++) {
-        const key = "q" + q;
-        const h2hAQ = h2hGames
-          .slice(0, 5)
-          .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "A"] : g[key + "B"]))
-          .filter((v) => v > 0);
-        const h2hBQ = h2hGames
-          .slice(0, 5)
-          .map((g) => (normalizeId(g.teamAId) === tA ? g[key + "B"] : g[key + "A"]))
-          .filter((v) => v > 0);
-        if (h2hAQ.length >= 2 && h2hBQ.length >= 2) {
-          document.getElementById("a" + key.toUpperCase() + "H2H").value = h2hAQ.join(",");
-          document.getElementById("b" + key.toUpperCase() + "H2H").value = h2hBQ.join(",");
-          syncH2HCheckbox(key, false);
-        }
-      }
-      queueH2HCheckboxSync(false);
-      messages.push("H2H: " + ((window.__bbAutoH2H && window.__bbAutoH2H.n) || _h2hPick.length) + " " + ((window.__bbAutoH2H && window.__bbAutoH2H.era) || "auto") + " games" +
-        (window.__bbAutoH2H?.mixedCompetition
-          ? " · mixed-competition H2H (n_same=" + Number(window.__bbAutoH2H.sameCompetitionCount || 0) + ", n_other=" + Number(window.__bbAutoH2H.otherCompetitionCount || 0) + ", fallback weight 0.5)"
-          : " · same-competition") + " ✅");
-    } else if (h2hGames.length === 1) {
-      clearH2HFields();
-      const tA = String(teamAId);
-      const g = h2hGames[0];
-      document.getElementById("aFTH2H").value = normalizeId(g.teamAId) === tA ? g.scoreA : g.scoreB;
-      document.getElementById("bFTH2H").value = normalizeId(g.teamAId) === tA ? g.scoreB : g.scoreA;
-      syncAllH2HCheckboxes(false);
-      queueH2HCheckboxSync(false);
-      messages.push("H2H: 1 game found from 2022+ (min 2 to auto-enable)");
-    } else {
-      messages.push("H2H: no 2022+ games found");
+    {
+      const _h2hRes = bbApplyAutoH2HToBoxes(h2hGames, teamAId, {
+        isTeamA: (id) => normalizeId(id) === String(teamAId),
+        isStillValid: () => _espnFetchStillValid(teamAId, teamBId),
+        syncQuarters: true,
+      });
+      if (_h2hRes.stale) return;
+      messages.push(_h2hRes.message);
+      h2hGames = _h2hRes.sameGames;
     }
 
     setStatusHTML('<span class="spinner"></span>Checking injuries...', "loading");
@@ -36023,6 +35967,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         })(),
       },
       h2hGames: Array.isArray(h2hGames) ? h2hGames.slice(0, 10) : [],
+      competition: { seasonType: bbCoerceSeasonType(window.__bbResolvedSeasonType) },
     };
 
     if (aStats?.sos != null) AppState.context.data.A.sos = aStats.sos;
@@ -37034,7 +36979,6 @@ function buildPickExplanationDetails(p, isLock) {
   } else {
     _extra.push("ADVANCED MODEL: DISABLED | Reason: no advanced diagnostic recorded for " + (_advMk || "this market") + " | Fallback: STANDARD PROJECTION");
   }
-  if (p?.mixedCompetition) _extra.push("COMPETITION MIX: " + p.mixedCompetition.same + " same-competition / " + p.mixedCompetition.other + " other-competition H2H games (other weighted " + p.mixedCompetition.fallbackWeight + ")");
   const _integrity = p?.marketIntegrity;
   if (_integrity) {
     _extra.push("MARKET INTEGRITY: " + String(_integrity.status || "CLEAR") + (_integrity.signals?.length ? " | " + _integrity.signals.map((s) => s.id + "=" + s.level).join(", ") : ""));
@@ -38275,9 +38219,6 @@ function computeFTProjection({
         injMultB,
         volRatio: _ftVolRatio,
         blowoutGap: Math.abs(aS - bS),
-         mixedCompetition: !!window.__bbAutoH2H?.mixedCompetition,
-         sameCompetitionCount: Number(window.__bbAutoH2H?.sameCompetitionCount || 0),
-         otherCompetitionCount: Number(window.__bbAutoH2H?.otherCompetitionCount || 0),
         paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
       },
     );
@@ -38320,9 +38261,6 @@ function computeFTProjection({
       const _ftNoInjDiv = isFinite(_ftNoInjTot) && isFinite(_h2hTotalForDivergence) ? Math.abs(_h2hTotalForDivergence - _ftNoInjTot) : 0;
       _ftPreAdjHw = getH2HWeight(decayH2HA.length, decayH2HB.length, "ft", ftSampleTier, _ftNoInjDiv, league, isFinite(eb) ? eb : leagueBase * 2, _ftH2hFactor, {
         injMultA: 1, injMultB: 1, volRatio: _ftVolRatio, blowoutGap: Math.abs(_bbPreInjA_FT - _bbPreInjB_FT),
-        mixedCompetition: !!window.__bbAutoH2H?.mixedCompetition,
-        sameCompetitionCount: Number(window.__bbAutoH2H?.sameCompetitionCount || 0),
-        otherCompetitionCount: Number(window.__bbAutoH2H?.otherCompetitionCount || 0),
         paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
       });
     } catch (_pae) { _ftPreAdjHw = hw; }
@@ -38702,9 +38640,6 @@ function compute1HProjection({
         injMultB,
         volRatio: combinedVol,
         blowoutGap: Math.abs(projA1H - projB1H),
-         mixedCompetition: !!window.__bbAutoH2H?.mixedCompetition,
-         sameCompetitionCount: Number(window.__bbAutoH2H?.sameCompetitionCount || 0),
-         otherCompetitionCount: Number(window.__bbAutoH2H?.otherCompetitionCount || 0),
         paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
       },
     );
@@ -38725,9 +38660,6 @@ function compute1HProjection({
       const _h1NoInjDiv = isFinite(_h1NoInjTot) && isFinite(_h2hTotalForDivergence1) ? Math.abs(_h2hTotalForDivergence1 - _h1NoInjTot) : 0;
       _h1PreAdjHw = getH2HWeight(decayH2HA.length, decayH2HB.length, "h1", h1SampleTier, _h1NoInjDiv, league, (isFinite(leagueBase1H) ? leagueBase1H * 2 : leagueBase1H), _h1H2hFactor, {
         enabled: h1HasH2H, injMultA: 1, injMultB: 1, volRatio: combinedVol, blowoutGap: Math.abs(_bbPreInjA_H1 - _bbPreInjB_H1),
-        mixedCompetition: !!window.__bbAutoH2H?.mixedCompetition,
-        sameCompetitionCount: Number(window.__bbAutoH2H?.sameCompetitionCount || 0),
-        otherCompetitionCount: Number(window.__bbAutoH2H?.otherCompetitionCount || 0),
         paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
       });
     } catch (_pae1) { _h1PreAdjHw = hw; }
@@ -39066,9 +38998,6 @@ function compute2HProjection({
         injMultB,
         volRatio: combinedVol2,
         blowoutGap: Math.abs(projA2H - projB2H),
-         mixedCompetition: !!window.__bbAutoH2H?.mixedCompetition,
-         sameCompetitionCount: Number(window.__bbAutoH2H?.sameCompetitionCount || 0),
-         otherCompetitionCount: Number(window.__bbAutoH2H?.otherCompetitionCount || 0),
         paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
       },
     );
@@ -39087,9 +39016,6 @@ function compute2HProjection({
       const _h2NoInjDiv = isFinite(_h2NoInjTot) && isFinite(_h2hTotalForDivergence2) ? Math.abs(_h2hTotalForDivergence2 - _h2NoInjTot) : 0;
       _h2PreAdjHw = getH2HWeight(decayH2HA.length, decayH2HB.length, "h2", h2SampleTier, _h2NoInjDiv, league, (isFinite(leagueBase2H) ? leagueBase2H * 2 : leagueBase2H), _h2H2hFactor, {
         enabled: h2HasH2H, injMultA: 1, injMultB: 1, volRatio: combinedVol2, blowoutGap: Math.abs(_bbPreInjA_H2 - _bbPreInjB_H2),
-        mixedCompetition: !!window.__bbAutoH2H?.mixedCompetition,
-        sameCompetitionCount: Number(window.__bbAutoH2H?.sameCompetitionCount || 0),
-        otherCompetitionCount: Number(window.__bbAutoH2H?.otherCompetitionCount || 0),
         paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
       });
     } catch (_pae2) { _h2PreAdjHw = hw; }
@@ -40736,13 +40662,13 @@ function buildTrackedPickPayload({
     integrityDecisionPath: pickRow.marketIntegrity?.status || (pickRow.pick === "NO PLAY" ? "NO_PLAY" : "CLEAR"),
     advancedStatsDiagnostic: pickRow.advancedStatsDiagnostic || window.__bbAdvDiagByMarket?.[marketKey] || null,
     fatigueDiag: pickRow.fatigueDiag || null,
-    mixedCompetition: pickRow.mixedCompetition || null,
     fatigueDiagnostics: pickRow.fatigueDiagnostics || diagnostics?.intelligencePackSummary || null,
     h2hCompetition: window.__bbAutoH2H ? {
-      mixedCompetition: !!window.__bbAutoH2H.mixedCompetition,
+      strictCompetition: true,
+      seasonType: window.__bbAutoH2H.currentSeasonType ?? null,
       sameCompetitionCount: Number(window.__bbAutoH2H.sameCompetitionCount || 0),
-      otherCompetitionCount: Number(window.__bbAutoH2H.otherCompetitionCount || 0),
-      fallbackWeight: Number(window.__bbAutoH2H.fallbackWeight || 1)
+      excludedOtherCompetitionCount: Number(window.__bbAutoH2H.excludedOtherCompetitionCount || 0),
+      used: Number(window.__bbAutoH2H.n || 0) >= 2
     } : null,
     memoryProfileKey,
     environmentKey,
@@ -43379,14 +43305,7 @@ async function runEngine() {
       const mk = String(p.marketKey || "").toLowerCase();
       const calcMap = { ft: ftCalc, h1: h1Calc, h2: h2Calc, q1, q2, q3, q4, team_a: ftCalc, team_b: ftCalc, h1_team_a: h1Calc, h1_team_b: h1Calc };
       const c = calcMap[mk];
-      try { /* BB-FIX #16 */
-        const _mx = typeof window !== "undefined" ? window.__bbAutoH2H : null;
-        if (_mx && _mx.mixedCompetition) {
-          const _mt = "Mixed competitions in H2H (" + _mx.sameCompetitionCount + " same / " + _mx.otherCompetitionCount + " other, other weighted " + _mx.fallbackWeight + ")";
-          p.mixedCompetition = { same: _mx.sameCompetitionCount, other: _mx.otherCompetitionCount, fallbackWeight: _mx.fallbackWeight, types: _mx.seasonTypeCounts || null };
-          if (String(p.note || "").indexOf("Mixed competitions in H2H") < 0) p.note = p.note ? String(p.note) + " · " + _mt : _mt;
-        }
-      } catch (_mxe) {}
+      /* BB-FIX #16 (mixed-competition note) removed: H2H is strictly same-competition. */
       if (c && c.fatigueDiag) p.fatigueDiag = c.fatigueDiag; /* BB-FIX #24 */
       /* BB-FIX #3 (T10): preAdjustmentProj = projection before fatigue AND before injuries, for every market (incl. h2).
          Never falls back to the preFatigue* fields (those still contain injury effects). Missing -> null -> T10 WARN for Unders. */
