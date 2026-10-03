@@ -4045,7 +4045,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
           type="button"
           id="trackerConfigBtn"
           class="tracker-insights-btn"
-          title="View/Edit verified configs"
+          title="Self-learning engine (read-only)"
         >
           ⚙️
         </button>
@@ -8770,6 +8770,7 @@ function getStoredConfidenceModelProposal() {
       proposalId: meta.proposalId || null,
       proposalVersion: meta.proposalVersion || 2,
       sampleCount: Number(meta.sampleCount || totalSettled),
+      requiredSample: Number(meta.requiredSample) || TUNER_REQUIRED_SAMPLE, /* FIX LR6: was undefined */
             fitSampleCount: Number(meta.fitSampleCount || 0),
       holdoutSampleCount: Number(meta.holdoutSampleCount || 0),
       currentModelVersion: meta.currentModelVersion || "unknown",
@@ -11869,6 +11870,7 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
 
 /* CALCULATION SECTION */
 async function runRetrospectiveAnalysis(pick) {
+  if (typeof bbLrScheduleRefresh === "function") { bbLrScheduleRefresh(); return; } /* FIX LR5: replaced by the automatic learner */
   if (!pick.snapshot || !pick.actualScore) {
     engineDebug("Retrospective skipped: missing snapshot or actualScore");
     return;
@@ -14865,6 +14867,940 @@ function getTotalSettledCountForLeague(league) {
                                                                            
                                                                             
                                                                
+/* ================= LEARNER (LR): automatic snapshot/settled-pick learner (replaces the old Configuration Lab) =================
+   Learns ONLY from settled picks (and their stored snapshots where present), fully automatic, silent, deterministic:
+   the state is a pure function of the settled picks, so every device derives the same state from the synced tracker
+   (no extra server writes). Cached in localStorage (bb_learner_state_v1) keyed by the settled-pool fingerprint.
+   - Projection correction per hierarchy node (global -> kind -> market family -> market -> league x family -> league x market):
+       adjusted = line + lambda * (projection - line) + bias     (spreads: in home-cover-margin space)
+     lambda = learned shrink toward the line, bias = learned additive correction (empirical-Bayes shrinkage to the parent).
+   - Segment gating on real win rate (Beta posterior pooled to the parent, time-decayed evidence): proven leaks are quietly
+     suppressed (NO PLAY) until the evidence relaxes; proven segments are exempt from the flip rule and keep grade >= B.
+   - Grades recalibrated from the segment posterior win probability -> monotonic in real win rate by construction.
+   - Every change must improve a walk-forward holdout (Benjamini-Hochberg across all changes tested in that step),
+     needs per-level minimum samples, moves in small capped steps, at most once per 7 days and per 25 new picks per node,
+     and is rolled back automatically if the next 30 live picks at that node do worse; rolled-back nodes freeze 30 days.
+   - Never adds a play, never flips a side, never lowers a threshold, never touches underEdgeFactor (Issue #14 floor 1.3).
+   - Team memory: the recent-form adjustment is kept on top of the corrected base and a bias can never overturn its direction. */
+const BB_ENGINE_BUILD = "v26_learner_20261003";
+const BB_LR_VERSION = "learner_v1";
+const BB_LR_STATE_KEY = "bb_learner_state_v1";
+const BB_LR_DAY = 86400000;
+const BB_LR_CFG = {
+  breakeven: 110 / 210,
+  winProfit: 100 / 110,
+  epochDays: 7,
+  warmupObs: 60,
+  knownLagMs: 12 * 3600000,
+  holdoutFrac: 0.25,
+  levels: ["G", "K", "F", "M", "LF", "LM"],
+  minN: { G: 100, K: 60, F: 40, M: 30, LF: 30, LM: 50 },
+  kMin: { G: 20, K: 25, F: 30, M: 40, LF: 50, LM: 60 },
+  kMax: 400,
+  lamLevels: ["G", "K", "F", "M"],
+  lamK: { G: 30, K: 40, F: 50, M: 60 },
+  lamClip: [0, 1.2],
+  lamCap: 0.15,
+  biasCap: { TOT_Q: 1.0, TEAM_H1: 1.0, default: 2.0 },
+  minHoldN: 8,
+  fdrQ: 0.1,
+  minNewObsPerChange: 25,
+  minChangeGapMs: 7 * 86400000,
+  rollbackN: 30,
+  freezeMs: 30 * 86400000,
+  segLevels: ["G", "K", "LK", "F", "M", "LF", "LM"],
+  gate: { levels: ["F", "M", "LF", "LM"], minN: 25, priorN: 20, rootPriorN: 30, suppressP: 0.9, releaseP: 0.7, boostP: 0.9, minSuppressMs: 14 * 86400000, minHoldN: 5, halfLifeDays: 75 },
+  grade: { A: 0.6, B: 0.555, minSegN: 15 },
+  flip: { minDrop: 10, p: 0.1 },
+};
+
+function bbLrFamily(mk) {
+  const m = String(mk || "").toLowerCase();
+  if (m === "ft") return "TOT_FT";
+  if (m === "h1") return "TOT_H1";
+  if (m === "h2") return "TOT_H2";
+  if (/^q[1-4]$/.test(m)) return "TOT_Q";
+  if (m === "team_a" || m === "team_b") return "TEAM_FT";
+  if (m === "h1_team_a" || m === "h1_team_b") return "TEAM_H1";
+  if (m === "handicap") return "SPR_FT";
+  if (m === "handicap_h1" || m === "handicap_h2") return "SPR_H";
+  if (m === "winner") return "ML";
+  return null;
+}
+function bbLrKind(fam) {
+  if (!fam) return null;
+  if (fam === "ML") return "ml";
+  if (fam.indexOf("SPR_") === 0) return "spread";
+  return "total";
+}
+function bbLrLeagueGroup(lg) {
+  const l = String(lg || "").toLowerCase();
+  if (/^aus_nbl1/.test(l)) return "aus_nbl1";
+  if (l === "proa" || l === "prob" || l === "germany_proa") return "germany_pro";
+  return l || "unknown";
+}
+function bbLrNum(v) {
+  if (v === null || v === undefined || v === "" || typeof v === "boolean") return NaN;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : NaN;
+}
+function bbLrScore(s) {
+  const m = /^\s*(\d+(?:\.\d+)?)\s*[-–:]\s*(\d+(?:\.\d+)?)\s*$/.exec(String(s == null ? "" : s));
+  return m ? [Number(m[1]), Number(m[2])] : null;
+}
+/* market actual (totals) or home-minus-away margin (spreads / moneyline); first number of actualScore = home (Team A) */
+function bbLrActual(p, mk, kind) {
+  const sc = bbLrScore(p.actualScore);
+  const gs = p.gameScore && typeof p.gameScore === "object" ? p.gameScore : null;
+  if (kind === "ml") {
+    if (sc) return sc[0] - sc[1];
+    if (gs && Number.isFinite(Number(gs.a)) && Number.isFinite(Number(gs.b))) return Number(gs.a) - Number(gs.b);
+    return NaN;
+  }
+  if (kind === "spread") return sc ? sc[0] - sc[1] : NaN;
+  if (sc) {
+    if (mk === "team_a" || mk === "h1_team_a") return sc[0];
+    if (mk === "team_b" || mk === "h1_team_b") return sc[1];
+    return sc[0] + sc[1];
+  }
+  const n = bbLrNum(p.actualScore);
+  return n;
+}
+function bbLrNormCdf(z) {
+  const t = 1 / (1 + 0.2316419 * Math.abs(z));
+  const d = 0.3989422804014327 * Math.exp(-z * z / 2);
+  const p = d * t * (0.31938153 + t * (-0.356563782 + t * (1.781477937 + t * (-1.821255978 + t * 1.330274429))));
+  return z > 0 ? 1 - p : p;
+}
+/* moneyline profit per 1u from the market handicap (spread-implied, sigma 12, 4.5% overround); null when no line */
+function bbLrMlProfit(homeHandicap, side) {
+  const hl = bbLrNum(homeHandicap);
+  if (!Number.isFinite(hl) || hl === 0) return null;
+  const sideSpread = side === "home" ? hl : -hl;
+  const pImp = Math.min(0.97, bbLrNormCdf(-sideSpread / 12) * 1.045);
+  return 1 / pImp - 1;
+}
+/* regularized incomplete beta I_x(a,b) (Numerical Recipes continued fraction) */
+function bbLrBetacf(a, b, x) {
+  const MAXIT = 200, EPS = 3e-12, FPMIN = 1e-300;
+  let qab = a + b, qap = a + 1, qam = a - 1, c = 1, d = 1 - qab * x / qap;
+  if (Math.abs(d) < FPMIN) d = FPMIN;
+  d = 1 / d;
+  let h = d;
+  for (let m = 1; m <= MAXIT; m++) {
+    const m2 = 2 * m;
+    let aa = m * (b - m) * x / ((qam + m2) * (a + m2));
+    d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d; h *= d * c;
+    aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2));
+    d = 1 + aa * d; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = 1 + aa / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d;
+    const del = d * c; h *= del;
+    if (Math.abs(del - 1) < EPS) break;
+  }
+  return h;
+}
+function bbLrGammaln(x) {
+  const c = [76.18009172947146, -86.50532032941677, 24.01409824083091, -1.231739572450155, 0.1208650973866179e-2, -0.5395239384953e-5];
+  let y = x, tmp = x + 5.5;
+  tmp -= (x + 0.5) * Math.log(tmp);
+  let ser = 1.000000000190015;
+  for (let j = 0; j < 6; j++) ser += c[j] / ++y;
+  return -tmp + Math.log(2.5066282746310005 * ser / x);
+}
+function bbLrIbeta(x, a, b) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  const bt = Math.exp(bbLrGammaln(a + b) - bbLrGammaln(a) - bbLrGammaln(b) + a * Math.log(x) + b * Math.log(1 - x));
+  return x < (a + 1) / (a + b + 2) ? bt * bbLrBetacf(a, b, x) / a : 1 - bt * bbLrBetacf(b, a, 1 - x) / b;
+}
+
+/* settled pick -> observation (null when unusable). deps.snapFor(p) may return the stored snapshot. */
+function bbLrObsFromPick(p, deps) {
+  if (!p || p.isShadow) return null;
+  const r = String(p.resultStatus || "").toLowerCase() || String(p.engineResultStatus || "").toLowerCase();
+  if (r !== "win" && r !== "loss") return null;
+  const mk = String(p.marketKey || "").toLowerCase();
+  const fam = bbLrFamily(mk);
+  if (!fam) return null;
+  const kind = bbLrKind(fam);
+  const side = String(p.side || "").toLowerCase();
+  const dir = side === "over" || side === "home" ? 1 : side === "under" || side === "away" ? -1 : 0;
+  if (!dir) return null;
+  if (kind === "total" && side !== "over" && side !== "under") return null;
+  if (kind !== "total" && side !== "home" && side !== "away") return null;
+  const t = Date.parse(p.createdAt || "") || Date.parse(p.eventDate || "") || Date.parse(p.settledAt || "");
+  if (!Number.isFinite(t)) return null;
+  const evT = Date.parse(p.eventDate || "");
+  const knownT = Math.max(t, Number.isFinite(evT) ? evT : t) + BB_LR_CFG.knownLagMs;
+  const proj = bbLrNum(p.projection);
+  let line = bbLrNum(p.line);
+  const actual = bbLrActual(p, mk, kind);
+  let x = NaN, y = NaN;
+  if (kind === "total") {
+    if (!(line > 5)) line = NaN; /* entry errors such as a 0.5 team-total line carry no information */
+    if (Number.isFinite(proj) && Number.isFinite(line)) x = proj - line;
+    if (Number.isFinite(actual) && Number.isFinite(line)) y = actual - line;
+  } else if (kind === "spread") {
+    if (Number.isFinite(proj) && Number.isFinite(line)) x = proj + line;
+    if (Number.isFinite(actual) && Number.isFinite(line)) y = actual + line;
+  } else {
+    line = 0;
+    if (Number.isFinite(proj)) x = proj;
+    if (Number.isFinite(actual)) y = actual;
+  }
+  let profit = BB_LR_CFG.winProfit;
+  if (kind === "ml") {
+    let snap = null;
+    try { snap = (deps && typeof deps.snapFor === "function" ? deps.snapFor(p) : null) || p.snapshot || null; } catch (_s) { snap = p.snapshot || null; }
+    profit = bbLrMlProfit(snap && snap.lines ? snap.lines.handicapLine : null, side);
+  }
+  const lg = bbLrLeagueGroup(p.league);
+  const engP = bbLrNum(p.winProbability);
+  return {
+    id: String(p.pickId || p.signature || ""),
+    t, knownT, mk, fam, kind, side, dir, lg,
+    proj, line, actual, x, y, win: r === "win" ? 1 : 0,
+    profit, grade: String(p.confidenceGrade || "").toUpperCase(),
+    engP: engP > 0 && engP < 1 ? engP : NaN,
+    nodes: { G: "G", K: "K:" + kind, LK: "LK:" + lg + "|" + kind, F: "F:" + fam, M: "M:" + mk, LF: "LF:" + lg + "|" + fam, LM: "LM:" + lg + "|" + mk },
+  };
+}
+
+function bbLrParentNode(level, o) {
+  if (level === "LK") return o.nodes.K;
+  const i = BB_LR_CFG.levels.indexOf(level);
+  if (i <= 0) return null;
+  if (level === "LF") return o.nodes.F;
+  if (level === "LM") return o.nodes.LF;
+  return o.nodes[BB_LR_CFG.levels[i - 1]];
+}
+function bbLrCapFor(node) {
+  const fam = String(node || "").split(":")[1] || "";
+  const last = fam.split("|").pop();
+  const f = /^(TOT_|TEAM_|SPR_|ML)/.test(last) ? last : bbLrFamily(last) || last; /* market nodes (M:q1, LM:wnba|q1) use their family's cap */
+  return BB_LR_CFG.biasCap[f] != null ? BB_LR_CFG.biasCap[f] : BB_LR_CFG.biasCap.default;
+}
+/* resolved (lambda, bias) for an observation from an applied parameter set */
+function bbLrResolve(params, o) {
+  let lam = 1, bias = 0;
+  for (const lv of BB_LR_CFG.lamLevels) { const v = params.lam[o.nodes[lv]]; if (Number.isFinite(v)) lam = v; }
+  for (const lv of BB_LR_CFG.levels) { const v = params.bias[o.nodes[lv]]; if (Number.isFinite(v)) bias = v; }
+  return { lam, bias };
+}
+function bbLrPred(params, o) {
+  const r = bbLrResolve(params, o);
+  return r.lam * o.x + r.bias; /* predicted y (actual - line, or home cover margin) */
+}
+function bbLrMean(a) { return a.length ? a.reduce((s, v) => s + v, 0) / a.length : NaN; }
+function bbLrVar(a) { if (a.length < 2) return NaN; const m = bbLrMean(a); return a.reduce((s, v) => s + (v - m) * (v - m), 0) / (a.length - 1); }
+function bbLrWinsorMean(a) {
+  if (!a.length) return NaN;
+  const m = bbLrMean(a), sd = Math.sqrt(bbLrVar(a) || 0);
+  if (!(sd > 0)) return m;
+  return bbLrMean(a.map((v) => Math.max(m - 2.5 * sd, Math.min(m + 2.5 * sd, v))));
+}
+
+/* candidate parameters fitted on a sample (empirical-Bayes shrinkage, children shrunk toward their parent) */
+function bbLrFit(obs) {
+  const C = BB_LR_CFG;
+  const rows = obs.filter((o) => o.kind !== "ml" && Number.isFinite(o.x) && Number.isFinite(o.y));
+  const lam = {}, bias = {};
+  /* lambda: OLS slope of y on x per node, shrunk to the parent (root prior 1 = current engine) */
+  const lamOf = (o) => { let v = 1; for (const lv of C.lamLevels) if (Number.isFinite(lam[o.nodes[lv]])) v = lam[o.nodes[lv]]; return v; };
+  for (const lv of C.lamLevels) {
+    const groups = new Map();
+    rows.forEach((o) => { const k = o.nodes[lv]; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(o); });
+    groups.forEach((g, k) => {
+      if (g.length < C.minN[lv]) return;
+      const parent = lv === "G" ? 1 : (() => { const o = g[0]; let v = 1; for (const l2 of C.lamLevels) { if (l2 === lv) break; if (Number.isFinite(lam[o.nodes[l2]])) v = lam[o.nodes[l2]]; } return v; })();
+      const mx = bbLrMean(g.map((o) => o.x)), my = bbLrMean(g.map((o) => o.y));
+      let sxy = 0, sxx = 0;
+      g.forEach((o) => { sxy += (o.x - mx) * (o.y - my); sxx += (o.x - mx) * (o.x - mx); });
+      if (!(sxx > 0)) return;
+      const raw = Math.max(C.lamClip[0], Math.min(C.lamClip[1], sxy / sxx));
+      const w = g.length / (g.length + C.lamK[lv]);
+      lam[k] = parent + w * (raw - parent);
+    });
+  }
+  /* bias on the lambda-adjusted residual; prior strength k = s^2 / tau^2 (method of moments across siblings) */
+  const resid = new Map(rows.map((o) => [o, o.y - lamOf(o) * o.x]));
+  for (const lv of C.levels) {
+    const groups = new Map();
+    rows.forEach((o) => { const k = o.nodes[lv]; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(o); });
+    const stats = [];
+    groups.forEach((g, k) => {
+      const e = g.map((o) => resid.get(o));
+      stats.push({ k, g, n: g.length, m: bbLrWinsorMean(e), s2: bbLrVar(e) });
+    });
+    /* tau^2 among sibling nodes that share a parent */
+    const byParent = new Map();
+    stats.forEach((s) => { const pk = bbLrParentNode(lv, s.g[0]) || "root"; if (!byParent.has(pk)) byParent.set(pk, []); byParent.get(pk).push(s); });
+    stats.forEach((s) => {
+      if (s.n < C.minN[lv] || !Number.isFinite(s.m)) return;
+      const pk = bbLrParentNode(lv, s.g[0]);
+      const parent = pk && Number.isFinite(bias[pk]) ? bias[pk] : (() => { let v = 0; const o = s.g[0]; for (const l2 of C.levels) { if (l2 === lv) break; if (Number.isFinite(bias[o.nodes[l2]])) v = bias[o.nodes[l2]]; } return v; })();
+      const sib = (byParent.get(pk || "root") || []).filter((z) => z.n >= 5 && Number.isFinite(z.m) && Number.isFinite(z.s2));
+      let k = C.kMin[lv];
+      if (sib.length >= 3) {
+        const mm = bbLrMean(sib.map((z) => z.m));
+        const between = bbLrVar(sib.map((z) => z.m));
+        const within = bbLrMean(sib.map((z) => z.s2 / z.n));
+        const tau2 = Math.max(0, between - within);
+        const s2 = Number.isFinite(s.s2) ? s.s2 : bbLrMean(sib.map((z) => z.s2));
+        k = tau2 > 0 ? Math.max(C.kMin[lv], Math.min(C.kMax, s2 / tau2)) : C.kMax;
+        void mm;
+      }
+      const w = s.n / (s.n + k);
+      bias[s.k] = parent + w * (s.m - parent);
+    });
+  }
+  return { lam, bias };
+}
+
+/* segment win-rate posteriors (time-decayed evidence, Beta prior pooled to the parent) */
+function bbLrSegments(obs, asOfT) {
+  const C = BB_LR_CFG, G = C.gate, BE = C.breakeven;
+  const hl = G.halfLifeDays * BB_LR_DAY;
+  const agg = new Map();
+  obs.forEach((o) => {
+    const w = Math.pow(0.5, Math.max(0, asOfT - o.t) / hl);
+    C.segLevels.forEach((lv) => {
+      const k = o.nodes[lv];
+      if (!agg.has(k)) agg.set(k, { n: 0, wn: 0, ww: 0, w: 0, units: 0, uN: 0, level: lv, sample: o });
+      const a = agg.get(k);
+      a.n++; a.wn += w; a.ww += w * o.win; a.w += o.win;
+      if (o.profit != null) { a.units += o.win ? o.profit : -1; a.uN++; }
+    });
+  });
+  const out = {};
+  C.segLevels.forEach((lv) => {
+    agg.forEach((a, k) => {
+      if (a.level !== lv) return;
+      const pk = bbLrParentNode(lv, a.sample);
+      const pMean = lv === "G" ? 0.5 : out[pk] ? out[pk].mean : 0.5;
+      const n0 = lv === "G" ? G.rootPriorN : G.priorN;
+      const al = n0 * pMean + a.ww, be = n0 * (1 - pMean) + (a.wn - a.ww);
+      out[k] = { node: k, level: lv, n: a.n, wins: a.w, losses: a.n - a.w, wn: a.wn, mean: al / (al + be),
+        pBelow: bbLrIbeta(BE, al, be), pAbove: 1 - bbLrIbeta(BE, al, be), roi: a.uN ? a.units / a.uN : null };
+    });
+  });
+  return out;
+}
+function bbLrSegP(seg, o) {
+  /* deepest segment with enough picks; its posterior already includes the pooled prior */
+  let best = seg.G ? seg.G.mean : 0.5;
+  for (const lv of BB_LR_CFG.levels) {
+    const s = seg[o.nodes[lv]];
+    if (s && s.n >= BB_LR_CFG.grade.minSegN) best = s.mean;
+  }
+  return best;
+}
+function bbLrGradeFromP(p) {
+  const C = BB_LR_CFG;
+  if (!Number.isFinite(p)) return null;
+  if (p >= C.grade.A) return "A";
+  if (p >= C.grade.B) return "B";
+  if (p >= C.breakeven) return "C";
+  return "D";
+}
+function bbLrBH(pvals, q) {
+  const idx = pvals.map((p, i) => [p, i]).sort((a, b) => a[0] - b[0]);
+  const m = idx.length; let kMax = -1;
+  idx.forEach(([p], r) => { if (p <= ((r + 1) / m) * q) kMax = r; });
+  const pass = new Set();
+  for (let r = 0; r <= kMax; r++) pass.add(idx[r][1]);
+  return pass;
+}
+function bbLrOneSidedP(d) {
+  if (d.length < 2) return 1;
+  const m = bbLrMean(d), sd = Math.sqrt(bbLrVar(d));
+  if (!(sd > 0)) return m > 0 ? 0 : 1;
+  return 1 - bbLrNormCdf(m / (sd / Math.sqrt(d.length)));
+}
+function bbLrHash(s) {
+  let h = 5381; const str = String(s);
+  for (let i = 0; i < str.length; i++) h = ((h << 5) + h + str.charCodeAt(i)) >>> 0;
+  return h.toString(36);
+}
+function bbLrClone(o) { return JSON.parse(JSON.stringify(o)); }
+
+/* decision for one observation-like object under a state */
+function bbLrDecide(state, o) {
+  const C = BB_LR_CFG;
+  const out = { keep: true, reason: null, p: NaN, grade: null, adjEdgeDir: NaN, lam: 1, bias: 0, segment: null };
+  if (!state || !state.active) return out;
+  const nodes = C.gate.levels.map((lv) => o.nodes[lv]);
+  const sup = nodes.find((k) => state.suppressed && state.suppressed[k]);
+  const proven = nodes.some((k) => state.proven && state.proven[k]);
+  if (o.kind !== "ml" && Number.isFinite(o.x)) {
+    const r = bbLrResolve(state.params, o);
+    out.lam = r.lam; out.bias = r.bias;
+    out.adjEdgeDir = o.dir * (r.lam * o.x + r.bias);
+  }
+  if (sup) { out.keep = false; out.reason = "segment"; out.segment = sup; }
+  else if (!o.noFlip && !proven && state.flipActive && state.flipActive[o.kind] && Number.isFinite(out.adjEdgeDir) && out.adjEdgeDir <= 0) { out.keep = false; out.reason = "flip"; }
+  if (state.gradesActive && state.seg) {
+    out.p = bbLrSegP(state.seg, o);
+    out.grade = bbLrGradeFromP(out.p);
+    if (proven && (out.grade === "C" || out.grade === "D")) out.grade = "B";
+  }
+  return out;
+}
+
+/* full deterministic walk-forward build. Returns the live state plus per-pick out-of-sample decisions. */
+function bbLrBuild(obsIn, opts) {
+  const C = BB_LR_CFG, G = C.gate, BE = C.breakeven;
+  const obs = obsIn.filter(Boolean).slice().sort((a, b) => a.t - b.t || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+  const state = { version: BB_LR_VERSION, build: BB_ENGINE_BUILD, active: false, params: { lam: {}, bias: {} }, suppressed: {}, proven: {},
+    flipActive: { total: false, spread: false }, gradesActive: false, seg: null, frozen: {}, lastChange: {}, history: [], epochs: 0, nObs: obs.length };
+  const perPick = {};
+  if (!obs.length) return { state, perPick };
+  const t0 = obs[0].t;
+  const lastKnown = Math.max(...obs.map((o) => o.knownT));
+  const step = C.epochDays * BB_LR_DAY;
+  const watches = [];
+  const epochStates = [];
+  let T = t0 + step;
+  while (true) {
+    const known = obs.filter((o) => o.knownT < T);
+    if (known.length >= C.warmupObs) {
+      bbLrEpoch(state, known, T, watches);
+      state.active = true;
+      state.epochs++;
+      epochStates.push({ T, snap: { active: true, params: bbLrClone(state.params), suppressed: { ...state.suppressed }, proven: { ...state.proven },
+        flipActive: { ...state.flipActive }, gradesActive: state.gradesActive, seg: state.seg } });
+    }
+    if (T > lastKnown) break;
+    T += step;
+    if (state.epochs > 2000) break;
+  }
+  /* out-of-sample decision for each pick: state of the last epoch strictly before the pick was made */
+  let ei = -1;
+  obs.forEach((o) => {
+    while (ei + 1 < epochStates.length && epochStates[ei + 1].T <= o.t) ei++;
+    const st = ei >= 0 ? epochStates[ei].snap : null;
+    const d = bbLrDecide(st, o);
+    perPick[o.id] = { keep: d.keep, reason: d.reason, p: d.p, grade: d.grade, lam: d.lam, bias: d.bias, epochT: ei >= 0 ? epochStates[ei].T : null,
+      adjY: Number.isFinite(o.x) ? d.lam * o.x + d.bias : NaN };
+  });
+  state.asOf = T;
+  state.lastCheckT = epochStates.length ? epochStates[epochStates.length - 1].T : null;
+  state.lastObsT = obs[obs.length - 1].t;
+  /* rollback watches still open: how far into the 30-pick check each recent change is */
+  state.watches = watches.filter((w) => !w.done).map((w) => ({ key: w.key, T: w.T, n: Math.min(C.rollbackN, obs.filter((o) => o.t >= w.T && w.match(o)).length), need: C.rollbackN }));
+  /* grade calibration on out-of-sample picks: learner grade vs the engine grade on the same kept picks */
+  const gc = { learner: {}, engine: {} };
+  obs.forEach((o) => {
+    const d = perPick[o.id];
+    if (!d || !d.keep || !d.grade) return;
+    [["learner", d.grade], ["engine", String(o.grade || "").charAt(0)]].forEach(([k, g]) => {
+      if (!/^[ABCD]$/.test(g)) return;
+      const c = gc[k][g] || (gc[k][g] = { w: 0, l: 0 });
+      if (o.win) c.w++; else c.l++;
+    });
+  });
+  state.gradeCal = gc;
+  state.stateId = bbLrHash(JSON.stringify([state.params, Object.keys(state.suppressed).sort(), Object.keys(state.proven).sort(), state.flipActive, state.gradesActive, obs.length]));
+  return { state, perPick, epochStates };
+}
+
+function bbLrEpoch(state, known, T, watches) {
+  const C = BB_LR_CFG, G = C.gate, BE = C.breakeven;
+  const sorted = known.slice().sort((a, b) => a.t - b.t);
+  const cut = Math.floor(sorted.length * (1 - C.holdoutFrac));
+  const fitPart = sorted.slice(0, cut), hold = sorted.slice(cut);
+  const isFrozen = (k) => state.frozen[k] && state.frozen[k] > T;
+
+  /* 1) rollback monitor: next 30 live picks after each change */
+  watches.forEach((w) => {
+    if (w.done) return;
+    const live = known.filter((o) => o.t >= w.T && w.match(o)).slice(0, C.rollbackN);
+    if (live.length < C.rollbackN) return;
+    w.done = true;
+    const worse = w.worse(live);
+    if (worse) {
+      w.revert();
+      state.frozen[w.key] = T + C.freezeMs;
+      state.history.push({ T, type: "rollback", key: w.key, n: live.length, detail: w.desc });
+    }
+  });
+
+  /* 2) projection parameters: candidates on fitPart validated on the holdout, BH across every node tested */
+  const candHold = bbLrFit(fitPart);
+  const candFull = bbLrFit(sorted);
+  const tests = [];
+  const holdRows = hold.filter((o) => o.kind !== "ml" && Number.isFinite(o.x) && Number.isFinite(o.y));
+  const addTests = (kind, map, levelsOK) => {
+    Object.keys(map).forEach((node) => {
+      const key = kind + "|" + node;
+      if (isFrozen(key)) return;
+      const lv = node.split(":")[0];
+      if (!levelsOK.includes(lv)) return;
+      const cur = state.params[kind][node];
+      const full = candFull[kind][node];
+      if (!Number.isFinite(full)) return;
+      const nodeRows = holdRows.filter((o) => o.nodes[lv] === node);
+      if (nodeRows.length < C.minHoldN) return;
+      const nodeAll = sorted.filter((o) => o.nodes[lv] === node).length;
+      const last = state.lastChange[key];
+      if (last && (T - last.T < C.minChangeGapMs || nodeAll - last.n < C.minNewObsPerChange)) return;
+      const cap = kind === "lam" ? C.lamCap : bbLrCapFor(node);
+      const base = Number.isFinite(cur) ? cur : kind === "lam" ? bbLrResolve(state.params, nodeRows[0]).lam : bbLrResolve(state.params, nodeRows[0]).bias;
+      const stepTo = (target) => base + Math.max(-cap, Math.min(cap, target - base));
+      const hTarget = Number.isFinite(map[node]) ? stepTo(map[node]) : NaN;
+      if (!Number.isFinite(hTarget) || Math.abs(hTarget - base) < 1e-6) return;
+      const trial = { lam: { ...state.params.lam }, bias: { ...state.params.bias } };
+      trial[kind][node] = hTarget;
+      const d = nodeRows.map((o) => Math.abs(o.y - bbLrPred(state.params, o)) - Math.abs(o.y - bbLrPred(trial, o)));
+      tests.push({ key, kind, node, lv, cur, base, newVal: stepTo(full), p: bbLrOneSidedP(d), gain: bbLrMean(d), nHold: nodeRows.length, nAll: nodeAll });
+    });
+  };
+  addTests("lam", candHold.lam, C.lamLevels);
+  addTests("bias", candHold.bias, C.levels);
+  const pass = bbLrBH(tests.map((x) => x.p), C.fdrQ);
+  tests.forEach((x, i) => {
+    if (!pass.has(i) || !(x.gain > 0)) return;
+    const before = { lam: { ...state.params.lam }, bias: { ...state.params.bias } };
+    state.params[x.kind][x.node] = x.newVal;
+    const after = { lam: { ...state.params.lam }, bias: { ...state.params.bias } };
+    state.lastChange[x.key] = { T, n: x.nAll };
+    state.history.push({ T, type: "apply", key: x.key, from: Number.isFinite(x.cur) ? x.cur : null, to: x.newVal, p: x.p, nHold: x.nHold, gain: x.gain });
+    const old = x.cur;
+    watches.push({ key: x.key, T, desc: x.kind + " " + x.node,
+      match: (o) => o.nodes[x.lv] === x.node && o.kind !== "ml" && Number.isFinite(o.x) && Number.isFinite(o.y),
+      worse: (live) => bbLrMean(live.map((o) => Math.abs(o.y - bbLrPred(after, o)))) > bbLrMean(live.map((o) => Math.abs(o.y - bbLrPred(before, o)))),
+      revert: () => { if (Number.isFinite(old)) state.params[x.kind][x.node] = old; else delete state.params[x.kind][x.node]; } });
+  });
+
+  /* 3) segments: suppress proven leaks, release recovered ones, mark proven winners */
+  const segFull = bbLrSegments(sorted, T);
+  const segFit = bbLrSegments(fitPart, T);
+  state.seg = segFull;
+  G.levels.forEach((lv) => {
+    Object.values(segFull).forEach((s) => {
+      if (s.level !== lv) return;
+      const k = s.node;
+      if (state.suppressed[k]) {
+        if (s.pBelow < G.releaseP && T - state.suppressed[k].T >= G.minSuppressMs) {
+          state.history.push({ T, type: "release", key: k, n: s.n, pBelow: s.pBelow });
+          delete state.suppressed[k];
+        }
+        return;
+      }
+      if (isFrozen("gate|" + k)) return;
+      if (s.n < G.minN) return;
+      const f = segFit[k];
+      const h = hold.filter((o) => o.nodes[lv] === k);
+      const hUnits = h.reduce((a, o) => a + (o.profit == null ? 0 : o.win ? o.profit : -1), 0);
+      const hN = h.filter((o) => o.profit != null).length;
+      if (s.pBelow >= G.suppressP && f && f.pBelow >= 0.5 && hN >= G.minHoldN && hUnits < 0) {
+        state.suppressed[k] = { T, n: s.n, wins: s.wins, losses: s.losses, pBelow: s.pBelow, mean: s.mean };
+        state.history.push({ T, type: "suppress", key: k, n: s.n, wins: s.wins, losses: s.losses, pBelow: s.pBelow });
+      }
+    });
+  });
+  const proven = {};
+  Object.values(segFull).forEach((s) => {
+    if (!G.levels.includes(s.level) || s.n < G.minN) return;
+    const f = segFit[s.node];
+    if (s.pAbove >= G.boostP && f && f.mean > BE) proven[s.node] = { n: s.n, wins: s.wins, losses: s.losses, pAbove: s.pAbove, mean: s.mean };
+  });
+  state.proven = proven;
+
+  /* 4) flip rule per kind: drop picks whose corrected edge no longer favours the side - only if the holdout proves those lose */
+  ["total", "spread"].forEach((kind) => {
+    if (isFrozen("flip|" + kind)) return;
+    const drop = holdRows.filter((o) => o.kind === kind && o.dir * bbLrPred(state.params, o) <= 0 && !G.levels.some((lv) => proven[o.nodes[lv]]));
+    let on = false;
+    if (drop.length >= C.flip.minDrop) {
+      const w = drop.reduce((a, o) => a + o.win, 0);
+      const units = drop.reduce((a, o) => a + (o.win ? o.profit : -1), 0);
+      const pBelow = bbLrIbeta(BE, 1 + w, 1 + drop.length - w);
+      on = units < 0 && pBelow >= 1 - C.flip.p;
+    }
+    if (on !== state.flipActive[kind]) state.history.push({ T, type: on ? "flip_on" : "flip_off", key: "flip|" + kind, n: drop.length });
+    state.flipActive[kind] = on;
+  });
+
+  /* 5) grades: recalibrated grades go live only if they beat the engine's stored probability on the holdout (Brier) */
+  if (!isFrozen("grades")) {
+    const segH = bbLrSegments(fitPart, T);
+    const rows = hold.filter((o) => Number.isFinite(o.engP));
+    let on = state.gradesActive;
+    if (rows.length >= 20) {
+      const bL = bbLrMean(rows.map((o) => Math.pow(bbLrSegP(segH, o) - o.win, 2)));
+      const bE = bbLrMean(rows.map((o) => Math.pow(o.engP - o.win, 2)));
+      on = bL < bE;
+    }
+    if (on && !state.gradesActive) {
+      state.history.push({ T, type: "grades_on", key: "grades" });
+      watches.push({ key: "grades", T, desc: "grades",
+        match: (o) => Number.isFinite(o.engP),
+        worse: (live) => bbLrMean(live.map((o) => Math.pow(bbLrSegP(state.seg, o) - o.win, 2))) > bbLrMean(live.map((o) => Math.pow(o.engP - o.win, 2))),
+        revert: () => { state.gradesActive = false; } });
+    }
+    state.gradesActive = on;
+  }
+}
+
+/* ---------------- app glue ---------------- */
+let g_bbLr = null; /* { fingerprint, state, perPick } */
+let g_bbLrTimer = null;
+function bbLrSettledPool() {
+  let pool = [];
+  try { pool = typeof getCanonicalTrackedPicksPool === "function" ? getCanonicalTrackedPicksPool() : []; } catch (_e) { pool = []; }
+  return pool.filter((p) => {
+    const r = String((p && (p.resultStatus || p.engineResultStatus)) || "").toLowerCase();
+    return r === "win" || r === "loss";
+  });
+}
+function bbLrFingerprint(pool) {
+  return bbLrHash(pool.map((p) => String(p.pickId || p.signature) + ":" + String(p.resultStatus || p.engineResultStatus) + ":" + String(p.projection) + ":" + String(p.line)).sort().join("|")) + ":" + pool.length;
+}
+function bbLrCompute(force) {
+  const pool = bbLrSettledPool();
+  const fp = bbLrFingerprint(pool);
+  if (!force && g_bbLr && g_bbLr.fingerprint === fp) return g_bbLr;
+  const obs = pool.map((p) => bbLrObsFromPick(p)).filter(Boolean);
+  const built = bbLrBuild(obs);
+  g_bbLr = { fingerprint: fp, state: built.state, perPick: built.perPick, cached: false };
+  try {
+    /* tiny local stamp only (< 1 KB): the full state is rebuilt from the picks in ~0.1 s, so it never competes with the tracker's localStorage copy */
+    const st = built.state;
+    localStorage.setItem(BB_LR_STATE_KEY, JSON.stringify({ version: BB_LR_VERSION, build: BB_ENGINE_BUILD, fingerprint: fp, stateId: st.stateId || null, nObs: st.nObs,
+      active: st.active, suppressed: Object.keys(st.suppressed || {}), proven: Object.keys(st.proven || {}).length, gradesActive: st.gradesActive,
+      lastChange: (st.history || []).length ? st.history[st.history.length - 1] : null, at: Date.now() }));
+  } catch (_w) {}
+  return g_bbLr;
+}
+function bbLrGetState() {
+  try { return bbLrCompute(false).state; } catch (_e) { return null; }
+}
+/* settlement hook (header rebuild after any single, manual, sync or bulk settlement): debounced, idle-time recompute */
+function bbLrScheduleRefresh() {
+  try {
+    if (g_bbLrTimer) clearTimeout(g_bbLrTimer);
+    let tries = 0;
+    const run = () => {
+      g_bbLrTimer = null;
+      /* stay out of the way of a raid or a tracker save: wait until they finish */
+      let busy = false;
+      try { busy = !!(g_militaryRaidInFlight || g_trackerSaveInFlight || g_trackerSaveTimer); } catch (_b) { busy = false; }
+      if (busy && tries++ < 120) { g_bbLrTimer = setTimeout(run, 2000); return; }
+      try { bbLrCompute(false); } catch (_e) {}
+    };
+    g_bbLrTimer = setTimeout(run, 1500);
+  } catch (_e) {}
+}
+/* team-memory delta (Team A = home) that the projection of this market already carries */
+function bbLrTeamMemoryDelta(mk, tm) {
+  if (!tm || !tm.applied) return 0;
+  const dA = Number(tm.dA) || 0, dB = Number(tm.dB) || 0;
+  const sh = Number.isFinite(Number(tm.h1Share)) ? Number(tm.h1Share) : 0.5;
+  switch (mk) {
+    case "ft": return dA + dB;
+    case "team_a": return dA;
+    case "team_b": return dB;
+    case "h1": return (dA + dB) * sh;
+    case "h2": return (dA + dB) * (1 - sh);
+    case "h1_team_a": return dA * sh;
+    case "h1_team_b": return dB * sh;
+    case "handicap": case "winner": return dA - dB;
+    case "handicap_h1": return (dA - dB) * sh;
+    case "handicap_h2": return (dA - dB) * (1 - sh);
+    default: return 0;
+  }
+}
+/* corrected projection for a live row; the memory part is kept on top and the bias never overturns its direction */
+function bbLrAdjustProjection(o, lam, bias, tmDelta) {
+  const tm = Number(tmDelta) || 0;
+  let b = Number(bias) || 0;
+  if (tm > 0 && b < -tm) b = -tm;
+  if (tm < 0 && b > -tm) b = -tm;
+  if (o.kind === "total") {
+    const base = o.proj - tm;
+    return { proj: o.line + lam * (base - o.line) + tm + b, bias: b };
+  }
+  if (o.kind === "spread") {
+    const baseCover = o.proj - tm + o.line;
+    return { proj: -o.line + lam * baseCover + tm + b, bias: b };
+  }
+  return { proj: o.proj, bias: 0 };
+}
+/* live: called once per run after every engine gate. Removes plays only (never adds, never flips), regrades silently. */
+function bbLrApplyToPicks(picks, ctx) {
+  if (!Array.isArray(picks) || !picks.length) return;
+  let state = null;
+  try { state = bbLrGetState(); } catch (_e) { state = null; }
+  if (!state || !state.active) return;
+  const league = (ctx && ctx.league) || "";
+  const tm = ctx && ctx.teamMemory ? ctx.teamMemory : null;
+  picks.forEach((p) => {
+    try {
+      if (!p || p.pick === "NO PLAY") return;
+      const mk = String(p.marketKey || "").toLowerCase();
+      const fam = bbLrFamily(mk);
+      if (!fam) return;
+      const kind = bbLrKind(fam);
+      const side = getPickSideFromText(p.pick);
+      const dir = side === "over" || side === "home" ? 1 : side === "under" || side === "away" ? -1 : 0;
+      if (!dir) return;
+      const lg = bbLrLeagueGroup(p.league || league);
+      const proj = bbLrNum(p.proj);
+      let line = kind === "ml" ? 0 : bbLrNum(p.line);
+      if (kind === "total" && !(line > 5)) line = NaN;
+      const tmD = bbLrTeamMemoryDelta(mk, tm);
+      const o = { noFlip: true, mk, fam, kind, side, dir, lg, proj, line, nodes: { G: "G", K: "K:" + kind, LK: "LK:" + lg + "|" + kind, F: "F:" + fam, M: "M:" + mk, LF: "LF:" + lg + "|" + fam, LM: "LM:" + lg + "|" + mk } };
+      if (Number.isFinite(proj) && Number.isFinite(line)) {
+        o.x = kind === "total" ? proj - tmD - line : kind === "spread" ? proj - tmD + line : proj;
+      }
+      const d = bbLrDecide(state, o);
+      const audit = { v: BB_LR_VERSION, stateId: state.stateId || null, lam: d.lam, bias: d.bias, p: Number.isFinite(d.p) ? Number(d.p.toFixed(4)) : null,
+        gradeBefore: p.confidence || null, winProbabilityBefore: bbLrNum(p.winProbability), projBefore: proj, kept: d.keep, reason: d.reason, segment: d.segment };
+      if (kind !== "ml" && Number.isFinite(o.x)) {
+        const adj = bbLrAdjustProjection(o, d.lam, d.bias, tmD);
+        audit.projAfter = Number(adj.proj.toFixed(3));
+        audit.biasUsed = adj.bias;
+        const adjEdgeDir = kind === "total" ? dir * (adj.proj - line) : dir * (adj.proj + line);
+        audit.adjEdgeDir = Number(adjEdgeDir.toFixed(3));
+        if (d.keep && d.reason == null && state.flipActive && state.flipActive[kind] && adjEdgeDir <= 0 &&
+            !BB_LR_CFG.gate.levels.some((lv) => state.proven && state.proven[o.nodes[lv]])) {
+          d.keep = false; d.reason = "flip"; audit.kept = false; audit.reason = "flip";
+        }
+      }
+      p.learner = audit; /* hidden audit only: no note, no warning */
+      if (!d.keep) {
+        p.learnerSuppressedPick = p.pick;
+        const why = "edge below this market's play threshold";
+        if (typeof forcePickNoPlayWithNote === "function") forcePickNoPlayWithNote(p, why);
+        else { p.pick = "NO PLAY"; p.displayPick = "NO PLAY"; p.bufferedPickText = "NO PLAY"; p.confidence = null; p.isLock = false; p.noPlayReason = why; p.whyPick = why; }
+        p.confidenceDisplay = null;
+        return;
+      }
+      if (d.grade && Number.isFinite(d.p)) {
+        let g = d.grade;
+        const cap = p.integrityConfidenceCap;
+        if (cap && typeof getConfidenceRank === "function" && getConfidenceRank(g) > getConfidenceRank(cap)) g = cap;
+        p.engineGrade = p.confidence || null;
+        p.engineWinProbability = bbLrNum(p.winProbability);
+        p.confidence = g;
+        p.confidenceDisplay = g;
+        p.winProbability = d.p;
+      }
+    } catch (_pe) {}
+  });
+}
+function bbLrSegLabel(k) {
+  const s = String(k || "");
+  const fam = { TOT_FT: "FT totals", TOT_H1: "1H totals", TOT_H2: "2H totals", TOT_Q: "Quarter totals", TEAM_FT: "Team totals", TEAM_H1: "1H team totals", SPR_FT: "FT spreads", SPR_H: "Half spreads", ML: "Winner" };
+  const mk = { ft: "FT total", h1: "1H total", h2: "2H total", q1: "Q1 total", q2: "Q2 total", q3: "Q3 total", q4: "Q4 total", team_a: "Home team total", team_b: "Away team total", h1_team_a: "1H home team total", h1_team_b: "1H away team total", handicap: "FT spread", handicap_h1: "1H spread", handicap_h2: "2H spread", winner: "Winner" };
+  const [lv, rest] = s.split(":");
+  if (lv === "G") return "All picks";
+  if (lv === "K") return rest === "ml" ? "Winner picks" : rest === "spread" ? "Spreads" : "Totals";
+  if (lv === "LK") { const [lg2, k2] = String(rest || "").split("|"); return String(lg2).toUpperCase() + " · " + (k2 === "ml" ? "winner picks" : k2 === "spread" ? "spreads" : "totals"); }
+  if (lv === "F") return fam[rest] || rest;
+  if (lv === "M") return mk[rest] || rest;
+  const [lg, x] = String(rest || "").split("|");
+  return String(lg).toUpperCase() + " · " + (lv === "LF" ? fam[x] || x : mk[x] || x);
+}
+/* ---------------- read-only UI: Configuration page + compact Tracked Picks card ---------------- */
+function bbLrEsc(v) {
+  const s = String(v == null ? "" : v);
+  return typeof safeText === "function" ? safeText(s) : s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+function bbLrDate(T, clampNow) {
+  if (clampNow && Number.isFinite(T)) T = Math.min(T, Date.now()); /* the last weekly window can end after today */
+  const d = new Date(T);
+  if (!Number.isFinite(T) || isNaN(d)) return "—";
+  try { return d.toLocaleDateString(undefined, { month: "short", day: "numeric" }); } catch (_e) { return d.toISOString().slice(0, 10); }
+}
+function bbLrNodeKind(node) {
+  const s = String(node || "");
+  if (s === "G") return "all";
+  if (s.startsWith("K:")) return s.slice(2);
+  const fam = s.split(":")[1] ? s.split(":")[1].split("|").pop() : "";
+  const f = /^(TOT_|TEAM_|SPR_|ML)/.test(fam) ? fam : bbLrFamily(fam);
+  return f ? bbLrKind(f) : "all";
+}
+function bbLrCorrectionText(kind, node, v) {
+  const seg = bbLrSegLabel(node);
+  if (kind === "lam") {
+    const pct = Math.round(Math.abs(1 - v) * 100);
+    return { seg, what: v <= 1 ? `projection pulled ${pct}% toward the line` : `projection edge stretched ${pct}%` };
+  }
+  const k = bbLrNodeKind(node), a = Math.abs(v).toFixed(1);
+  if (k === "spread") return { seg, what: `projected margin moved ${a} pts toward ${v > 0 ? "home" : "away"}` };
+  if (k === "total") return { seg, what: `projection ${v < 0 ? "lowered" : "raised"} ${a} pts` };
+  return { seg, what: `projection adjusted ${v > 0 ? "+" : "−"}${a} pts` };
+}
+function bbLrHistoryText(h) {
+  const key = String(h.key || "");
+  const node = key.includes("|") && /^(lam|bias|gate|flip)\|/.test(key) ? key.split("|").slice(1).join("|") : key;
+  const seg = bbLrSegLabel(node);
+  switch (h.type) {
+    case "apply": return key.startsWith("lam|") ? `Shrink toward line updated · ${seg}` : `Projection correction updated · ${seg}`;
+    case "suppress": return `Paused ${seg}${h.wins != null ? ` (${h.wins}-${h.losses})` : ""}`;
+    case "release": return `Resumed ${seg}`;
+    case "rollback": return `Rolled back ${key === "grades" ? "grade recalibration" : seg} (next ${h.n} picks were worse)`;
+    case "flip_on": return `Started dropping ${node} picks the corrected projection no longer backs`;
+    case "flip_off": return `Stopped dropping ${node} picks on corrected projection`;
+    case "grades_on": return "Grade recalibration switched on";
+    default: return String(h.type || "").replace(/_/g, " ") + " " + seg;
+  }
+}
+function bbLrStyle() {
+  return `<style id="bbLrStyle">
+.bblr{display:grid;grid-template-columns:1fr;gap:10px;margin-top:10px}
+@media(min-width:720px){.bblr{grid-template-columns:1fr 1fr}.bblr-wide{grid-column:1/-1}}
+.bblr-card{background:var(--panel);border:1px solid var(--panel-border);border-radius:12px;padding:12px 14px;box-shadow:var(--shadow);color:var(--text);min-width:0}
+.bblr-h{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.bblr-t{font-weight:700;font-size:13px;color:var(--tracker-strong);letter-spacing:.2px}
+.bblr-pill{font-size:11px;font-weight:600;padding:2px 9px;border-radius:999px;background:var(--panel-soft-2);color:var(--tracker-subtext);white-space:nowrap}
+.bblr-pill.ok{background:rgba(46,160,67,.14);color:#2a8a43}.bblr-pill.warn{background:rgba(217,140,31,.16);color:#b56d0c}.bblr-pill.off{background:var(--panel-soft-2);color:var(--muted)}
+.bblr-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.bblr-stat{background:var(--panel-soft);border:1px solid var(--tracker-chip-border);border-radius:10px;padding:8px 10px}
+.bblr-stat b{display:block;font-size:17px;color:var(--tracker-strong);font-variant-numeric:tabular-nums}
+.bblr-stat span{font-size:11px;color:var(--muted)}
+.bblr-row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid var(--table-border);font-size:12.5px}
+.bblr-row:first-of-type{border-top:0}.bblr-row .s{font-weight:600;color:var(--tracker-strong);min-width:0}.bblr-row .w{color:var(--tracker-subtext);text-align:right}
+.bblr-sub{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:8px 0 5px}
+.bblr-chips{display:flex;flex-wrap:wrap;gap:6px}
+.bblr-chip{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--tracker-chip-border);background:var(--tracker-chip-bg);color:var(--chip-text);font-variant-numeric:tabular-nums}
+.bblr-chip.up{border-color:rgba(46,160,67,.45);background:rgba(46,160,67,.10)}.bblr-chip.down{border-color:rgba(217,31,38,.35);background:rgba(217,31,38,.07)}
+.bblr-note{font-size:11.5px;color:var(--muted);line-height:1.45;margin-top:8px}
+.bblr-empty{font-size:12.5px;color:var(--muted)}
+.bblr-tbl{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+.bblr-tbl th{font-size:11px;color:var(--muted);font-weight:600;text-align:right;padding:4px 6px}.bblr-tbl th:first-child,.bblr-tbl td:first-child{text-align:left}
+.bblr-tbl td{padding:5px 6px;border-top:1px solid var(--table-border);text-align:right}
+.bblr-bar{height:6px;border-radius:3px;background:var(--panel-soft-2);overflow:hidden;margin-top:4px}.bblr-bar i{display:block;height:100%;background:#4ea9ff}
+.bblr details{margin-top:6px}.bblr summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--tracker-subtext);list-style:none;padding:4px 0}
+.bblr summary::-webkit-details-marker{display:none}.bblr summary::before{content:"▸ ";color:var(--section-toggle-icon)}.bblr details[open]>summary::before{content:"▾ "}
+.bblr pre{font-size:11px;white-space:pre-wrap;word-break:break-word;background:var(--panel-soft);border:1px solid var(--tracker-chip-border);border-radius:8px;padding:8px;margin:6px 0 0;max-height:320px;overflow:auto;color:var(--text)}
+</style>`;
+}
+function bbLrView(st) {
+  const corr = [];
+  Object.entries(st.params.bias || {}).forEach(([k, v]) => { if (Math.abs(v) >= 0.05) corr.push({ ...bbLrCorrectionText("bias", k, v), mag: Math.abs(v) }); });
+  Object.entries(st.params.lam || {}).forEach(([k, v]) => { if (Math.abs(1 - v) >= 0.02) corr.push({ ...bbLrCorrectionText("lam", k, v), mag: Math.abs(1 - v) * 5 }); });
+  const merged = new Map();
+  corr.forEach((c) => { const m = merged.get(c.seg); if (m) { m.what += ", " + c.what.replace(/^projection /, ""); m.mag = Math.max(m.mag, c.mag); } else merged.set(c.seg, { ...c }); });
+  const corrM = [...merged.values()].sort((a, b) => b.mag - a.mag);
+  const lvOrder = { G: 0, K: 1, LK: 2, F: 3, M: 4, LF: 5, LM: 6 };
+  const segs = (obj) => {
+    const seen = new Set();
+    return Object.entries(obj || {}).map(([k, s]) => ({ k, lv: lvOrder[k.split(":")[0]] || 0, lg: k.includes("|") ? k.split(":")[1].split("|")[0] : "", label: bbLrSegLabel(k), w: s.wins, l: s.losses, n: s.n || s.wins + s.losses, T: s.T }))
+      .sort((a, b) => a.lv - b.lv)
+      .filter((x) => { const sig = x.lg + "|" + x.w + "-" + x.l; if (seen.has(sig)) return false; seen.add(sig); return true; })
+      .sort((a, b) => b.n - a.n);
+  };
+  const nowT = Date.now();
+  const frozen = Object.entries(st.frozen || {}).filter(([, t]) => t > nowT).map(([k, t]) => ({ k, t }));
+  return { corr: corrM, boosted: segs(st.proven), paused: segs(st.suppressed), history: (st.history || []).slice().reverse(), watches: st.watches || [], frozen };
+}
+function bbLrStatus(st) {
+  if (!st.active) return { cls: "off", txt: "Warming up" };
+  if ((st.watches || []).length) return { cls: "warn", txt: "Learning · checking a change" };
+  return { cls: "ok", txt: "Learning" };
+}
+function bbLrWL(c) {
+  if (!c || !(c.w + c.l)) return "—";
+  return `${c.w}-${c.l} <span style="color:var(--muted)">(${Math.round((100 * c.w) / (c.w + c.l))}%)</span>`;
+}
+/* Configuration page */
+function bbRenderLearnerPage() {
+  let L = null;
+  try { L = bbLrCompute(false); } catch (_e) { L = null; }
+  const st = L && L.state;
+  if (!st || !st.nObs) return `${bbLrStyle()}<div class="bblr"><div class="bblr-card bblr-wide"><div class="bblr-empty">The self-learning engine starts once picks are settled.</div></div></div>`;
+  const v = bbLrView(st), S = bbLrStatus(st), C = BB_LR_CFG;
+  const chips = (arr, cls, max) => arr.slice(0, max).map((s) => `<span class="bblr-chip ${cls}">${bbLrEsc(s.label)} · ${s.w}-${s.l}</span>`).join("");
+  const more = (arr, max, cls, title) => arr.length > max ? `<details><summary>${bbLrEsc(title)} (${arr.length})</summary><div class="bblr-chips">${chips(arr.slice(max), cls, 999)}</div></details>` : "";
+  const corrRow = (c) => `<div class="bblr-row"><div class="s">${bbLrEsc(c.seg)}</div><div class="w">${bbLrEsc(c.what)}</div></div>`;
+  const grades = ["A", "B", "C", "D"];
+  const gc = st.gradeCal || { learner: {}, engine: {} };
+  const last = v.history[0];
+  const advParams = [
+    ["Shrink toward line (λ, 1 = engine projection)", Object.entries(st.params.lam || {}).map(([k, x]) => `${k}  ${Number(x).toFixed(3)}`).join("\n") || "none"],
+    ["Projection bias (pts)", Object.entries(st.params.bias || {}).map(([k, x]) => `${k}  ${Number(x).toFixed(3)}`).join("\n") || "none"],
+    ["Paused segments", Object.entries(st.suppressed || {}).map(([k, s]) => `${k}  ${s.wins}-${s.losses}  P(below break-even)=${Number(s.pBelow).toFixed(3)}  since ${bbLrDate(s.T)}`).join("\n") || "none"],
+    ["Boosted segments", Object.entries(st.proven || {}).map(([k, s]) => `${k}  ${s.wins}-${s.losses}  P(above break-even)=${Number(s.pAbove).toFixed(3)}`).join("\n") || "none"],
+    ["Drop picks the corrected projection no longer backs", JSON.stringify(st.flipActive || {})],
+    ["Change history", (st.history || []).map((h) => `${bbLrDate(h.T)}  ${h.type}  ${h.key || ""}${h.to != null ? "  → " + Number(h.to).toFixed(3) : ""}${h.p != null ? "  p=" + Number(h.p).toFixed(4) : ""}`).join("\n") || "none"],
+    ["Rules", `minimum picks per level ${JSON.stringify(C.minN)}\nstep caps: λ ${C.lamCap}, bias ${JSON.stringify(C.biasCap)}\nholdout ${C.holdoutFrac * 100}% · false-discovery guard q=${C.fdrQ} · ≥${C.minNewObsPerChange} new picks and ${C.minChangeGapMs / BB_LR_DAY} days between changes\npause if P(below break-even) ≥ ${C.gate.suppressP} on ≥ ${C.gate.minN} picks and the holdout lost; resume below ${C.gate.releaseP}\nauto-rollback after ${C.rollbackN} picks · ${C.freezeMs / BB_LR_DAY}-day freeze after a rollback\nUnder floor (underEdgeFactor ≥ 1.3) is never touched`],
+    ["Build", `${BB_ENGINE_BUILD} · ${BB_LR_VERSION} · state ${st.stateId || "—"}`],
+  ];
+  return `${bbLrStyle()}
+<div class="bblr" id="bbLearnerPage">
+  <div class="bblr-card bblr-wide">
+    <div class="bblr-h"><div class="bblr-t">Learning status</div><span class="bblr-pill ${S.cls}">${bbLrEsc(S.txt)}</span></div>
+    <div class="bblr-stats">
+      <div class="bblr-stat"><b>${bbLrEsc(st.nObs)}</b><span>settled picks learned from</span></div>
+      <div class="bblr-stat"><b>${bbLrEsc(st.epochs)}</b><span>weekly checks</span></div>
+      <div class="bblr-stat"><b>${bbLrEsc(st.lastObsT ? bbLrDate(st.lastObsT) : "—")}</b><span>latest result learned</span></div>
+    </div>
+    <div class="bblr-note">${st.active ? "Updates itself after every settlement. A change goes live only if it wins a walk-forward test on picks it has not seen, in small capped steps, and is undone automatically if the next 30 picks do worse." : `Starts learning after ${C.warmupObs} settled picks.`}</div>
+  </div>
+  <div class="bblr-card">
+    <div class="bblr-h"><div class="bblr-t">What it has corrected</div><span class="bblr-pill">${v.corr.length}</span></div>
+    ${v.corr.length ? v.corr.slice(0, 4).map(corrRow).join("") : '<div class="bblr-empty">No correction has passed the test yet. Engine projections are used as-is.</div>'}
+    ${v.corr.length > 4 ? `<details><summary>All corrections (${v.corr.length})</summary>${v.corr.slice(4).map(corrRow).join("")}</details>` : ""}
+  </div>
+  <div class="bblr-card">
+    <div class="bblr-h"><div class="bblr-t">Segments</div><span class="bblr-pill">${v.boosted.length} boosted · ${v.paused.length} paused</span></div>
+    <div class="bblr-sub">Boosted (proven winners)</div>
+    <div class="bblr-chips">${v.boosted.length ? chips(v.boosted, "up", 6) : '<span class="bblr-empty">none yet</span>'}</div>${more(v.boosted, 6, "up", "Show all boosted")}
+    <div class="bblr-sub">Paused (proven leaks, resume when they recover)</div>
+    <div class="bblr-chips">${v.paused.length ? chips(v.paused, "down", 6) : '<span class="bblr-empty">none</span>'}</div>${more(v.paused, 6, "down", "Show all paused")}
+  </div>
+  <div class="bblr-card">
+    <div class="bblr-h"><div class="bblr-t">Grade calibration</div><span class="bblr-pill ${st.gradesActive ? "ok" : "off"}">${st.gradesActive ? "Recalibrated" : "Engine grades"}</span></div>
+    <table class="bblr-tbl"><tr><th>Grade</th><th>Learner</th><th>Engine</th></tr>
+      ${grades.map((g) => `<tr><td><b>${g}</b></td><td>${bbLrWL(gc.learner[g])}</td><td>${bbLrWL(gc.engine[g])}</td></tr>`).join("")}
+    </table>
+    <div class="bblr-note">Record of each grade on picks graded before their result was known. Grades follow the real win rate of similar past picks.</div>
+  </div>
+  <div class="bblr-card">
+    <div class="bblr-h"><div class="bblr-t">Last change</div><span class="bblr-pill ${v.watches.length ? "warn" : "ok"}">${v.watches.length ? "Rollback check running" : "Stable"}</span></div>
+    ${last ? `<div class="bblr-row"><div class="s">${bbLrEsc(bbLrHistoryText(last))}</div><div class="w">${bbLrEsc(bbLrDate(last.T, true))}</div></div>` : '<div class="bblr-empty">No changes yet.</div>'}
+    ${v.watches.map((w) => `<div style="margin-top:8px;font-size:12px;"><div style="display:flex;justify-content:space-between;"><span>${bbLrEsc(w.key === "grades" ? "Grade recalibration" : bbLrSegLabel(String(w.key).split("|").slice(1).join("|")))}</span><span style="color:var(--muted)">${w.n}/${w.need} picks</span></div><div class="bblr-bar"><i style="width:${Math.round((100 * w.n) / w.need)}%"></i></div></div>`).join("")}
+    ${v.frozen.length ? `<div class="bblr-note">Frozen after a rollback: ${v.frozen.map((f) => bbLrEsc((f.k === "grades" ? "grade recalibration" : bbLrSegLabel(String(f.k).split("|").slice(1).join("|")) + " " + (String(f.k).startsWith("gate|") ? "pause" : "correction")) + " until " + bbLrDate(f.t))).join(", ")}</div>` : ""}
+    ${v.history.length > 1 ? `<details><summary>Recent changes (${Math.min(10, v.history.length)})</summary>${v.history.slice(0, 10).map((h) => `<div class="bblr-row"><div class="s">${bbLrEsc(bbLrHistoryText(h))}</div><div class="w">${bbLrEsc(bbLrDate(h.T, true))}</div></div>`).join("")}</details>` : ""}
+  </div>
+  <div class="bblr-card bblr-wide">
+    <details><summary>Advanced</summary>
+      ${advParams.map(([t, body]) => `<div class="bblr-sub">${bbLrEsc(t)}</div><pre>${bbLrEsc(body)}</pre>`).join("")}
+    </details>
+  </div>
+</div>`;
+}
+/* compact card in the Tracked Picks report */
+function bbRenderLearnerSection() {
+  let L = null;
+  try { L = bbLrCompute(false); } catch (_e) { L = null; }
+  const st = L && L.state;
+  if (!st || !st.nObs) return "";
+  const v = bbLrView(st), S = bbLrStatus(st);
+  const last = v.history[0];
+  const parts = [`${st.nObs} settled picks`, `${v.corr.length} correction${v.corr.length === 1 ? "" : "s"}`, `${v.boosted.length} boosted`, `${v.paused.length} paused`, st.gradesActive ? "grades recalibrated" : "engine grades"];
+  return `${bbLrStyle()}
+<div class="bblr" style="grid-template-columns:1fr"><div class="bblr-card">
+  <div class="bblr-h"><div class="bblr-t">🧠 Self-learning engine</div><span class="bblr-pill ${S.cls}">${bbLrEsc(S.txt)}</span></div>
+  <div style="font-size:12.5px;color:var(--tracker-subtext)">${bbLrEsc(parts.join(" · "))}</div>
+  ${last ? `<div class="bblr-note">Last change ${bbLrEsc(bbLrDate(last.T, true))}: ${bbLrEsc(bbLrHistoryText(last))}. Details in Configuration.</div>` : ""}
+</div></div>`;
+}
+if (typeof window !== "undefined") {
+  window.bbLrCompute = bbLrCompute;
+  window.bbLrBuild = bbLrBuild;
+  window.bbLrObsFromPick = bbLrObsFromPick;
+  window.bbRenderLearnerSection = bbRenderLearnerSection;
+  window.bbRenderLearnerPage = bbRenderLearnerPage;
+}
+/* ================= end LEARNER ================= */
+
 function getCanonicalTrackedPicksPool() {
   const state = AppState.tracker.state || {};
   const active = Array.isArray(state.activePicks) ? state.activePicks : [];
@@ -16825,7 +17761,7 @@ function updateTrackerInsightsButton() {
   if (titleEl) {
     if (isTrackerPicksView()) titleEl.textContent = "Tracked Picks";
     else if (isTrackerReportView()) titleEl.textContent = "Engine Report";
-    else if (isTrackerConfigsView()) titleEl.textContent = "Verified Configs";
+    else if (isTrackerConfigsView()) titleEl.textContent = "Self-Learning Engine";
     else if (isTrackerHealthView()) titleEl.textContent = "Engine Health";
   }
 
@@ -16936,7 +17872,7 @@ function copyTrackerData() {
 }
 
 function copyConfigsData() {
-  let text = _trackerPanelCopyText("Verified Configs");
+  let text = _trackerPanelCopyText("Self-Learning Engine");
   if (!text) {
     try {
       text = JSON.stringify(JSON.parse(localStorage.getItem("BB_VERIFIED_TUNINGS") || "{}"), null, 2);
@@ -19647,6 +20583,7 @@ function rebuildTrackerStats() {
   } catch (_alertErr) {
     engineDebug("win-rate alert check failed", { error: _alertErr?.message || String(_alertErr) });
   }
+  try { if (typeof bbLrScheduleRefresh === "function") bbLrScheduleRefresh(); } catch (_lrE) {} /* FIX LR3 */
 
   return AppState.tracker.state.stats;
 }
@@ -22824,7 +23761,21 @@ function renderHealthDashboardPanel() {
   updateTrackerInsightsButton();
 }
 
+/* FIX LR6: the Configuration view is now a read-only status card for the automatic learner */
 function renderConfigsPanel() {
+  const panel = document.getElementById("trackerAnalyticsPanel");
+  if (!panel) return;
+  syncTrackerModalView();
+  panel.classList.remove("tracker-hidden");
+  panel.style.display = "block";
+  panel.innerHTML = `<div class="tracker-analytics-shell">
+      <div class="tracker-analytics-topbar"><div class="tracker-analytics-heading" style="flex:1;">
+        <div class="tracker-analytics-kicker">Configuration</div>
+        <div class="tracker-analytics-title">Self-learning engine</div>
+        <div class="tracker-analytics-subtitle">Runs automatically after every settlement. Read-only.</div>
+      </div></div>${typeof bbRenderLearnerPage === "function" ? bbRenderLearnerPage() : ""}</div>`;
+}
+function renderConfigsPanelLegacy() {
   const panel = document.getElementById("trackerAnalyticsPanel");
   if (!panel) return;
 
@@ -23025,7 +23976,7 @@ function renderConfigsPanel() {
         .trim();
       const match = `${pick.homeTeam || "A"} vs ${pick.awayTeam || "B"}`;
       const pickTxt = pick.predictionText || "—";
-      const line = isFinite(Number(pick.line)) ? pick.line : "—";
+      const line = pick.line != null && pick.line !== "" && isFinite(Number(pick.line)) ? pick.line : "—"; /* FIX LR6: no '@ null' */
       const actual = pick.actualScore != null ? String(pick.actualScore) : "—";
       const state = getConfigEvaluationState(pick.league, pick.marketKey);
       const settledN = Number(state.sampleCount || 0);
@@ -23078,7 +24029,7 @@ function renderConfigsPanel() {
               </div>
             </div>
             <div class="tracker-review-text">
-              ${safeText(pickTxt)} @ ${safeText(String(line))} — Final: ${safeText(actual)}
+              ${safeText(pickTxt)}${line === "—" ? "" : " @ " + safeText(String(line))} — Final: ${safeText(actual)}
             </div>
             <div style="display:flex; align-items:center; gap:6px; margin-top:4px;">
               ${dotClass ? `<span class="tracker-insight-dot ${dotClass}" style="flex-shrink:0; margin:0; display:inline-block;"></span>` : ""}
@@ -24328,6 +25279,7 @@ function renderTrackerAnalytics() {
           </div>
         </div>
       </div>
+      ${typeof bbRenderLearnerSection === "function" ? bbRenderLearnerSection() : ""}
       ${typeof bbRenderTeamMemorySection === "function" ? bbRenderTeamMemorySection() : ""}
       <div class="tracker-analytics-card" style="margin-top: 10px; border-color: #2a2a2a;">
         <div class="tracker-analytics-card-head" style="background: linear-gradient(90deg, #333 0%, #111 100%);">
@@ -39703,6 +40655,12 @@ function buildTrackedPickPayload({
     confidenceGrade: grade,
     originalConfidenceGrade: String(grade || "").toUpperCase(),
     modelVersion: getCurrentModelVersion(),
+    engineVersion: getCurrentModelVersion(), /* FIX LR4 */
+    engineBuild: BB_ENGINE_BUILD,
+    learnerVersion: BB_LR_VERSION,
+    learnerStateId: pickRow.learner && pickRow.learner.stateId != null ? pickRow.learner.stateId : null,
+    learner: pickRow.learner ? JSON.parse(JSON.stringify(pickRow.learner)) : null,
+    engineGrade: pickRow.engineGrade || null,
     configFingerprint: getLiveConfigFingerprint(league),
                                                                                            
                                                                                          
@@ -42610,6 +43568,10 @@ async function runEngine() {
     applySiblingMarketContradictionGate(finalPicksForDisplay, rawMarketInputs);
     applyBBMarketGate(finalPicksForDisplay, rawMarketInputs, league, typeof parsed !== "undefined" ? parsed : null);
     bbMergeT6IntoIntegrity(finalPicksForDisplay);
+    try { /* FIX LR2: automatic learner (quiet: no notes or warnings on picks) */
+      const _lrTm = typeof window !== "undefined" ? window.__bbTeamMemoryRun : null;
+      bbLrApplyToPicks(finalPicksForDisplay, { league, teamMemory: _lrTm && fixtureMeta && fixtureMeta.eventId && String(_lrTm.eventId) === String(fixtureMeta.eventId) ? _lrTm : null });
+    } catch (_lrErr) { engineDebug("learner apply failed", { error: _lrErr?.message || String(_lrErr) }); }
 
     const paceIcon = ftCalc.pace > 100 ? "🔥" : "🧊";
 
