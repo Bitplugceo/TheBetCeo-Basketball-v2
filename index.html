@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -20106,6 +20107,22 @@ async function pushTrackerStateToServer(state, isExit = false) {
   renderTrackerAnalytics();
 
   try {
+    /* FIX T3: chunked server (v3) -> upload only the picks that differ from the server copy */
+    if (g_bbTk3Mode !== "legacy") {
+      if (!g_bbTk3Mode && !isExit) await bbTk3DetectMode();
+      if (g_bbTk3Mode === "v3") {
+        if (!g_bbTk3Cache && !isExit) await bbTk3FetchServerState(state);
+        const _t3 = await bbTk3PushDelta(state, isExit);
+        if (_t3) {
+          if (_t3.ok) {
+            g_trackerSaveFailureCount = 0;
+            bbSetTrackerSyncError(null);
+            g_trackerPersistedVersion = state.vId || g_trackerSaveVersion;
+          }
+          return _t3;
+        }
+      }
+    }
     let stateToPush = state;
 
     const rawSize = (() => {
@@ -20160,6 +20177,7 @@ async function pushTrackerStateToServer(state, isExit = false) {
     });
 
     if (!res.ok) {
+      if (res.status === 409) g_bbTk3Mode = null; /* FIX T3: server was upgraded to v3 — re-detect */
       trackerDebug("Cloudflare push rejected: " + res.status + " — local copy preserved");
       bbSetTrackerSyncError("server rejected the upload (HTTP " + res.status + ")"); /* FIX SY2 */
       return { ok: false };
@@ -20435,6 +20453,425 @@ async function fetchTrackerJson(url, options = {}, timeoutMs = TRACKER_NETWORK_T
     clearTimeout(timer);
   }
 }
+
+/* ===================== FIX T3: tracker v3 — chunked server copy + device chunk cache + delta uploads =====================
+   The server (Cloudflare KV) stays the master copy, split into small day-chunks plus a tiny manifest, so every request fits
+   the Workers Free-plan CPU limit. The app keeps a cache of all chunks in IndexedDB:
+   - new device / missing / corrupt cache -> one full download (manifest + chunk bundles), then cached;
+   - later opens -> state comes from the device instantly, then only the manifest is fetched and only chunks whose
+     revision changed are downloaded;
+   - uploads send only picks that differ from the server copy (delta), in small batches.
+   If the worker does not offer /v3 (old worker) or the user has not been migrated, everything falls back to the old
+   full-state sync unchanged. Uses `var` so the globals are usable from anywhere in the page without TDZ issues. */
+var BB_TK3_BASE = TRACKER_API_URL + "/v3";
+var BB_TK3_BUNDLE_BYTES = 256 * 1024;      // chunk GET bundle budget (keeps every worker request far below 10 ms CPU)
+var BB_TK3_SNAP_BUNDLE_BYTES = 400 * 1024;
+var BB_TK3_DELTA_BYTES = 60 * 1024;        // delta POST body budget
+var BB_TK3_DELTA_CHUNK_BYTES = 256 * 1024; // server-side chunk bytes one POST may touch
+var BB_TK3_DELTA_MAX_PICKS = 30;
+var BB_TK3_DELTA_MAX_DAYS = 2;
+var BB_TK3_IDS_PER_GET = 40;
+var g_bbTk3Mode = null;          // null = unknown, "v3", "legacy"
+var g_bbTk3Manifest = null;
+var g_bbTk3Cache = null;         // {user, manifestRev, lmRev, lm, chunks:{id:{rev, picks}}}
+var g_bbTk3ServerTomb = new Set();
+var g_bbTk3HashMemo = new Map(); // chunkId -> {rev, map: key -> {hash, hasSnap}}
+var g_bbTk3SnapLoading = null;
+var g_bbTk3Stats = { manifestFetches: 0, fullDownloads: 0, chunkRequests: 0, chunkIdsFetched: 0, deltaPosts: 0, picksPosted: 0,
+  snapRequests: 0, snapsAttached: 0, cacheLoaded: false, cacheCorrupt: false, seededFromCache: false, lastError: null };
+try { window.__bbTk3Stats = g_bbTk3Stats; } catch (_e) {}
+
+function bbTk3Day(p) {
+  const s = String((p && (p.createdAt || p.eventDate)) || "");
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10);
+  const t = Date.parse(s);
+  return isFinite(t) ? new Date(t).toISOString().slice(0, 10) : "0000-00-00";
+}
+function bbTk3IsSettled(p) { const st = String((p && p.resultStatus) || "").toLowerCase(); return st !== "" && st !== "pending"; }
+function bbTk3Key(p) { return p ? String(p.pickId || p.signature || "") : ""; }
+function bbTk3CacheKey(kind) { return "bb_tk3:" + getTrackerUserKey() + ":" + kind; }
+function bbTk3Stable(v) {
+  if (v === null || typeof v !== "object") return JSON.stringify(v === undefined ? null : v);
+  if (Array.isArray(v)) return "[" + v.map(bbTk3Stable).join(",") + "]";
+  const ks = Object.keys(v).filter((k) => v[k] !== undefined).sort();
+  return "{" + ks.map((k) => JSON.stringify(k) + ":" + bbTk3Stable(v[k])).join(",") + "}";
+}
+function bbTk3HashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); } return (h >>> 0).toString(36) + ":" + s.length; }
+// The upload form of a pick: no snapshot, no heavy diagnostics, no "_" server fields.
+function bbTk3LeanForUpload(p) {
+  const o = {};
+  for (const k in p) {
+    if (k === "snapshot" || k.charCodeAt(0) === 95) continue;
+    if (BB_TRACKER_HEAVY_FIELDS.indexOf(k) >= 0) continue;
+    o[k] = p[k];
+  }
+  return o;
+}
+function bbTk3PickHash(p) {
+  let q = p;
+  try { q = ensureTrackedPickKeys(p); } catch (_e) {}
+  return bbTk3HashStr(bbTk3Stable(bbTk3LeanForUpload(q)));
+}
+function bbTk3IsTomb(p) {
+  if (!g_bbTk3ServerTomb || !g_bbTk3ServerTomb.size || !p) return false;
+  return (p.pickId && g_bbTk3ServerTomb.has(String(p.pickId))) || (p.signature && g_bbTk3ServerTomb.has(String(p.signature)));
+}
+function bbTk3Budget(ids, sizeOf, maxBytes) {
+  const out = []; let cur = [], b = 0;
+  ids.forEach((id) => {
+    const s = sizeOf(id) || 0;
+    if (cur.length && (b + s > maxBytes || cur.length >= BB_TK3_IDS_PER_GET)) { out.push(cur); cur = []; b = 0; }
+    cur.push(id); b += s;
+  });
+  if (cur.length) out.push(cur);
+  return out;
+}
+
+// ---------- device cache (IndexedDB, same database as the tracker; never localStorage — too small) ----------
+async function bbTk3CacheRead() {
+  try {
+    const raw = await _bbIdbTx("readonly", (store) => store.get(bbTk3CacheKey("chunks")), 6000);
+    if (!raw) return null;
+    if (raw.v !== 1 || raw.user !== getTrackerUserKey() || !raw.chunks || typeof raw.chunks !== "object") throw new Error("cache header invalid");
+    const chunks = {};
+    for (const id in raw.chunks) {
+      const e = raw.chunks[id];
+      if (!e || typeof e.rev !== "number" || typeof e.text !== "string") throw new Error("cache entry invalid: " + id);
+      const picks = JSON.parse(e.text);
+      if (!Array.isArray(picks)) throw new Error("cache chunk not an array: " + id);
+      chunks[id] = { rev: e.rev, picks };
+    }
+    let lm = {};
+    try { lm = raw.lm ? JSON.parse(raw.lm) : {}; } catch (_l) { lm = {}; }
+    g_bbTk3Stats.cacheLoaded = true;
+    return { user: raw.user, manifestRev: raw.manifestRev || 0, lmRev: raw.lmRev || 0, lm, chunks };
+  } catch (err) {
+    g_bbTk3Stats.cacheCorrupt = true;
+    trackerDebug("tk3 cache unreadable/corrupt — full download", { error: String((err && err.message) || err) });
+    try { await _bbIdbTx("readwrite", (store) => { store.delete(bbTk3CacheKey("chunks")); return null; }, 6000); } catch (_d) {}
+    return null;
+  }
+}
+async function bbTk3CacheWrite(cache) {
+  try {
+    const chunks = {};
+    for (const id in cache.chunks) chunks[id] = { rev: cache.chunks[id].rev, text: JSON.stringify(cache.chunks[id].picks) };
+    const rec = { v: 1, user: cache.user, manifestRev: cache.manifestRev || 0, lmRev: cache.lmRev || 0, lm: JSON.stringify(cache.lm || {}), chunks, savedAt: new Date().toISOString() };
+    await _bbIdbTx("readwrite", (store) => { store.put(rec, bbTk3CacheKey("chunks")); return null; }, 8000);
+    return true;
+  } catch (err) {
+    trackerDebug("tk3 cache write failed (next open will re-download)", { error: String((err && err.message) || err) });
+    return false;
+  }
+}
+async function bbTk3SnapCacheRead() {
+  try {
+    const raw = await _bbIdbTx("readonly", (store) => store.get(bbTk3CacheKey("snaps")), 6000);
+    return raw && raw.v === 1 && raw.days && typeof raw.days === "object" ? raw : { v: 1, days: {} };
+  } catch (_e) { return { v: 1, days: {} }; }
+}
+async function bbTk3SnapCacheWrite(rec) {
+  try { await _bbIdbTx("readwrite", (store) => { store.put(rec, bbTk3CacheKey("snaps")); return null; }, 8000); } catch (_e) {}
+}
+function bbTk3CachedStateFrom(cache) {
+  const act = [], arc = [];
+  for (const id in cache.chunks) {
+    const target = id.charAt(0) === "r" ? arc : act;
+    cache.chunks[id].picks.forEach((p) => { if (!bbTk3IsTomb(p) && !bbIsPermaDeletedPick(p)) target.push(p); });
+  }
+  return { activePicks: act, archivedPicks: arc };
+}
+
+// ---------- network ----------
+async function bbTk3GetManifest() {
+  g_bbTk3Stats.manifestFetches++;
+  const { res, data } = await fetchTrackerJson(BB_TK3_BASE + "/manifest", { method: "GET", mode: "cors", credentials: "omit", cache: "no-store", headers: getTrackerHeaders(false) });
+  if (!res.ok || !data || data.v !== 3 || data.notMigrated || typeof data.chunks !== "object") {
+    g_bbTk3Mode = "legacy";
+    return null;
+  }
+  g_bbTk3Mode = "v3";
+  g_bbTk3Manifest = data;
+  g_bbTk3ServerTomb = new Set(Array.isArray(data.tomb) ? data.tomb.map(String) : []);
+  return data;
+}
+async function bbTk3DetectMode() {
+  if (g_bbTk3Mode) return g_bbTk3Mode;
+  try { await bbTk3GetManifest(); } catch (_e) { return null; }
+  return g_bbTk3Mode;
+}
+async function bbTk3FetchChunks(ids, manifest) {
+  const got = {};
+  const bundles = bbTk3Budget(ids, (id) => (manifest.chunks[id] && manifest.chunks[id].b) || 1, BB_TK3_BUNDLE_BYTES);
+  for (const b of bundles) {
+    g_bbTk3Stats.chunkRequests++;
+    const { res, data } = await fetchTrackerJson(BB_TK3_BASE + "/chunks?ids=" + encodeURIComponent(b.join(",")), { method: "GET", mode: "cors", credentials: "omit", cache: "no-store", headers: getTrackerHeaders(false) });
+    if (!res.ok || !data || !data.chunks) throw new Error("chunk download failed (HTTP " + res.status + ")");
+    b.forEach((id) => { got[id] = Array.isArray(data.chunks[id]) ? data.chunks[id] : []; });
+    g_bbTk3Stats.chunkIdsFetched += b.length;
+  }
+  return got;
+}
+
+// Called by hydrateTrackedPicks instead of the old full-state GET. Returns null when v3 is not available (-> legacy GET).
+async function bbTk3FetchServerState(localState) {
+  const manifest = await bbTk3GetManifest();
+  if (!manifest) return null;
+  const user = getTrackerUserKey();
+  let cache = g_bbTk3Cache && g_bbTk3Cache.user === user ? g_bbTk3Cache : await bbTk3CacheRead();
+  if (!cache) { cache = { user, manifestRev: 0, lmRev: 0, lm: {}, chunks: {} }; g_bbTk3Stats.fullDownloads++; }
+  const ids = Object.keys(manifest.chunks || {});
+  const need = ids.filter((id) => !cache.chunks[id] || cache.chunks[id].rev !== manifest.chunks[id].rev);
+  const removed = Object.keys(cache.chunks).filter((id) => !manifest.chunks[id]);
+  let changed = removed.length > 0;
+  removed.forEach((id) => delete cache.chunks[id]);
+  if (need.length) {
+    const got = await bbTk3FetchChunks(need, manifest);
+    need.forEach((id) => { cache.chunks[id] = { rev: manifest.chunks[id].rev, picks: got[id] }; });
+    changed = true;
+  }
+  if ((manifest.lmRev || 0) !== (cache.lmRev || 0)) {
+    try {
+      const { res, data } = await fetchTrackerJson(BB_TK3_BASE + "/linememory", { method: "GET", mode: "cors", credentials: "omit", cache: "no-store", headers: getTrackerHeaders(false) });
+      if (res.ok && data && data.lineMemory && typeof data.lineMemory === "object") { cache.lm = data.lineMemory; cache.lmRev = manifest.lmRev || 0; changed = true; }
+    } catch (_lm) {}
+  }
+  if (cache.manifestRev !== manifest.rev) { cache.manifestRev = manifest.rev; changed = true; }
+  g_bbTk3Cache = cache;
+  if (changed) await bbTk3CacheWrite(cache);
+  const st = bbTk3CachedStateFrom(cache);
+  // keep this device's snapshots on the server copies (the server keeps them in separate packs)
+  const snapByKey = new Map();
+  [localState, AppState.tracker.state].forEach((s) => {
+    if (!s) return;
+    [...(s.activePicks || []), ...(s.archivedPicks || [])].forEach((p) => { if (p && p.snapshot) snapByKey.set(bbTk3Key(p), p.snapshot); });
+  });
+  const withSnap = (p) => { const s = snapByKey.get(bbTk3Key(p)); return s ? { ...p, snapshot: s } : p; };
+  const ms = manifest.stats || {};
+  const serverState = {
+    activePicks: st.activePicks.map(withSnap),
+    archivedPicks: st.archivedPicks.map(withSnap),
+    stats: { total: ms.total || 0, settled: ms.settled || 0, wins: ms.wins || 0, losses: ms.losses || 0, pushes: ms.pushes || 0 },
+    updatedAt: manifest.updatedAt || null,
+    lineMemory: cache.lm || {},
+  };
+  setTimeout(() => { bbTk3LoadMissingSnapshots().catch(() => {}); }, 0);
+  return { res: { ok: true, status: 200 }, data: { ok: true, state: serverState } };
+}
+
+// Instant start: when the device has no saved tracker state but does have the chunk cache, show the cached copy at once.
+async function bbTk3SeedFromCacheIfEmpty(localState) {
+  try {
+    const empty = !localState || ((localState.activePicks || []).length === 0 && (localState.archivedPicks || []).length === 0);
+    if (!empty) return localState;
+    const cache = await bbTk3CacheRead();
+    if (!cache || !Object.keys(cache.chunks).length) return localState;
+    g_bbTk3Cache = cache;
+    g_bbTk3Stats.seededFromCache = true;
+    const st = bbTk3CachedStateFrom(cache);
+    return { ...(localState || createEmptyTrackerState()), activePicks: st.activePicks, archivedPicks: st.archivedPicks, lineMemory: cache.lm || {} };
+  } catch (_e) {
+    return localState;
+  }
+}
+
+// Snapshots are loaded on demand, in the background, only for picks that do not have one on this device.
+async function bbTk3LoadMissingSnapshots() {
+  if (g_bbTk3SnapLoading) return g_bbTk3SnapLoading;
+  g_bbTk3SnapLoading = (async () => {
+    const m = g_bbTk3Manifest;
+    if (!m || !m.snaps) return 0;
+    const st = AppState.tracker.state || {};
+    const all = [...(st.activePicks || []), ...(st.archivedPicks || [])];
+    const missing = all.filter((p) => p && !p.snapshot && p._hasSnap);
+    if (!missing.length) return 0;
+    const days = [...new Set(missing.map(bbTk3Day))].filter((d) => m.snaps[d]);
+    const cacheRec = await bbTk3SnapCacheRead();
+    const packs = {};
+    const toFetch = [];
+    days.forEach((d) => {
+      const c = cacheRec.days[d];
+      if (c && c.rev === m.snaps[d].rev && typeof c.text === "string") {
+        try { packs[d] = JSON.parse(c.text); return; } catch (_p) {}
+      }
+      toFetch.push(d);
+    });
+    let cacheDirty = false;
+    for (const b of bbTk3Budget(toFetch, (d) => m.snaps[d].b, BB_TK3_SNAP_BUNDLE_BYTES)) {
+      g_bbTk3Stats.snapRequests++;
+      const { res, data } = await fetchTrackerJson(BB_TK3_BASE + "/snaps?days=" + encodeURIComponent(b.join(",")), { method: "GET", mode: "cors", credentials: "omit", cache: "no-store", headers: getTrackerHeaders(false) });
+      if (!res.ok || !data || !data.snaps) break;
+      b.forEach((d) => { packs[d] = data.snaps[d] || {}; cacheRec.days[d] = { rev: m.snaps[d].rev, text: JSON.stringify(packs[d]) }; cacheDirty = true; });
+    }
+    if (cacheDirty) await bbTk3SnapCacheWrite(cacheRec);
+    let n = 0;
+    const live = AppState.tracker.state || {};
+    [...(live.activePicks || []), ...(live.archivedPicks || [])].forEach((p) => {
+      if (!p || p.snapshot || !p._hasSnap) return;
+      const pk = packs[bbTk3Day(p)];
+      const s = pk && pk[bbTk3Key(p)];
+      if (s) { p.snapshot = s; n++; }
+    });
+    g_bbTk3Stats.snapsAttached += n;
+    if (n) { try { await saveTrackerStateToLocal(); } catch (_s) {} }
+    return n;
+  })();
+  try { return await g_bbTk3SnapLoading; } finally { g_bbTk3SnapLoading = null; }
+}
+
+// ---------- uploads (delta) ----------
+function bbTk3DeleteQueueKey() { return "bb_tk3_delq:" + getTrackerUserKey(); }
+function bbTk3ReadDeleteQueue() { try { const q = JSON.parse(localStorage.getItem(bbTk3DeleteQueueKey()) || "[]"); return Array.isArray(q) ? q : []; } catch (_e) { return []; } }
+function bbTk3WriteDeleteQueue(q) { try { localStorage.setItem(bbTk3DeleteQueueKey(), JSON.stringify(q.slice(-500))); } catch (_e) {} }
+function bbTk3QueueDelete(pick, keys) {
+  try {
+    if (pick && bbIsPermaDeletedPick(pick)) return; // DL1: never upload markers for the removed test picks
+    const day = pick ? bbTk3Day(pick) : null;
+    const want = pick ? [pick.pickId, pick.signature] : keys || [];
+    const q = bbTk3ReadDeleteQueue();
+    want.filter(Boolean).map(String).forEach((k) => {
+      if (BB_PERMA_DELETED_PICK_IDS.has(k)) return;
+      if (!q.some((e) => e.key === k)) q.push(day ? { key: k, day } : { key: k });
+    });
+    bbTk3WriteDeleteQueue(q);
+  } catch (_e) {}
+}
+function bbTk3ServerIndex() {
+  const idx = new Map();
+  const cache = g_bbTk3Cache;
+  if (!cache) return idx;
+  for (const id in cache.chunks) {
+    const c = cache.chunks[id];
+    let memo = g_bbTk3HashMemo.get(id);
+    if (!memo || memo.rev !== c.rev || memo.n !== c.picks.length) {
+      const map = new Map();
+      c.picks.forEach((p) => map.set(bbTk3Key(p), { hash: bbTk3PickHash(p), hasSnap: !!p._hasSnap, chunk: id }));
+      memo = { rev: c.rev, n: c.picks.length, map };
+      g_bbTk3HashMemo.set(id, memo);
+    }
+    memo.map.forEach((v, k) => idx.set(k, v));
+  }
+  return idx;
+}
+// Mirror of the worker merge so the cache can be updated locally after an accepted upload (no re-download).
+function bbTk3ApplyAccepted(cache, lean, hadSnap) {
+  const key = bbTk3Key(lean);
+  const day = bbTk3Day(lean);
+  ["a:" + day, "r:" + day].forEach((id) => {
+    const c = cache.chunks[id];
+    if (c) c.picks = c.picks.filter((p) => bbTk3Key(p) !== key);
+  });
+  const id = (bbTk3IsSettled(lean) ? "r:" : "a:") + day;
+  if (!cache.chunks[id]) cache.chunks[id] = { rev: 0, picks: [] };
+  cache.chunks[id].picks.push(hadSnap ? { ...lean, _hasSnap: true } : lean);
+}
+
+async function bbTk3PushDelta(state, isExit) {
+  if (g_bbTk3Mode !== "v3" || !g_bbTk3Cache || !g_bbTk3Manifest) return null;
+  const cache = g_bbTk3Cache;
+  const idx = bbTk3ServerIndex();
+  const deletedList = Array.isArray(state.deletedSignatures) ? state.deletedSignatures : [];
+  const items = [];
+  [...(state.activePicks || []), ...(state.archivedPicks || [])].forEach((p) => {
+    if (!p || bbIsPermaDeletedPick(p) || bbTk3IsTomb(p) || isPickDeleted(p, deletedList)) return;
+    const key = bbTk3Key(p);
+    if (!key) return;
+    const lean = bbTk3LeanForUpload(p);
+    const srv = idx.get(key);
+    const hash = bbTk3PickHash(p);
+    if (srv && srv.hash === hash) return;
+    const sendSnap = !isExit && !!p.snapshot && !(srv && srv.hasSnap);
+    const body = sendSnap ? { ...lean, snapshot: p.snapshot } : lean;
+    let size = JSON.stringify(body).length;
+    let payload = body;
+    if (size > 140 * 1024) { payload = lean; size = JSON.stringify(lean).length; }
+    items.push({ key, day: bbTk3Day(p), lean, payload, size, snap: payload !== lean });
+  });
+  // FIX SY4-style: never upload a stale pending copy over a settled server copy (the server would refuse it anyway)
+  const deletes = bbTk3ReadDeleteQueue().filter((d) => d && d.key && !BB_PERMA_DELETED_PICK_IDS.has(String(d.key)));
+  if (!items.length && !deletes.length) return { ok: true, delta: 0 };
+  items.sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : 0));
+  const chunkBytes = (day) => ["a:" + day, "r:" + day].reduce((s, id) => s + ((g_bbTk3Manifest.chunks[id] && g_bbTk3Manifest.chunks[id].b) || 0), 0);
+  const batches = [];
+  let cur = null;
+  const limit = isExit ? 58 * 1024 : BB_TK3_DELTA_BYTES;
+  items.forEach((it) => {
+    const newDay = cur && !cur.days.has(it.day);
+    if (!cur || cur.picks.length >= BB_TK3_DELTA_MAX_PICKS || (cur.picks.length && cur.bytes + it.size > limit) ||
+        (newDay && (cur.days.size >= BB_TK3_DELTA_MAX_DAYS || cur.cbytes + chunkBytes(it.day) > BB_TK3_DELTA_CHUNK_BYTES))) {
+      cur = { picks: [], days: new Set(), bytes: 200, cbytes: 0 };
+      batches.push(cur);
+    }
+    if (!cur.days.has(it.day)) { cur.days.add(it.day); cur.cbytes += chunkBytes(it.day); }
+    cur.picks.push(it);
+    cur.bytes += it.size + 1;
+  });
+  if (!batches.length) batches.push({ picks: [], days: new Set(), bytes: 0, cbytes: 0 });
+  // deletes ride on the first batch (at most 2 days of chunk purges per request; the rest are tombstoned only)
+  const delDays = new Set();
+  const firstDeletes = deletes.map((d) => {
+    if (d.day && (delDays.has(d.day) || delDays.size < BB_TK3_DELTA_MAX_DAYS - batches[0].days.size)) { delDays.add(d.day); return d; }
+    return { key: d.key };
+  });
+  const runBatches = isExit ? batches.slice(0, 1) : batches;
+  const refetch = new Set();
+  for (let bi = 0; bi < runBatches.length; bi++) {
+    const b = runBatches[bi];
+    const body = { picks: b.picks.map((it) => it.payload) };
+    if (bi === 0 && firstDeletes.length) body.deletes = firstDeletes;
+    if (bi === 0 && !isExit && state.lineMemory && Object.keys(state.lineMemory).length &&
+        bbTk3Stable(state.lineMemory) !== bbTk3Stable(cache.lm || {})) {
+      if (JSON.stringify(state.lineMemory).length < 40 * 1024) body.lineMemory = state.lineMemory;
+    }
+    if (bi > 0) await new Promise((r) => setTimeout(r, 1100)); // KV: ~1 write/second per key (manifest)
+    g_bbTk3Stats.deltaPosts++;
+    g_bbTk3Stats.picksPosted += body.picks.length;
+    const { res, data } = await fetchTrackerJson(BB_TK3_BASE + "/delta", { method: "POST", body: JSON.stringify(body), headers: getTrackerHeaders(true), keepalive: !!isExit });
+    if (res.status === 409 && data && data.error === "not_migrated") { g_bbTk3Mode = "legacy"; return null; }
+    if (!res.ok || !data || !data.ok) {
+      g_bbTk3Stats.lastError = "HTTP " + res.status + " " + ((data && data.error) || "");
+      bbSetTrackerSyncError("server rejected the upload (HTTP " + res.status + ")");
+      return { ok: false };
+    }
+    const keptSet = new Set(data.kept || []);
+    const prevRevs = {};
+    Object.keys(data.chunks || {}).forEach((id) => { prevRevs[id] = cache.chunks[id] ? cache.chunks[id].rev : 0; });
+    b.picks.forEach((it) => { if (!keptSet.has(it.key)) bbTk3ApplyAccepted(cache, it.lean, it.snap || (idx.get(it.key) && idx.get(it.key).hasSnap)); });
+    if (body.deletes) {
+      const dk = new Set(body.deletes.map((d) => String(d.key)));
+      for (const id in cache.chunks) cache.chunks[id].picks = cache.chunks[id].picks.filter((p) => !dk.has(String(p.pickId)) && !dk.has(String(p.signature)));
+      bbTk3WriteDeleteQueue(bbTk3ReadDeleteQueue().filter((d) => !dk.has(String(d.key))));
+    }
+    // revision bookkeeping: if the server revision moved by exactly one, our local replica is exact; otherwise
+    // another device wrote the same chunk in between -> re-download that chunk
+    Object.entries(data.chunks || {}).forEach(([id, rev]) => {
+      if ((prevRevs[id] || 0) + 1 === rev) { if (cache.chunks[id]) cache.chunks[id].rev = rev; }
+      else refetch.add(id);
+    });
+    keptSet.forEach((k) => { const s = idx.get(k); if (s) refetch.add(s.chunk); });
+    for (const id in cache.chunks) if (!cache.chunks[id].picks.length && !(data.manifest && data.manifest.chunks && data.manifest.chunks[id])) delete cache.chunks[id];
+    if (data.manifest && data.manifest.v === 3) {
+      g_bbTk3Manifest = data.manifest;
+      g_bbTk3ServerTomb = new Set((data.manifest.tomb || []).map(String));
+      cache.manifestRev = data.manifest.rev;
+      if (body.lineMemory) { cache.lm = { ...(cache.lm || {}), ...body.lineMemory }; cache.lmRev = data.manifest.lmRev || cache.lmRev; }
+    }
+  }
+  const m = g_bbTk3Manifest;
+  const ids = [...refetch].filter((id) => m.chunks[id]);
+  [...refetch].filter((id) => !m.chunks[id]).forEach((id) => delete cache.chunks[id]);
+  if (ids.length && !isExit) {
+    try {
+      const got = await bbTk3FetchChunks(ids, m);
+      ids.forEach((id) => { cache.chunks[id] = { rev: m.chunks[id].rev, picks: got[id] }; });
+    } catch (_rf) { ids.forEach((id) => { if (cache.chunks[id]) cache.chunks[id].rev = -1; }); }
+  } else if (ids.length) {
+    ids.forEach((id) => { if (cache.chunks[id]) cache.chunks[id].rev = -1; }); // re-download on next open
+  }
+  await bbTk3CacheWrite(cache);
+  return { ok: true, delta: items.length };
+}
+/* ===================== end FIX T3 ===================== */
 
 window.primeTrackerStateForRun = async function primeTrackerStateForRun() {
   let localState = await loadTrackerStateFromLocal();
@@ -20884,6 +21321,7 @@ async function hydrateTrackedPicks(force = false) {
       engineDebug("hydrate: live/disk merge failed", { error: _mergeLiveErr?.message || String(_mergeLiveErr) });
     }
 
+    localState = await bbTk3SeedFromCacheIfEmpty(localState); /* FIX T3: instant start from the device chunk cache */
     const hadLocalState =
       !!localState &&
       ((Array.isArray(localState.activePicks) && localState.activePicks.length > 0) ||
@@ -20902,13 +21340,21 @@ async function hydrateTrackedPicks(force = false) {
     }
 
     try {
-      const { res, data } = await fetchTrackerJson(TRACKER_API_URL, {
+      /* FIX T3: v3 = manifest + only the changed chunks (device cache); falls back to the old full GET */
+      let _t3 = null;
+      try {
+        _t3 = await bbTk3FetchServerState(localState);
+      } catch (_t3e) {
+        trackerDebug("tk3 sync failed — using local state", { error: String((_t3e && _t3e.message) || _t3e) });
+        _t3 = { res: { ok: false, status: 0 }, data: null };
+      }
+      const { res, data } = _t3 || (await fetchTrackerJson(TRACKER_API_URL, {
         method: "GET",
         mode: "cors",
         credentials: "omit",
         cache: "no-store",
         headers: getTrackerHeaders(false),
-      });
+      }));
 
       if (!res.ok) {
         trackerDebug("Server unavailable — using local state", { status: res.status });
@@ -21225,6 +21671,7 @@ function lockDeletedPickKeys(keys) {
 function isPickDeleted(pick, deletedList = []) {
   if (!pick) return false;
   if (bbIsPermaDeletedPick(pick)) return true; /* FIX DL1 */
+  if (typeof bbTk3IsTomb === "function" && bbTk3IsTomb(pick)) return true; /* FIX T3: server tombstones */
   const deletedSet = new Set(
     [...(deletedList || []), ...(g_deletedSigLock ? [...g_deletedSigLock] : [])].filter(Boolean),
   );
@@ -24858,6 +25305,7 @@ function applyTrackedPickDeletion(signature) {
   }
   const keys = collectTrackedPickKeys(pick, signature);
   lockDeletedPickKeys(keys);
+  bbTk3QueueDelete(pick, keys); /* FIX T3: server-side tombstone on the next delta upload */
   const deleted = AppState.tracker.state.deletedSignatures || [];
   AppState.tracker.state.activePicks = (AppState.tracker.state.activePicks || []).filter(
     (p) => !isPickDeleted(p, deleted),
