@@ -1,8 +1,9 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
                        
-  <meta name="generator" content="bb-engine-h2h-same-competition-20261003" />
+  <meta name="generator" content="bb-engine-h2h-season-type-20261003" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -19377,19 +19378,13 @@ function filterSeriesForCurrentCompetition(series, contextRoot = null) {
   if (!tags || tags.length !== series.length) return series.slice();
   const current = getCurrentCompetitionIdentity((contextRoot || {}).league || "", contextRoot);
   if (current.competitionId == null && current.seasonType == null && !current.competitionName) return series.slice(); /* BB-FIX2: current competition unknown, cannot classify games */
-  const match = (t) => {
-    if (!t) return false;
-    if (current.competitionId && t.competitionId) return String(t.competitionId) === current.competitionId;
-    if (current.seasonType != null && t.seasonType != null) return Number(t.seasonType) === Number(current.seasonType);
-    if (current.competitionName && t.competitionName) return String(t.competitionName).trim().toLowerCase() === current.competitionName;
-    return false;
-  };
+  const match = (t) => sameCompetitionTag(current, t);
   const same = series.filter((_, i) => match(tags[i]));
-  if (same.length >= 3) return same.slice(0, 10);
-  const out = series.slice(0, 10);
-  out.__bbWeights = out.map((_, i) => match(tags[i]) ? 1 : 0.5);
-  out.__bbMixedCompetition = same.length < 3; /* BB-FIX2: includes 0 same-competition games (pure fallback) */
-  out.__bbSameCompetitionCount = same.length;
+  if (same.length < 2) return [];
+  const out = same.slice(0, 10);
+  out.__bbWeights = out.map(() => 1);
+  out.__bbMixedCompetition = false;
+  out.__bbSameCompetitionCount = out.length;
   return out;
 }
 
@@ -27923,6 +27918,14 @@ function bbCompetitionClass(g) {
   if (/euroleague|eurocup|champions league|fiba|basketball champions|europe/.test(name)) return "european";
   return "domestic";
 }
+function sameCompetitionTag(current, g) {
+  if (!current || !g) return false;
+  /* ESPN comp.id is the event id, not a tournament id. Never match on it. */
+  if (current.seasonType != null && g.seasonType != null && g.seasonType !== "") return Number(g.seasonType) === Number(current.seasonType);
+  const name = String(g.competitionName || g.competition || "").trim().toLowerCase();
+  if (current.competitionName && name) return name === current.competitionName;
+  return false;
+}
 function h2hCompetitionKey(game) {
   if (!game) return "?";
   if (game.competitionId != null && String(game.competitionId) !== "") return "id:" + String(game.competitionId);
@@ -27986,22 +27989,20 @@ function selectAutoH2HWindow(games, league, contextRoot = null) {
   /* Competition-aware H2H: current competition first; if <3 same-competition games exist,
      retain other competitions at provisional 0.5 influence. */
   const _currentComp = getCurrentCompetitionIdentity(lk, contextRoot);
-  const _sameCurrent = (g) => {
-    const k = h2hCompetitionKey(g);
-    if (_currentComp.competitionId && g?.competitionId != null) return String(g.competitionId) === _currentComp.competitionId;
-    if (_currentComp.seasonType != null && g?.seasonType != null) return Number(g.seasonType) === Number(_currentComp.seasonType);
-    if (_currentComp.competitionName && (g?.competitionName || g?.competition)) {
-      return String(g.competitionName || g.competition).trim().toLowerCase() === _currentComp.competitionName;
-    }
-    return _currentComp.league ? k.includes(_currentComp.league) : false;
-  };
+  const _sameCurrent = (g) => sameCompetitionTag(_currentComp, g);
+  try {
+    if (typeof engineDebug === "function") engineDebug("H2H competition check", {
+      current: _currentComp,
+      games: pool.slice(0, 8).map((g) => ({ id: g?.id || g?.eventId || null, competitionId: g?.competitionId || null, seasonType: g?.seasonType ?? null, competitionName: g?.competitionName || g?.competition || null, same: _sameCurrent(g) })),
+    });
+  } catch (_h2hLog) {}
   const _samePool = pool.filter(_sameCurrent);
   const _sameNPool = _samePool.length;
   let _bbMixed = false;
   let _bbSame = 0;
   let _bbOther = 0;
   let _bbDominantType = _currentComp.seasonType != null ? String(_currentComp.seasonType) : (_currentComp.competitionName || _currentComp.competitionId || lk || "?");
-  picked = _samePool.slice(0, Math.max(0, chosen));
+  picked = _samePool.length >= 2 ? _samePool.slice(0, Math.max(0, chosen)) : [];
   _bbSame = picked.length;
   _bbOther = 0;
   _bbMixed = false;
@@ -31503,7 +31504,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
           oppId: String(opp?.team?.id || ""),
           seasonType: bbStrictFinite(ev?.seasonType?.type ?? ev?.season?.type ?? comp?.season?.type)
             ? Number(ev?.seasonType?.type ?? ev?.season?.type ?? comp?.season?.type) : null,
-          competitionId: String(comp?.id || ev?.league?.id || ev?.competition?.id || ""),
+          competitionId: String(ev?.league?.id || ""),
           competitionName: String(ev?.league?.name || ev?.league?.abbreviation || comp?.type?.text || ""),
         });
       }
