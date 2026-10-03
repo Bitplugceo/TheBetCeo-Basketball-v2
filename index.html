@@ -14174,22 +14174,22 @@ async function readAsyncStorage(key) {
   }
 }
 
-async function writeAsyncStorage(key, value) {
-  if (typeof value === "string" && value.length > 4500000 && value.includes('"archivedPicks"')) {
-    try {
-      let parsed = JSON.parse(value);
-      if (parsed.archivedPicks && parsed.archivedPicks.length > 150) {
-        console.warn("[BB Engine] Pre-emptive Quota Rescue: Slicing archive to 150.");
-        parsed.archivedPicks = parsed.archivedPicks.slice(0, 150);
-        value = JSON.stringify(parsed);
-        if (typeof g_trackerState !== "undefined" && g_trackerState) {
-          g_trackerState.archivedPicks = parsed.archivedPicks;
-        }
-      }
-    } catch (e) {
-      engineDebug("Tracker archive prune/parse failed", { error: e?.message || String(e) });
-    }
+/* FIX SY7: lean copy for the size-limited localStorage fallback — drops heavy diagnostics, never picks */
+const BB_TRACKER_HEAVY_FIELDS = ["diagnostics", "fatigueDiagnostics", "fatigueDiag", "advancedStatsDiagnostic", "volatilityDiagnostic",
+  "engineABSnapshot", "integrityDecisionPath", "calibrationProvenance", "marketIntegrity", "quarterFormAgreement"];
+function bbLeanTrackerJson(value, dropSnapshots) {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : JSON.parse(JSON.stringify(value));
+    const lean = (p) => { if (!p || typeof p !== "object") return p; const o = { ...p }; BB_TRACKER_HEAVY_FIELDS.forEach((k) => delete o[k]); if (dropSnapshots) delete o.snapshot; return o; };
+    if (Array.isArray(parsed.activePicks)) parsed.activePicks = parsed.activePicks.map(lean);
+    if (Array.isArray(parsed.archivedPicks)) parsed.archivedPicks = parsed.archivedPicks.map(lean);
+    if (dropSnapshots) parsed.lineMemory = {};
+    return JSON.stringify(parsed);
+  } catch (_e) {
+    return null;
   }
+}
+async function writeAsyncStorage(key, value) {
 
   try {
     await _bbIdbTx(
@@ -14203,7 +14203,8 @@ async function writeAsyncStorage(key, value) {
     return true;
   } catch (err) {
     try {
-      const serialized = typeof value === "string" ? value : JSON.stringify(value);
+      let serialized = typeof value === "string" ? value : JSON.stringify(value);
+      if (serialized.length > 4500000 && serialized.includes('"archivedPicks"')) serialized = bbLeanTrackerJson(serialized, false) || serialized; /* FIX SY7 */
       localStorage.setItem(key, serialized);
       console.warn(
         "[BB Engine] writeAsyncStorage: IndexedDB unavailable, using localStorage fallback.",
@@ -14232,13 +14233,10 @@ async function writeAsyncStorage(key, value) {
         value.includes('"archivedPicks"')
       ) {
         try {
-          let parsed = JSON.parse(value);
-          if (parsed.archivedPicks && parsed.archivedPicks.length > 100) {
-            parsed.archivedPicks = parsed.archivedPicks.slice(0, 100);
-            localStorage.setItem(key, JSON.stringify(parsed));
-            if (typeof g_trackerState !== "undefined" && g_trackerState) {
-              g_trackerState.archivedPicks = parsed.archivedPicks;
-            }
+          /* FIX SY7: shrink the stored copy (no snapshots / line memory) — the live state and the server keep everything */
+          const leanest = bbLeanTrackerJson(value, true);
+          if (leanest) {
+            localStorage.setItem(key, leanest);
             return true;
           }
         } catch (rescueErr) {
@@ -15249,6 +15247,82 @@ let g_trackerServerArchiveStripped = false; // true once a size-reduced push (no
 let g_trackerFollowupTimer = null;
 let g_trackerSaveTimer = null;
 let g_deletedSigLock = new Set();
+/* FIX DL1: test picks permanently removed from the tracker on 2026-10-03 (Harness/Verify/Audit/Repro and the
+   Lakers-Celtics / Duke-Kansas 08-30 test entries). Blocked by pickId on load, merge and push so an old local copy
+   can never resurrect them. Deliberately kept out of deletedSignatures so no markers are uploaded. */
+const BB_PERMA_DELETED_PICK_IDS = new Set([
+  "401857191|2026-09-17T17:54:50.091Z|nba|verify home|verify away|q1|54.5|OVER",
+  "401857191|2026-09-17T16:54:31.943Z|nba|verify home|verify away|q1|54.5|OVER",
+  "401857191|2026-09-17T15:54:11.711Z|nba|verify home|verify away|q1|54.5|OVER",
+  "d62caba2-1113-4925-8ae2-14b46a29008e",
+  "89605dbf-785a-4485-8ea1-26c71f151962",
+  "674343d8-1d98-4519-b0bf-6b22c275a62f",
+  "c75cf6e4-973c-4b28-a1fc-cee17aee142f",
+  "86b46a0b-2a5f-4919-b093-b5706117b374",
+  "9bbc3187-e757-4f44-a255-7118ee9edaca",
+  "3de9058b-9114-4753-ae4a-0cc07fad43ca",
+  "9bc64054-eaf9-426f-869b-6a91df3fd0d3",
+  "c2a6c631-7bf1-437a-89cb-d04fadb8fbcb",
+  "e3076e5c-8a34-4215-afa6-68370854134f",
+  "eae9de9c-3ad1-4ce8-9341-e426dff851b2",
+  "4f1b2f4e-2239-4e5a-8326-f6509d681f62",
+  "282d6a56-ed5b-4667-abfc-1cc8c100a1e1",
+  "946f67e5-33fe-4db6-9159-ebe745b469fe",
+  "665c8cd4-79d6-40b6-bd6d-687759d94a11",
+  "a34bdd44-9198-4155-8a8d-6ffa65ebbb8a",
+  "fb6664fe-ae55-4530-91bc-5456fced13d3",
+  "e7dc330f-1ae6-4033-bde0-6f8c7251c854",
+  "7f55bef1-53ad-4310-a170-50cb3d3611c9",
+  "17d4eb37-a949-4c9e-9664-8578631d91f2",
+  "259114e2-2883-4316-98cf-3802d705a7ac",
+  "0d9491d8-d167-4a0f-98e0-a1a4ed60efab",
+  "4f612f1b-ab7c-4bab-bec3-af1682c2f341",
+  "7430f39d-46ce-437e-831c-60cfe738a21d",
+  "e52bf34c-7719-40f1-806e-3b220fc2f4a3",
+  "dca62ad9-69bb-4e6b-a924-7945186a9add",
+  "e9702fe4-70ae-446a-a2c4-3afcbf4fd74e",
+  "49268084-146c-4c7c-b390-d2ad12c113fd",
+  "8b48a378-fcbb-46a7-b26c-6226f0552569",
+  "339f2cb6-e5e4-4700-8b3a-d5c187acbc92",
+  "9fdb38b7-dcf4-485e-b2c2-545dc9b076e1",
+  "92d206bf-c543-496e-aa08-81480bc81688",
+  "4cce0421-7938-4bb1-872c-e039ef44d845",
+  "529de8c6-eeb2-454e-a994-b5d86f99397a",
+  "b70ebe00-4e1f-4e98-8017-3e7ae98f1b82",
+  "e4688637-45cc-42b5-98c7-283a5c75703a",
+  "c9a8f3be-dae2-40fa-841b-36312efc81c2",
+  "7ceef5c0-b277-4ff4-a248-423fe1ea5b91",
+  "769a1d17-1bf1-41db-832e-74314e350e7d",
+  "23b455a0-0ee9-4853-aea3-e1f69287f278",
+  "83ff935b-1343-461b-bbdf-cc491ff94931",
+  "9fc7e46e-7ae2-4d96-9f8d-70d3ac7bdea2",
+  "a589967a-b967-4db0-ba11-df8659db5e1f",
+  "506a1a61-5671-4fe3-9865-288651393192",
+  "4a8fd4fd-44cb-476e-8429-c90e73d08022",
+  "4a216c4c-29c4-42f6-b5d8-3d73e26348a0",
+  "e380e565-9c06-498a-9db8-1eadd375e918",
+  "47771603-d57f-4eab-8371-a7328223676c",
+  "8c2af8e0-72d7-4b9d-b71a-8f2f36a42250",
+  "5375e3a4-7cd9-4f95-9bd3-dc408e6d6172",
+  "1f1833b7-bc2b-4cc4-b022-00ce9661ceb0",
+  "f0ab3258-57ca-47a5-8549-d6e91a1d23e8",
+  "690591a1-7441-4931-96ba-2b01415f6fcc",
+  "50062836-950c-4ddc-a0e3-60af83dd1e61",
+  "77c21b0d-89b3-409d-add4-b8d1966a3e03",
+  "e3a5085c-e2ec-46e8-8b4f-1c17b90f52d4",
+  "0737570a-58ac-4b04-a0ce-4af971f19305",
+  "c90771b3-357e-4953-ad82-9e8f86fa5e05",
+  "ba690efc-d435-4097-beee-d48402fabd8a",
+  "de4c21d1-230d-4bc8-8a07-c5cd65479247",
+  "b5ce5a5b-f2bc-4e10-8c8e-c20d267fe9f8",
+  "dc856f45-0373-4da1-a432-ac0e5fcf3808",
+  "79ef20af-8e61-44ce-80a1-007498f6282a",
+  "repro|ft|OVER|163.5|actual170",
+  "repro|q3|UNDER|40.5|actual32"
+]);
+function bbIsPermaDeletedPick(p) {
+  return !!(p && p.pickId && BB_PERMA_DELETED_PICK_IDS.has(String(p.pickId)));
+}
 let g_trackerIgnoreBackdropUntil = 0;
 let g_trackerDeleteConfirmResolver = null;
 let g_trackerDeleteInFlight = false;
@@ -20058,6 +20132,16 @@ async function pushTrackerStateToServer(state, isExit = false) {
       g_trackerServerArchiveStripped = false;
     }
 
+    /* FIX DL1: never upload the permanently removed test picks (and never upload markers for them) */
+    stateToPush = {
+      ...stateToPush,
+      activePicks: (stateToPush.activePicks || []).filter((p) => !bbIsPermaDeletedPick(p)),
+      archivedPicks: (stateToPush.archivedPicks || []).filter((p) => !bbIsPermaDeletedPick(p)),
+      deletedSignatures: (Array.isArray(stateToPush.deletedSignatures) ? stateToPush.deletedSignatures : []).filter(
+        (k) => !BB_PERMA_DELETED_PICK_IDS.has(String(k)),
+      ),
+    };
+
     let payload;
     try {
       payload = JSON.stringify(stateToPush);
@@ -21140,6 +21224,7 @@ function lockDeletedPickKeys(keys) {
 
 function isPickDeleted(pick, deletedList = []) {
   if (!pick) return false;
+  if (bbIsPermaDeletedPick(pick)) return true; /* FIX DL1 */
   const deletedSet = new Set(
     [...(deletedList || []), ...(g_deletedSigLock ? [...g_deletedSigLock] : [])].filter(Boolean),
   );
