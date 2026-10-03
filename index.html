@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15009,7 +15008,8 @@ function finalizeDerivedBucket(bucket) {
 
   const rawWinRate = decisive ? Number(((wins / decisive) * 100).toFixed(2)) : null;
 
-  const _empiricalPrior = (() => {
+  const _rdMemo = g_bbRdPriorMemo; /* FIX RD5: once per build */
+  const _empiricalPrior = _rdMemo && _rdMemo.set ? _rdMemo.v : (() => {
     try {
       const _settled = getLearningTrackedPicks().filter(
         (p) => p.resultStatus === "win" || p.resultStatus === "loss",
@@ -15021,6 +15021,7 @@ function finalizeDerivedBucket(bucket) {
       return 50;
     }
   })();
+  if (_rdMemo && !_rdMemo.set) { _rdMemo.set = true; _rdMemo.v = _empiricalPrior; }
   const stabilizedWinRate = getStabilizedBucketWinRate(wins, losses, 12, _empiricalPrior);
   const reliabilityScore = getBucketReliabilityScore(decisive);
   const reliabilityTier = getBucketReliabilityTier(reliabilityScore);
@@ -15132,7 +15133,17 @@ function buildFallbackEnvironmentKey(pick) {
 }
 
                                                
+var g_bbRdPriorMemo = null; /* FIX RD5 */
 function buildTrackerDerivedStateFromPicks(inputPicks = []) {
+  const _rdPrev = g_bbRdPriorMemo;
+  g_bbRdPriorMemo = { set: false, v: 50 };
+  try {
+    return _bbRdBuildTrackerDerivedStateFromPicks(inputPicks);
+  } finally {
+    g_bbRdPriorMemo = _rdPrev;
+  }
+}
+function _bbRdBuildTrackerDerivedStateFromPicks(inputPicks = []) {
   const all = Array.isArray(inputPicks) ? inputPicks.map((p) => ensureTrackedPickKeys(p)) : [];
 
   const profileMap = new Map();
@@ -16158,6 +16169,19 @@ function acknowledgeGlobalEngineAlert() {
 let g_militaryRaidInFlight = false;
 const MILITARY_RAID_STAGE_TIMEOUT_MS = 15000;                                                                         
 
+/* FIX RD8: tiny concurrency limiter */
+function bbRdLimiter(max) {
+  let active = 0;
+  const queue = [];
+  const next = () => {
+    if (active >= max || !queue.length) return;
+    active++;
+    const { fn, resolve, reject } = queue.shift();
+    Promise.resolve().then(fn).then(resolve, reject).finally(() => { active--; next(); });
+  };
+  return (fn) => new Promise((resolve, reject) => { queue.push({ fn, resolve, reject }); next(); });
+}
+var BB_RD_FETCH_POOL = 8;
 function withRaidTimeout(promise, ms, label) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`"${label}" timed out after ${ms}ms`)), ms);
@@ -16330,9 +16354,9 @@ async function triggerTrackerMilitaryRaid() {
     errors: [],
   };
 
-  const runStage = async (label, fn) => {
+  const runStage = async (label, fn, timeoutMs) => {
     try {
-      await withRaidTimeout(fn(), MILITARY_RAID_STAGE_TIMEOUT_MS, label);
+      await withRaidTimeout(fn(), timeoutMs || MILITARY_RAID_STAGE_TIMEOUT_MS, label);
     } catch (err) {
       const errMsg = err?.message || String(err);
       report.errors.push({ stage: label, error: errMsg });
@@ -16356,6 +16380,9 @@ async function triggerTrackerMilitaryRaid() {
                                                                         
   // Zombie-key purge only touches storage keys other than the canonical one, so it is independent of
   // settlement. Result fetch + live-clock sync are independent network calls. Run all three at once.
+  g_bbRdSaveHold = { count: 0, picks: [] }; /* FIX RD10 */
+  let _rdHeld = null;
+  try {
   await Promise.all([
     runStage("purge zombie storage", async () => {
       const canonicalKey = getTrackerLocalStateStableKey();
@@ -16372,6 +16399,10 @@ async function triggerTrackerMilitaryRaid() {
       report.liveGamesSynced = g_liveGameStatus ? g_liveGameStatus.size : 0;
     }),
   ]);
+  } finally {
+    _rdHeld = g_bbRdSaveHold;
+    g_bbRdSaveHold = null;
+  }
 
                                                                               
                                      
@@ -16388,8 +16419,9 @@ async function triggerTrackerMilitaryRaid() {
 
                                                                      
   await runStage("force save (local + server)", async () => {
-    if (typeof forceTrackerSaveNow === "function") await forceTrackerSaveNow();
-  });
+    // FIX RD10: one save for everything settled above (coverage check over every collected pick)
+    if (typeof forceTrackerSaveNow === "function") await forceTrackerSaveNow(_rdHeld ? _rdHeld.picks : []);
+  }, 120000); // FIX RD11: every request inside has its own network timeout; this only guards against a hang
 
                                                                         
   await runStage("re-hydrate from server", async () => {
@@ -17640,7 +17672,26 @@ function _proxyFetchCacheEvictIfNeeded() {
     _proxyFetchCache.delete(entries[i][0]);
   }
 }
-async function proxyFetch(url, timeoutMs = 12000) {
+/* FIX RD1: share identical in-flight requests. The raid looked up 4 Euroleague events at once and each lookup downloaded the
+   same ~600-870 KB season feeds (4x E2026, 4x E2025, 4x + 4x api-live) and parsed them 4 times; KBL lists were fetched twice.
+   Now the first caller's request is shared by every caller asking for the same URL while it is in flight. */
+const _bbRdInflight = new Map();
+function proxyFetch(url, timeoutMs = 12000) {
+  const key = String(url == null ? "" : url);
+  const hit = key && _bbRdInflight.get(key);
+  if (hit) return hit;
+  const p = _bbRdProxyFetchNet(url, timeoutMs);
+  if (!key) return p;
+  _bbRdInflight.set(key, p);
+  const clear = () => { if (_bbRdInflight.get(key) === p) _bbRdInflight.delete(key); };
+  p.then(clear, clear);
+  return p;
+}
+/* FIX RD4: hosts whose direct (CORS) request failed with a network error while the Worker fallback worked (e.g. the KBL API)
+   skip the doomed direct attempt for 10 minutes. Timeouts/aborts never mark a host. */
+const _bbRdDirectBlocked = new Map();
+function bbRdDirectBlocked(host) { const t = _bbRdDirectBlocked.get(host); if (!t) return false; if (Date.now() - t > 10 * 60 * 1000) { _bbRdDirectBlocked.delete(host); return false; } return true; }
+async function _bbRdProxyFetchNet(url, timeoutMs = 12000) {
   if (url == null || url === "" || String(url).includes("/undefined") || String(url).includes("/null/")) {
     const err = new Error("proxyFetch blocked — invalid URL (undefined/null path segment)");
     engineDebug("proxyFetch blocked invalid URL", { request: String(url) });
@@ -17772,6 +17823,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
         }
       : undefined;
     try {
+      if (bbRdDirectBlocked(_host)) { const _sk = new TypeError("direct skipped (CORS-blocked earlier this session)"); _sk.bbRdSkip = true; throw _sk; } /* FIX RD4 */
       const directData = await fetchJson(url, _directLabel, _kblHeaders);
       if (String(url).includes("/summary?event=")) {
         trackerDebug("summary fetch ok via direct", {
@@ -17807,6 +17859,7 @@ async function proxyFetch(url, timeoutMs = 12000) {
           },
           workerTimeoutMs,
         );
+        try { if (directErr && directErr.name === "TypeError" && !directErr.bbRdSkip) _bbRdDirectBlocked.set(_host, Date.now()); } catch (_rd4) {} /* FIX RD4 */
         if (String(url).includes("/summary?event=")) {
           trackerDebug("summary fetch ok via worker", {
             event: String(url).split("event=")[1]?.split("&")[0] || "",
@@ -20123,6 +20176,10 @@ async function pushTrackerStateToServer(state, isExit = false) {
         }
       }
     }
+    /* FIX PH1: never send the legacy full-state upload as the exit push. Browsers refuse keepalive bodies over 64 KB
+       without contacting the server (iOS: "Load failed"), which left a permanent "offline" banner. The state is already
+       saved on the device; the next open / resume uploads the delta. */
+    if (isExit && g_bbTk3Mode !== "legacy") { g_bbSyncRetryNeeded = true; return { ok: false, skipped: true }; }
     let stateToPush = state;
 
     const rawSize = (() => {
@@ -20141,6 +20198,8 @@ async function pushTrackerStateToServer(state, isExit = false) {
     };
     if (isExit && rawSize > 60000) {
       stateToPush = { ...state, activePicks: (state.activePicks || []).map(_lean), archivedPicks: [], lineMemory: {} };
+      /* FIX PH1: still over the keepalive limit -> the browser would reject it; leave it for the next open */
+      try { if (JSON.stringify(stateToPush).length > 63000) { g_bbSyncRetryNeeded = true; return { ok: false, skipped: true }; } } catch (_phS) {}
       g_trackerServerArchiveStripped = (state.archivedPicks || []).length > 0;
     } else {
       stateToPush = rawSize > 60000
@@ -20210,7 +20269,10 @@ async function pushTrackerStateToServer(state, isExit = false) {
         error: err?.message || String(err),
       });
     }
+    /* FIX PH1: a failed best-effort exit push (page being hidden) is not an outage: no banner, retry on the next resume */
+    if (isExit) { g_bbSyncRetryNeeded = true; return { ok: false }; }
     bbSetTrackerSyncError(isNetworkError ? "offline / network error — will retry" : "upload failed: " + String(err?.message || err).slice(0, 80)); /* FIX SY2 */
+    if (isNetworkError) bbScheduleSyncRetry(); /* FIX PH1: actually retry */
     return { ok: false };
   } finally {
     g_trackerSaveInFlight = false;
@@ -20250,6 +20312,7 @@ async function _flushTrackerSaveUnsafe() {
 
                                                                                                     
 async function flushTrackerSave() {
+  if (g_bbRdSaveHold) { g_bbRdSaveHold.count++; return; } /* FIX RD10: the raid saves once when settling is done */
   const task = g_trackerFlushChain.then(() => _flushTrackerSaveUnsafe());
   g_trackerFlushChain = task.catch(() => {});
   return task;
@@ -20355,7 +20418,13 @@ function repairMissingTrackerCoverage(expectedPicks = []) {
   };
 }
 
+var g_bbRdSaveHold = null; /* FIX RD10: {count, picks} while a raid is settling */
 async function forceTrackerSaveNow(coveragePicks = []) {
+  if (g_bbRdSaveHold) {
+    g_bbRdSaveHold.count++;
+    if (Array.isArray(coveragePicks) && coveragePicks.length) g_bbRdSaveHold.picks.push(...coveragePicks);
+    return;
+  }
   clearTrackerFollowupRefresh();
 
   if (g_trackerSaveTimer) {
@@ -20656,6 +20725,7 @@ async function bbTk3FetchServerState(localState) {
     lineMemory: cache.lm || {},
   };
   setTimeout(() => { bbTk3LoadMissingSnapshots().catch(() => {}); }, 0);
+  try { bbSyncRetryIfNeeded(); } catch (_phR) {} /* FIX PH1: server reachable again -> clear the banner via a real upload */
   return { res: { ok: true, status: 200 }, data: { ok: true, state: serverState } };
 }
 
@@ -20815,6 +20885,7 @@ async function bbTk3PushDelta(state, isExit) {
   });
   const runBatches = isExit ? batches.slice(0, 1) : batches;
   const refetch = new Set();
+  let _rdLastPostAt = 0;
   for (let bi = 0; bi < runBatches.length; bi++) {
     const b = runBatches[bi];
     const body = { picks: b.picks.map((it) => it.payload) };
@@ -20823,7 +20894,8 @@ async function bbTk3PushDelta(state, isExit) {
         bbTk3Stable(state.lineMemory) !== bbTk3Stable(cache.lm || {})) {
       if (JSON.stringify(state.lineMemory).length < 40 * 1024) body.lineMemory = state.lineMemory;
     }
-    if (bi > 0) await new Promise((r) => setTimeout(r, 1100)); // KV: ~1 write/second per key (manifest)
+    if (bi > 0) { const _rdGap = 1100 - (Date.now() - _rdLastPostAt); if (_rdGap > 0) await new Promise((r) => setTimeout(r, _rdGap)); } // KV: ~1 write/second per key (manifest) — FIX RD9: gap from the previous POST's start
+    _rdLastPostAt = Date.now();
     g_bbTk3Stats.deltaPosts++;
     g_bbTk3Stats.picksPosted += body.picks.length;
     const { res, data } = await fetchTrackerJson(BB_TK3_BASE + "/delta", { method: "POST", body: JSON.stringify(body), headers: getTrackerHeaders(true), keepalive: !!isExit });
@@ -22278,11 +22350,30 @@ function renderTrackedPicks() {
                                                                                    
                                                                                       
                                                                            
-  const visiblePicks = Array.from(uniquePicksMap.values())
-    .filter(isTrackedPickVisibleOnPage)
-    .filter((p) => getAllowedMarketsForLeague(p && p.league).has(p && p.marketKey));
+  /* FIX PH2: every pending pick is listed, however old — taken from the same pool with the same pending test as the
+     header count, so the rows always match "N pending". Settled picks keep the page's recent window (full history is
+     in Record / Report). Rows use the live pick objects so settle/delete buttons act on the real pick. */
+  const _phPending = (p) => !bbTrackerPickOutcome(p) && ["", "pending"].includes(String(p?.resultStatus || "").toLowerCase());
+  const _phKey = (p) => (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(p)) || makeTrackedSignature(p);
+  const _phPendKeys = new Set(getCanonicalTrackedPicksPool().filter(_phPending).map(_phKey).filter(Boolean));
+  const _phLive = new Map();
+  [...active, ...archived].forEach((p) => {
+    if (!p) return;
+    const k = _phKey(ensureTrackedPickKeys(p));
+    if (!k || !_phPendKeys.has(k)) return;
+    const cur = _phLive.get(k);
+    if (!cur || (!_phPending(cur) && _phPending(p))) _phLive.set(k, p);
+  });
+  const _phPendingRows = [..._phLive.values()];
+  const visiblePicks = [
+    ..._phPendingRows,
+    ...Array.from(uniquePicksMap.values())
+      .filter((p) => !_phPending(p))
+      .filter(isTrackedPickVisibleOnPage)
+      .filter((p) => getAllowedMarketsForLeague(p && p.league).has(p && p.marketKey)),
+  ];
 
-  window.__trackerRenderLimit = window.__trackerRenderLimit || 50;
+  window.__trackerRenderLimit = Math.max(window.__trackerRenderLimit || 50, _phPendingRows.length + 10);
   const displayPicks = visiblePicks
     .sort((a, b) => {
       const aGroup = getTrackedPickListGroup(a);
@@ -23329,7 +23420,36 @@ function renderConfigsPanel() {
 let g_bbTrackerSyncError = null;
 function bbSetTrackerSyncError(msg) {
   g_bbTrackerSyncError = msg ? { msg: String(msg), at: new Date().toISOString() } : null;
+  if (!msg) { /* FIX PH1: a successful sync ends the retry cycle */
+    g_bbSyncRetryNeeded = false;
+    g_bbSyncRetryAttempt = 0;
+    if (g_bbSyncRetryTimer) { clearTimeout(g_bbSyncRetryTimer); g_bbSyncRetryTimer = null; }
+  }
   try { bbRenderTrackerSummaryHeader(); } catch (_e) {}
+}
+/* FIX PH1: retry uploads after a network error with backoff (5 s, 15 s, 30 s, 1 min, 2 min, then every 5 min). Each retry is
+   one delta upload of whatever differs from the server (usually nothing -> no request beyond what is needed). */
+var g_bbSyncRetryNeeded = false;
+var g_bbSyncRetryAttempt = 0;
+var g_bbSyncRetryTimer = null;
+function bbScheduleSyncRetry() {
+  g_bbSyncRetryNeeded = true;
+  if (g_bbSyncRetryTimer) return;
+  const steps = [5000, 15000, 30000, 60000, 120000, 300000];
+  const wait = steps[Math.min(g_bbSyncRetryAttempt, steps.length - 1)];
+  g_bbSyncRetryAttempt++;
+  g_bbSyncRetryTimer = setTimeout(() => {
+    g_bbSyncRetryTimer = null;
+    if (!g_bbSyncRetryNeeded && !g_bbTrackerSyncError) return;
+    if (typeof document !== "undefined" && document.hidden) { bbScheduleSyncRetry(); return; }
+    Promise.resolve(flushTrackerSave()).catch(() => {});
+  }, wait);
+}
+/* FIX PH1: called after the server answered (manifest fetched) and on resume/online: if an upload is owed, send it now */
+function bbSyncRetryIfNeeded() {
+  if (!g_bbSyncRetryNeeded && !g_bbTrackerSyncError) return;
+  if (g_bbSyncRetryTimer) { clearTimeout(g_bbSyncRetryTimer); g_bbSyncRetryTimer = null; }
+  setTimeout(() => { Promise.resolve(flushTrackerSave()).catch(() => {}); }, 0);
 }
 function bbTrackerSummarySnapshot() {
   const pool = getCanonicalTrackedPicksPool();
@@ -26099,8 +26219,9 @@ async function refreshTrackedPickResults() {
         ).values(),
       ];
 
+      const _rdPool = bbRdLimiter(BB_RD_FETCH_POOL); /* FIX RD8: ESPN summaries; feed lookups share deduped feeds */
       const eventResults = await Promise.all(
-        eventEntries.map(async (entry) => {
+        eventEntries.map((entry) => (entry.source === "espn" ? _rdPool : (fn) => fn())(async () => {
           if (entry.source === "incrowd") {
             let competition = null;
             try {
@@ -26128,7 +26249,8 @@ async function refreshTrackedPickResults() {
           }
           const url = `${entry.base}/summary?event=${entry.eventId}&_=${Date.now()}`;
           let data = null;
-          try {
+          let _rdNetErr = false;
+          const _rdDirect = async () => {
             const _directCtrl = new AbortController();
             const _directTimer = setTimeout(() => _directCtrl.abort(), 5000);
             try {
@@ -26137,16 +26259,27 @@ async function refreshTrackedPickResults() {
                 mode: "cors",
                 signal: _directCtrl.signal,
               });
-              if (res.ok) data = await res.json();
-              else throw new Error("Direct fetch failed");
+              if (res.ok) return await res.json();
+              if (res.status >= 500) _rdNetErr = true;
+              throw new Error("Direct fetch failed");
+            } catch (e) {
+              if (e && e.name === "TypeError") _rdNetErr = true;
+              throw e;
             } finally {
               clearTimeout(_directTimer);
             }
+          };
+          try {
+            data = await _rdDirect();
           } catch (err) {
             data = await proxyFetch(url, 4000).catch(() => null);
+            if (data == null && _rdNetErr) { /* FIX RD8: one quick retry after a network blip */
+              await new Promise((r) => setTimeout(r, 300));
+              data = await _rdDirect().catch(() => null);
+            }
           }
           return [entry.eventId, data];
-        }),
+        })),
       );
 
       const eventMap = new Map(eventResults);
@@ -31391,24 +31524,26 @@ async function fetchApiLiveEuroSeasonGames(seasonCode, competition) {
 async function findIncrowdEuroGameByEventId(league, eventId, opts) {
   const eid = String(eventId || "");
   if (!eid) return null;
+  if (/^manual[-_]/i.test(eid)) return null; /* FIX RD6: manual picks have no feed id -> no match possible */
   const maxAgeMs = opts && bbStrictFinite(opts.maxAgeMs) ? Number(opts.maxAgeMs) : 10000;
   const { primary, previous, competition } = getEuroleagueSeasonCodes(league);
-  for (const code of [primary, previous]) {
-    try {
-      const games = await fetchEuroleagueSeasonGames(code, competition, { maxAgeMs });
-      const hit = matchIncrowdGameByEventId(games, eid);
-      if (hit) return hit;
-    } catch (e) {
-      if (typeof engineDebug === "function") engineDebug("findIncrowdEuroGame ByEventId season failed", { code, error: String(e && e.message || e) });
+  /* FIX RD2: both seasons in parallel, matched in the same order */
+  const _rdSeason = await Promise.all([primary, previous].map((code) =>
+    fetchEuroleagueSeasonGames(code, competition, { maxAgeMs }).then((games) => ({ code, games }), (e) => ({ code, e }))));
+  for (const r of _rdSeason) {
+    if (r.e) {
+      if (typeof engineDebug === "function") engineDebug("findIncrowdEuroGame ByEventId season failed", { code: r.code, error: String(r.e && r.e.message || r.e) });
+      continue;
     }
+    const hit = matchIncrowdGameByEventId(r.games, eid);
+    if (hit) return hit;
   }
                                                                               
-  for (const code of [primary, previous]) {
-    try {
-      const games = await fetchApiLiveEuroSeasonGames(code, competition);
-      const hit = matchIncrowdGameByEventId(games, eid);
-      if (hit) return hit;
-    } catch (_e) {}
+  const _rdLive = await Promise.all([primary, previous].map((code) =>
+    fetchApiLiveEuroSeasonGames(code, competition).then((games) => games, () => null)));
+  for (const games of _rdLive) {
+    const hit = games && matchIncrowdGameByEventId(games, eid);
+    if (hit) return hit;
   }
   return null;
 }
@@ -33340,9 +33475,13 @@ async function findKblGameByEventId(eventId, opts) {
   const eid = String(eventId || "");
   if (!eid) return null;
   const maxAgeMs = opts && bbStrictFinite(opts.maxAgeMs) ? Number(opts.maxAgeMs) : 10000;
+  /* FIX RD3: team list + today's list in parallel */
+  const _rdTodayP = fetchKblTodayList({ maxAgeMs }).then((v) => ({ v }), (e) => ({ e }));
   const teamMap = await fetchKblTeamMap();
+  const _rdToday = await _rdTodayP;
   try {
-    const today = await fetchKblTodayList({ maxAgeMs });
+    if (_rdToday.e) throw _rdToday.e;
+    const today = _rdToday.v;
     const hit = (today || []).find((g) => String(g?.gmkey || "") === eid);
     if (hit) {
       let norm = kblNormalizeGame(hit, teamMap);
@@ -33353,7 +33492,8 @@ async function findKblGameByEventId(eventId, opts) {
       return norm;
     }
   } catch (_e) {}
-                                       
+  /* FIX RD7: detail in parallel with the range list (both branches below use it; fetchKblMatchDetail never throws) */
+  const _rdDetailP = fetchKblMatchDetail(eid, { maxAgeMs });
   try {
     const now = new Date();
     const from = new Date(now.getTime());
@@ -33367,14 +33507,13 @@ async function findKblGameByEventId(eventId, opts) {
     const hit = (rows || []).find((g) => String(g?.gmkey || "") === eid);
     if (hit) {
       let norm = kblNormalizeGame(hit, teamMap);
-      const detail = await fetchKblMatchDetail(eid, { maxAgeMs });
+      const detail = await _rdDetailP;
       if (detail) norm = kblApplyDetailQuarters(norm, detail);
       return norm;
     }
   } catch (_e2) {}
-                              
   try {
-    const detail = await fetchKblMatchDetail(eid, { maxAgeMs });
+    const detail = await _rdDetailP;
     if (detail && detail.game) {
       let norm = kblNormalizeGame(detail.game, teamMap);
       return kblApplyDetailQuarters(norm, detail);
@@ -33391,13 +33530,10 @@ async function fetchKblCompetitionForEvent(league, eventId) {
 async function pollKblLiveForLeague(league, eventIds, signal) {
   if (!eventIds || !eventIds.size) return false;
   let didChange = false;
+  /* FIX RD3: team list + today's list in parallel */
+  const _rdTodayP = fetchKblTodayList({ maxAgeMs: 8000 }).catch(() => []);
   const teamMap = await fetchKblTeamMap();
-  let todayRows = [];
-  try {
-    todayRows = await fetchKblTodayList({ maxAgeMs: 8000 });
-  } catch (_e) {
-    todayRows = [];
-  }
+  let todayRows = await _rdTodayP;
   const todayById = new Map((todayRows || []).map((g) => [String(g?.gmkey || ""), g]));
 
   for (const eid of eventIds) {
@@ -43612,7 +43748,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
   }
   window.addEventListener("focus", () => resumeLiveTrackerNow());
   window.addEventListener("pageshow", () => resumeLiveTrackerNow());
-  window.addEventListener("online", () => refreshTrackerInBackground(true));
+  window.addEventListener("online", () => { refreshTrackerInBackground(true); try { bbSyncRetryIfNeeded(); } catch (_phO) {} });
 
   window.addEventListener("offline", function () {
     let banner = document.getElementById("offlineBanner");
