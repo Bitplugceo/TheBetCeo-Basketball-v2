@@ -1,9 +1,8 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
                        
-  <meta name="generator" content="bb-engine-real-noplay-reason-20261003" />
+  <meta name="generator" content="bb-engine-league-segment-pause-20261003" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -14913,7 +14912,7 @@ const BB_LR_CFG = {
   rollbackN: 30,
   freezeMs: 30 * 86400000,
   segLevels: ["G", "K", "LK", "F", "M", "LF", "LM"],
-  gate: { levels: ["F", "M", "LF", "LM"], minN: 25, priorN: 20, rootPriorN: 30, suppressP: 0.9, releaseP: 0.7, boostP: 0.9, minSuppressMs: 14 * 86400000, minHoldN: 5, halfLifeDays: 75 },
+  gate: { levels: ["F", "M", "LF", "LM"], suppressLevels: ["LF", "LM"], minN: 25, priorN: 20, rootPriorN: 30, suppressP: 0.9, releaseP: 0.7, boostP: 0.9, minSuppressMs: 14 * 86400000, minHoldN: 5, halfLifeDays: 75 },
   grade: { A: 0.6, B: 0.555, minSegN: 15 },
   flip: { minDrop: 10, p: 0.1 },
 };
@@ -15237,7 +15236,8 @@ function bbLrDecide(state, o) {
   const out = { keep: true, reason: null, p: NaN, grade: null, adjEdgeDir: NaN, lam: 1, bias: 0, segment: null };
   if (!state || !state.active) return out;
   const nodes = C.gate.levels.map((lv) => o.nodes[lv]);
-  const sup = nodes.find((k) => state.suppressed && state.suppressed[k]);
+  const supNodes = (C.gate.suppressLevels || ["LF", "LM"]).map((lv) => o.nodes[lv]);
+  const sup = supNodes.find((k) => state.suppressed && state.suppressed[k]);
   const proven = nodes.some((k) => state.proven && state.proven[k]);
   if (o.kind !== "ml" && Number.isFinite(o.x)) {
     const r = bbLrResolve(state.params, o);
@@ -15383,7 +15383,13 @@ function bbLrEpoch(state, known, T, watches) {
   const segFull = bbLrSegments(sorted, T);
   const segFit = bbLrSegments(fitPart, T);
   state.seg = segFull;
-  G.levels.forEach((lv) => {
+  Object.keys(state.suppressed || {}).forEach((k) => {
+    if (!/^(LF|LM):/.test(k)) {
+      state.history.push({ T, type: "release", key: k, n: state.suppressed[k].n, pBelow: state.suppressed[k].pBelow, note: "family-wide pause removed" });
+      delete state.suppressed[k];
+    }
+  });
+  (G.suppressLevels || ["LF", "LM"]).forEach((lv) => {
     Object.values(segFull).forEach((s) => {
       if (s.level !== lv) return;
       const k = s.node;
@@ -15579,8 +15585,10 @@ function bbLrApplyToPicks(picks, ctx) {
       if (!d.keep) {
         p.learnerSuppressedPick = p.pick;
         const _seg = d.segment ? (typeof bbLrSegLabel === "function" ? bbLrSegLabel(d.segment) : d.segment) : "";
+        const _rec = d.segment && state.suppressed ? state.suppressed[d.segment] : null;
+        const _recTxt = _rec && Number.isFinite(_rec.wins) && Number.isFinite(_rec.losses) ? " " + _rec.wins + "-" + _rec.losses : "";
         const why = d.reason === "segment"
-          ? "No play: settled results suppressed this segment" + (_seg ? " (" + _seg + ")" : "")
+          ? "No play: settled results suppressed this league segment" + (_seg ? " (" + _seg + ")" : "") + _recTxt
           : d.reason === "flip"
             ? "No play: learner adjusted edge flipped against this side"
             : "No play: learner rejected this pick" + (d.reason ? " (" + d.reason + ")" : "");
