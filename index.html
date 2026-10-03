@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1172,6 +1171,9 @@ body.dark-mode .tracker-manual-btn {
   font-size: 16px;
   padding: 10px 8px;
 }
+.manual-settle-teams { display: flex; gap: 8px; }
+.manual-settle-teams label { flex: 1; display: flex; flex-direction: column; font-size: 11px; font-weight: 700; color: var(--muted); }
+.manual-settle-teams label span { margin: 0 0 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .manual-settle-actions {
   display: flex;
   justify-content: flex-end;
@@ -4123,6 +4125,11 @@ const BB_LOCK_REGISTRY = Object.freeze([
     <p id="manualSettleTitle" class="manual-settle-title"></p>
     <p id="manualSettleMatch" class="manual-settle-match"></p>
     <p id="manualSettleMarket" class="manual-settle-market"></p>
+    <div class="manual-settle-teams">
+      <label><span id="manualSettleLabelA">Team A</span><input id="manualSettleInputA" type="text" inputmode="numeric" autocomplete="off" /></label>
+      <label><span id="manualSettleLabelB">Team B</span><input id="manualSettleInputB" type="text" inputmode="numeric" autocomplete="off" /></label>
+    </div>
+    <p id="manualSettleOr" class="manual-settle-market">or a single value (old style):</p>
     <input id="manualSettleInput" type="text" autocomplete="off" autocapitalize="characters" />
     <div class="manual-settle-actions">
       <button type="button" id="manualSettleCancelBtn">Cancel</button>
@@ -6648,7 +6655,7 @@ const DEBUG = false;
 const CACHE_MAX = 300;
 
 const BB_CONFIG = {
-  limits: { activePicks: 500, archivePruneDays: 90 },
+  limits: { activePicks: 500, archivePruneDays: 3650 }, /* FIX SY6: was 90 — settled history was silently deleted */
   timeouts: { fetch: 15000 },
   version: "Path-A-v1",
 };
@@ -10566,7 +10573,11 @@ function actualForMarket(pick) {
     return Number.isFinite(n) ? n : NaN;
   }
   if (mk === "team_a" || mk === "team_b" || mk === "h1_team_a" || mk === "h1_team_b" || mk.indexOf("_team_") !== -1) {
-    if (looksScoreline) return NaN;
+    /* FIX SC2: "A - B" (Team A first) -> the team's own score */
+    if (looksScoreline) {
+      const _v = /team_b$/.test(mk) ? parsed.away : parsed.home;
+      return Number.isFinite(_v) ? _v : NaN;
+    }
     const n = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(s) ? Number(s) : NaN;
     return Number.isFinite(n) ? n : NaN;
   }
@@ -13008,7 +13019,12 @@ const ESPN_LEAGUE_SLUGS = {
   cebl: "cebl",
 };
 function getEspnLeagueSlug(league) {
-  return ESPN_LEAGUE_SLUGS[String(league || "").toLowerCase()] || null;
+  const _k = String(league || "").toLowerCase();
+  /* FIX ESPN-400: slugs in ESPN_SITE_API_DEAD_KEYS return HTTP 400 from site.api.espn.com (no CORS header on the
+     error, so the browser logs it as a CORS failure). The set existed but was never consulted, so tracker
+     result polling / team catalog / standings kept hitting them. Treat them as "no ESPN source". */
+  if (typeof ESPN_SITE_API_DEAD_KEYS !== "undefined" && ESPN_SITE_API_DEAD_KEYS.has(_k)) return null;
+  return ESPN_LEAGUE_SLUGS[_k] || null;
 }
 const ESPN_SITE_API_DEAD_KEYS = new Set([
   "eurocup",
@@ -13992,7 +14008,7 @@ function defaultMassacreFetchContext() {
 
 let g_massacreFetchContext = defaultMassacreFetchContext();
 const TRACKED_PICKS_LIMIT = BB_CONFIG.limits.activePicks;
-const TRACKER_ARCHIVED_LIMIT = 400;
+const TRACKER_ARCHIVED_LIMIT = 3000; /* FIX SY6: was 400 */
 const TRACKER_SETTLED_VISIBLE_MS = 10 * 60 * 60 * 1000;
 const TRACKER_API_URL = WORKER_BASE_URL + "/cloud-sync";
 
@@ -14880,6 +14896,31 @@ function getCanonicalTrackedPicksPool() {
 function getAllTrackedPicksForReport() {
   return getCanonicalTrackedPicksPool();
 }
+
+/* FIX COUNTS: the Tracked Picks header (rebuildTrackerStats) counted resultStatus, while the report's records
+   (buildRecord / buildSettledPickRecord) and God's Eye counted engineResultStatus first, so any pick whose
+   final status differs from the engine's auto-grade (manual correction / divergence) was a win on one page and
+   a loss on the other. Every count now uses this one definition: the pick's final resultStatus; the engine
+   grade only when no resultStatus was ever written. NO PLAY / void / pending are not settled. */
+function bbTrackerPickOutcome(pick) {
+  const r = String(pick?.resultStatus || "").toLowerCase();
+  const s = r || String(pick?.engineResultStatus || "").toLowerCase();
+  return s === "win" || s === "loss" || s === "push" ? s : "";
+}
+function bbTrackerRecord(items) {
+  const base = { settled: 0, wins: 0, losses: 0, pushes: 0, winPct: NaN, netWins: 0 };
+  (Array.isArray(items) ? items : []).forEach((pick) => {
+    const s = bbTrackerPickOutcome(pick);
+    if (!s) return;
+    base.settled++;
+    if (s === "win") base.wins++;
+    else if (s === "loss") base.losses++;
+    else base.pushes++;
+  });
+  base.winPct = base.settled ? ((base.wins + base.pushes * 0.5) / base.settled) * 100 : NaN;
+  base.netWins = Number((base.wins - base.losses).toFixed(2));
+  return base;
+}
 let g_trackerDerivedState = defaultTrackerDerivedState();
 
 function makeDerivedBucket(label = "") {
@@ -15020,7 +15061,8 @@ function collectDerivedSignals(bucketObject = {}, topN = 12) {
 }
                                                   
 function applyResultToDerivedBucket(bucket, pick) {
-  const status = String(pick?.engineResultStatus || pick?.resultStatus || "pending").toLowerCase();
+  /* FIX COUNTS: the report's Team / market / matchup tables use the same outcome as the header */
+  const status = bbTrackerPickOutcome(pick) || String(pick?.resultStatus || "pending").toLowerCase();
 
   bucket.picks++;
 
@@ -15156,10 +15198,7 @@ function buildTrackerDerivedStateFromPicks(inputPicks = []) {
 
   return {
     totalPicks: all.length,
-    settledPicks: all.filter((p) => {
-      const s = String(p.resultStatus || "pending").toLowerCase();
-      return s === "win" || s === "loss" || s === "push";
-    }).length,
+    settledPicks: all.filter((p) => !!bbTrackerPickOutcome(p)).length, /* FIX COUNTS */
     profiles,
     environments,
     marketSides,
@@ -15493,7 +15532,7 @@ window.recordPickVariance =
   window.recordPickVariance ||
   function (pick) {
     try {
-      const proj = Number(pick?.proj);
+      const proj = bbStrictFinite(pick?.projection) ? Number(pick.projection) : Number(pick?.proj); /* FIX: tracked picks store `projection` */
       const actual = typeof actualForMarket === "function" ? actualForMarket(pick) : (typeof parseFinalScore === "function" ? parseFinalScore(pick?.actualScore).total : parseFloat(pick?.actualScore));
       if (!isFinite(proj) || !isFinite(actual)) return;
       window.g_pickVarianceLog.push({ error: Math.abs(actual - proj), ts: Date.now() });
@@ -15756,7 +15795,7 @@ const AFDB = (function () {
       .join("");
 
     const headerBtns =
-      '<button onclick="AFDB.copy(this)" style="background:#111;border:1px solid #333;color:#49d45f;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📋 Copy Log</button><button onclick="AFDB.clear()" style="background:#111;border:1px solid #333;color:#ff5c61;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">🗑️ Clear</button><button onclick="typeof triggerTrackerMilitaryRaid === \'function\' ? triggerTrackerMilitaryRaid() : AFDB.runTestFetch()" style="background:#2a0608;border:1px solid #d91f26;color:#fff;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(217,31,38,0.4);">🚨 MILITARY RAID</button><button onclick="window.openVisualReportFromDebug()" style="background:#111;border:1px solid #333;color:#d4af37;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📊 Tracker Report</button><button onclick="window.EngineAuditor ? EngineAuditor.open() : alert(`Full Audit did not open: the EngineAuditor script was not found on this page. The auditor module may be missing from this deploy.`)" style="background:#0a1f0a;border:1px solid #2f8f4a;color:#49ff7a;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(47,143,74,0.4);">🩺 Full Audit</button><button onclick="AFDB.close()" style="background:#111;border:1px solid #555;color:#ccc;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">✕ Close</button>';
+      '<button onclick="AFDB.copy(this)" style="background:#111;border:1px solid #333;color:#49d45f;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📋 Copy Log</button><button onclick="AFDB.clear()" style="background:#111;border:1px solid #333;color:#ff5c61;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">🗑️ Clear</button><button onclick="typeof triggerTrackerMilitaryRaid === \'function\' ? triggerTrackerMilitaryRaid() : AFDB.runTestFetch()" style="background:#2a0608;border:1px solid #d91f26;color:#fff;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;box-shadow:0 0 8px rgba(217,31,38,0.4);">🚨 MILITARY RAID</button><button onclick="window.openVisualReportFromDebug()" style="background:#111;border:1px solid #333;color:#d4af37;padding:6px 12px;font-size:11px;font-weight:700;cursor:pointer;border-radius:4px;">📊 Tracker Report</button><button onclick="AFDB.close()" style="background:#111;border:1px solid #555;color:#ccc;padding:6px 12px;font-size:11px;font-weight:900;cursor:pointer;border-radius:4px;">✕ Close</button>';
 
     const emptyMsg = _showOnlyErrors
       ? "No suspects arrested. The code is clean."
@@ -19351,6 +19390,9 @@ function getTrackedPickLineMoveProxy(pick = {}) {
 
                                              
 function buildSettledPickRecord(items = []) {
+  return bbTrackerRecord(items); /* FIX COUNTS: shared definition; the old engine-first body is kept below as _bbLegacyBuildSettledPickRecord (unused) */
+}
+function _bbLegacyBuildSettledPickRecord(items = []) {
   const base = { settled: 0, wins: 0, losses: 0, pushes: 0, winPct: NaN, netWins: 0 };
   (Array.isArray(items) ? items : []).forEach((pick) => {
     const status = String(pick?.engineResultStatus || pick?.resultStatus || "").toLowerCase();
@@ -19436,12 +19478,13 @@ function rebuildTrackerStats() {
       String(p.engineResultStatus).toLowerCase() !== String(p.resultStatus).toLowerCase(),
   );
 
+  const _rec = bbTrackerRecord(all); /* FIX COUNTS: shared definition */
   AppState.tracker.state.stats = {
     total: all.length,
-    settled: all.filter((p) => ["win","loss","push"].includes(String(p.resultStatus||"").toLowerCase())).length,
-    wins: all.filter((p) => p.resultStatus === "win").length,
-    losses: all.filter((p) => p.resultStatus === "loss").length,
-    pushes: all.filter((p) => p.resultStatus === "push").length,
+    settled: _rec.settled,
+    wins: _rec.wins,
+    losses: _rec.losses,
+    pushes: _rec.pushes,
     engineDivergenceCount: _divergent.length,
     engineDivergenceRate: _settledForDivergence.length
       ? parseFloat(((_divergent.length / _settledForDivergence.length) * 100).toFixed(1))
@@ -19729,7 +19772,12 @@ function repairWinnerSettlementParityTrackedPicks(activeList, archivedList, opts
     return "";
   }
 
-  function parseOuActual(raw) {
+  function parseOuActual(raw, p) {
+    /* FIX SC2: per-team scorelines ("20 - 21") resolve per market */
+    if (p && typeof actualForMarket === "function") {
+      const _v = actualForMarket(p);
+      if (Number.isFinite(_v)) return _v;
+    }
     if (raw == null || raw === "") return NaN;
     if (typeof raw === "number" && Number.isFinite(raw)) return raw;
     const n = Number(String(raw).trim());
@@ -19842,7 +19890,7 @@ function repairWinnerSettlementParityTrackedPicks(activeList, archivedList, opts
                                                                          
       if (!OU_MARKETS[mk]) return;
       const line = Number(p.line != null ? p.line : p.pickLine);
-      const actual = parseOuActual(p.actualScore);
+      const actual = parseOuActual(p.actualScore, p);
       if (!Number.isFinite(line) || !Number.isFinite(actual)) return;
       const ouSide = resolveOuSide(p);
       const correct = settleOuIndependent(ouSide, line, actual);
@@ -19993,14 +20041,20 @@ async function pushTrackerStateToServer(state, isExit = false) {
         return 999999;
       }
     })();
-    if (isExit || rawSize > 60000) {
-      const leanActive = (state.activePicks || []).map((p) => {
-        const { diagnostics, ...rest } = p;
-        return rest;
-      });
-      stateToPush = { ...state, activePicks: leanActive, archivedPicks: [], lineMemory: {} };
+    /* FIX SY1: the archive (where every settled pick lands 10 h after settling) used to be dropped from EVERY push over
+       60 KB — i.e. always — so settled results never reached the server. Only the keepalive exit push is size-limited
+       (browsers cap keepalive bodies at 64 KB); regular pushes send the archive, minus heavy diagnostics. */
+    const _lean = (p) => {
+      const { diagnostics, ...rest } = p || {};
+      return rest;
+    };
+    if (isExit && rawSize > 60000) {
+      stateToPush = { ...state, activePicks: (state.activePicks || []).map(_lean), archivedPicks: [], lineMemory: {} };
       g_trackerServerArchiveStripped = (state.archivedPicks || []).length > 0;
     } else {
+      stateToPush = rawSize > 60000
+        ? { ...state, activePicks: (state.activePicks || []).map(_lean), archivedPicks: (state.archivedPicks || []).map(_lean) }
+        : state;
       g_trackerServerArchiveStripped = false;
     }
 
@@ -20023,10 +20077,12 @@ async function pushTrackerStateToServer(state, isExit = false) {
 
     if (!res.ok) {
       trackerDebug("Cloudflare push rejected: " + res.status + " — local copy preserved");
+      bbSetTrackerSyncError("server rejected the upload (HTTP " + res.status + ")"); /* FIX SY2 */
       return { ok: false };
     }
 
     g_trackerSaveFailureCount = 0;
+    bbSetTrackerSyncError(null); /* FIX SY2 */
     g_trackerPersistedVersion = state.vId || g_trackerSaveVersion;
     return { ok: true, state: data?.state };
   } catch (err) {
@@ -20052,6 +20108,7 @@ async function pushTrackerStateToServer(state, isExit = false) {
         error: err?.message || String(err),
       });
     }
+    bbSetTrackerSyncError(isNetworkError ? "offline / network error — will retry" : "upload failed: " + String(err?.message || err).slice(0, 80)); /* FIX SY2 */
     return { ok: false };
   } finally {
     g_trackerSaveInFlight = false;
@@ -20065,10 +20122,10 @@ async function _flushTrackerSaveUnsafe() {
   try {
     await saveTrackerStateToLocal();
   } catch (localErr) {
-    trackerDebug("flush save: local write failed", {
+    trackerDebug("flush save: local write failed — still pushing to server", {
       error: String(localErr?.message || localErr),
     });
-    return;
+    /* FIX SY3: keep going — the server copy is the only backup when local storage fails */
   }
   try {
     const snapshot = JSON.parse(JSON.stringify(AppState.tracker.state));
@@ -20077,7 +20134,9 @@ async function _flushTrackerSaveUnsafe() {
       // merge into LIVE state, not the pre-push snapshot, or edits made during the POST are wiped
       const merged = mergeTrackerStates(AppState.tracker.state, pushed.state);
       normalizeTrackerState(merged);
-      await saveTrackerStateToLocal();
+      AppState.tracker.state = merged; /* FIX SY3: the merged result used to be discarded */
+      try { rebuildTrackerStats(); } catch (_rb) {}
+      await saveTrackerStateToLocal().catch(() => {});
     }
   } catch (err) {
     const errMsg = String(err?.message || err).toLowerCase();
@@ -20973,8 +21032,21 @@ function resolveTrackedPick(localPick, serverPick) {
   if (lW > sW) return local;
   if (sW > lW) return server;
 
+  /* FIX SY5: both settled — a device/engine settlement beats a bulk "auto-backfill" one */
+  if (lW && sW) {
+    const lB = String(local.settlementSource || "").toLowerCase() === "auto-backfill";
+    const sB = String(server.settlementSource || "").toLowerCase() === "auto-backfill";
+    if (lB && !sB) return server;
+    if (sB && !lB) return local;
+  }
+
   if (local.actualScore && !server.actualScore) return local;
   if (server.actualScore && !local.actualScore) return server;
+  if (lW && sW && String(local.resultStatus).toLowerCase() === String(server.resultStatus).toLowerCase()) {
+    const _sl = (v) => /^\d+(?:\.\d+)?\s*[-–:]\s*\d+(?:\.\d+)?$/.test(String(v == null ? "" : v).trim());
+    if (_sl(local.actualScore) && !_sl(server.actualScore)) return local; /* FIX SC6 */
+    if (_sl(server.actualScore) && !_sl(local.actualScore)) return server;
+  }
 
   const lSettled = safeParseDate(local.settledAt);
   const sSettled = safeParseDate(server.settledAt);
@@ -21098,7 +21170,7 @@ function mergeTrackerStates(localState, serverState) {
     activePicks: mergeTrackerActivePicks(
       local.activePicks,
       server.activePicks,
-      local.archivedPicks,
+      [...(Array.isArray(local.archivedPicks) ? local.archivedPicks : []), ...(Array.isArray(server.archivedPicks) ? server.archivedPicks : [])], /* FIX SY4 */
       mergedDeleted,
     ),
     archivedPicks: mergeTrackerArchivedPicks(
@@ -21152,7 +21224,9 @@ function mergeTrackerActivePicks(
     }
   });
 
+  /* FIX SY4: a pending copy never survives next to a settled archived copy of the same pick */
   return [...merged.values()]
+    .filter((p) => isTrackedPickSettled(p) || !settledArchivedKeys.has(makeTrackerActiveMergeKey(p)))
     .sort((a, b) => getTrackerPickStamp(b) - getTrackerPickStamp(a))
     .slice(0, TRACKED_PICKS_LIMIT);
 }
@@ -21723,16 +21797,9 @@ function renderTrackedPicks() {
   renderTrackerAnalytics();
   renderTrackerDebugPanel();
 
-  const stats = g_trackerState.stats || { total: 0, settled: 0, wins: 0, losses: 0, pushes: 0 };
-  const liveCount = displayPicks.filter(
-    (p) =>
-      String(p?.resultStatus || "pending").toLowerCase() === "pending" &&
-      p?.eventId &&
-      g_liveGameStatus.has(p.eventId),
-  ).length;
-
-                                                                                           
-  summaryEl.innerHTML = `${liveCount} live • ${stats.wins || 0} wins • ${stats.losses || 0} losses`;
+  /* FIX COUNTS: header text comes from bbRenderTrackerSummaryHeader (also called by every report render) */
+  summaryEl.innerHTML = '<span id="trackerSummaryCounts"></span>';
+  bbRenderTrackerSummaryHeader();
 
   try {
     const _qfStats = getQuarterFormBacktestStats();
@@ -22723,7 +22790,45 @@ function renderConfigsPanel() {
   updateTrackerInsightsButton();
 }
 
+/* FIX COUNTS: the header used to be written only by renderTrackedPicks, while the report re-rendered on its own
+   (view switch, manual settle, background settle), so after any settlement the two showed different moments of
+   the same tracker (seen: header 124W/82L vs report 130W/85L). Both now come from this snapshot, and every
+   report render refreshes the header too. "pending" = not settled yet; "live" = pending and in progress now. */
+let g_bbTrackerSyncError = null;
+function bbSetTrackerSyncError(msg) {
+  g_bbTrackerSyncError = msg ? { msg: String(msg), at: new Date().toISOString() } : null;
+  try { bbRenderTrackerSummaryHeader(); } catch (_e) {}
+}
+function bbTrackerSummarySnapshot() {
+  const pool = getCanonicalTrackedPicksPool();
+  const rec = bbTrackerRecord(pool);
+  const isPending = (p) => !bbTrackerPickOutcome(p) && ["", "pending"].includes(String(p?.resultStatus || "").toLowerCase());
+  const pendingPicks = pool.filter(isPending);
+  const live = pendingPicks.filter(
+    (p) => p?.eventId && typeof g_liveGameStatus !== "undefined" && g_liveGameStatus && g_liveGameStatus.has(p.eventId),
+  ).length;
+  return { ...rec, total: pool.length, pending: pendingPicks.length, live };
+}
+function bbRenderTrackerSummaryHeader() {
+  try {
+    const summaryEl = document.getElementById("trackerSummary");
+    if (!summaryEl) return null;
+    let el = document.getElementById("trackerSummaryCounts");
+    if (!el) {
+      summaryEl.innerHTML = '<span id="trackerSummaryCounts"></span>';
+      el = document.getElementById("trackerSummaryCounts");
+    }
+    const s = bbTrackerSummarySnapshot();
+    el.textContent = `${s.live} live • ${s.pending} pending • ${s.wins} wins • ${s.losses} losses` + (s.pushes ? ` • ${s.pushes} pushes` : "") +
+      (g_bbTrackerSyncError ? ` • ⚠ server sync: ${g_bbTrackerSyncError.msg}` : "");
+    return s;
+  } catch (_eHdr) {
+    return null;
+  }
+}
+
 function renderTrackerAnalytics() {
+  try { bbRenderTrackerSummaryHeader(); } catch (_eHdr2) {} /* FIX COUNTS: keep header in step with the report */
   try { setTimeout(function () { if (typeof bbAppendShadowPanel === "function") bbAppendShadowPanel(); }, 0); } catch (_e) {} /* BB-FIX #10 */
   const panel = document.getElementById("trackerAnalyticsPanel");
   if (!panel) return;
@@ -22818,19 +22923,9 @@ function renderTrackerAnalytics() {
   }
 
   function buildRecord(items = []) {
-    const base = { settled: 0, wins: 0, losses: 0, pushes: 0, winPct: NaN };
-    items.forEach((pick) => {
-      const status = String(pick?.engineResultStatus || pick?.resultStatus || "").toLowerCase();
-      if (!["win", "loss", "push"].includes(status)) return;
-      base.settled++;
-
-      if (status === "win") base.wins++;
-      else if (status === "loss") base.losses++;
-      else if (status === "push") base.pushes++;
-    });
-    const winEq = base.wins + base.pushes * 0.5;
-    base.winPct = base.settled ? (winEq / base.settled) * 100 : NaN;
-    return base;
+    const { netWins, ...rec } = bbTrackerRecord(items); /* FIX COUNTS: shared definition */
+    void netWins;
+    return rec;
   }
 
   function buildGroupedRows(
@@ -22979,9 +23074,7 @@ function renderTrackerAnalytics() {
                                           
   const allTimePool = getCanonicalTrackedPicksPool();
   const allTimeRecord = buildRecord(allTimePool);
-  const allTimePushes = allTimePool.filter(
-    (p) => String(p.resultStatus || "").toLowerCase() === "push",
-  ).length;
+  const allTimePushes = allTimeRecord.pushes; /* FIX COUNTS */
 
   const bestMarket = marketRows.find((row) => row.settled >= 2) || null;
   const weakMarket = [...marketRows].reverse().find((row) => row.settled >= 2) || null;
@@ -23139,9 +23232,9 @@ function renderTrackerAnalytics() {
   const reportBodyHtml = `
       <div class="tracker-kpi-grid">
         <div class="tracker-kpi-card featured">
-          <div class="tracker-kpi-label">Overall</div>
-          <div class="tracker-kpi-value">${overallRecord.wins}W</div>
-          <div class="tracker-kpi-sub">Losses ${overallRecord.losses} • Pushes ${overallRecord.pushes} • Win rate ${formatPct(overallRecord.winPct)}</div>
+          <div class="tracker-kpi-label">Overall (same as Tracked Picks header)</div>
+          <div class="tracker-kpi-value">${allTimeRecord.wins}W</div>
+          <div class="tracker-kpi-sub">Losses ${allTimeRecord.losses} • Pushes ${allTimeRecord.pushes} • Win rate ${formatPct(allTimeRecord.winPct)} • ${allTimeRecord.settled} settled picks</div>
         </div>
         <div class="tracker-kpi-card">
           <div class="tracker-kpi-label">Active picks</div>
@@ -23151,7 +23244,7 @@ function renderTrackerAnalytics() {
         <div class="tracker-kpi-card">
           <div class="tracker-kpi-label">Settled picks (learning-eligible)</div>
           <div class="tracker-kpi-value">${settled}</div>
-          <div class="tracker-kpi-sub">Checkpoint target ${trackerMin} • excludes pushes/no-plays/other versions</div>
+          <div class="tracker-kpi-sub">of ${allTimeRecord.settled} settled picks • checkpoint target ${trackerMin} • excludes pushes/no-plays/other model versions</div>
         </div>
         <div class="tracker-kpi-card">
           <div class="tracker-kpi-label">Review status</div>
@@ -23230,8 +23323,7 @@ function renderTrackerAnalytics() {
               <thead>
                 <tr>
                   <th>Experiment</th>
-                  <th class="num">Games</th>
-                  <th class="num">Settled</th>
+                  <th class="num">Settled picks</th>
                   <th class="num">Wins</th>
                   <th class="num">Losses</th>
                   <th class="num">Pushes</th>
@@ -23247,7 +23339,6 @@ function renderTrackerAnalytics() {
                           (row) => `
                   <tr>
                     <td>${safeText(row.mode)}</td>
-                    <td class="num">${Number(row.gameCount || 0)}</td>
                     <td class="num">${Number(row.settled || 0)}</td>
                     <td class="num">${Number(row.wins || 0)}</td>
                     <td class="num">${Number(row.losses || 0)}</td>
@@ -23585,6 +23676,7 @@ function renderTrackerAnalytics() {
           </div>
         </div>
       </div>
+      ${typeof bbRenderTeamMemorySection === "function" ? bbRenderTeamMemorySection() : ""}
       <div class="tracker-analytics-card" style="margin-top: 10px; border-color: #2a2a2a;">
         <div class="tracker-analytics-card-head" style="background: linear-gradient(90deg, #333 0%, #111 100%);">
           <div class="tracker-analytics-card-title" style="color: #ffd700;">👁️ GOD'S EYE: POST-MORTEM LOG</div>
@@ -23614,9 +23706,7 @@ function renderTrackerAnalytics() {
                         .sort((a, b) => getTrackedPickTimeMs(b) - getTrackedPickTimeMs(a))
                         .slice(0, 40)
                         .map((p) => {
-                          const engineStatus = String(
-                            p.engineResultStatus || p.resultStatus || "pending",
-                          ).toLowerCase();
+                          const engineStatus = bbTrackerPickOutcome(p) || "pending"; /* FIX COUNTS */
                           const statusClass =
                             engineStatus === "win"
                               ? "color: #3a9c35;"
@@ -24171,9 +24261,25 @@ function manualSettleMarketLabel(pick) {
   return pred ? name + " · " + pred : name;
 }
 
+function manualSettlePeriodLabel(pick) {
+  const per = typeof bbScPeriodOfMarket === "function" ? bbScPeriodOfMarket(pick && pick.marketKey) : "ft";
+  return { ft: "full time", h1: "1st half", h2: "2nd half", q1: "Q1", q2: "Q2", q3: "Q3", q4: "Q4" }[per] || "full time";
+}
+/* FIX SC4: two team boxes -> "A - B"; the old single box is the fallback */
+function combineManualTeamScores(rawA, rawB) {
+  const a = String(rawA == null ? "" : rawA).trim(), b = String(rawB == null ? "" : rawB).trim();
+  if (!a && !b) return "";
+  const num = /^\d+(?:\.\d+)?$/;
+  if (!num.test(a) || !num.test(b)) return null;
+  return a + " - " + b;
+}
 function normalizeManualSettleValue(pick, raw) {
   const s = String(raw || "").trim();
   if (!s) return "";
+  if (/^\d+(?:\.\d+)?\s*[-–:]\s*\d+(?:\.\d+)?$/.test(s)) {
+    const m = s.match(/^(\d+(?:\.\d+)?)\s*[-–:]\s*(\d+(?:\.\d+)?)$/);
+    return m[1] + " - " + m[2];
+  }
   if (isWinnerMarketKey(pick && pick.marketKey)) {
     const u = s.toUpperCase().replace(/\s+/g, "");
     if (u === "H" || u === "HOME") return "HOME";
@@ -24207,10 +24313,19 @@ function promptManualSettleValue(pick, status) {
     if (marketEl) marketEl.textContent = manualSettleMarketLabel(pick);
     inputEl.value = "";
     inputEl.placeholder = manualSettlePlaceholder(pick);
+    const inA = document.getElementById("manualSettleInputA");
+    const inB = document.getElementById("manualSettleInputB");
+    const labA = document.getElementById("manualSettleLabelA");
+    const labB = document.getElementById("manualSettleLabelB");
+    const _per = manualSettlePeriodLabel(pick);
+    if (labA) labA.textContent = home + " (" + _per + ")";
+    if (labB) labB.textContent = away + " (" + _per + ")";
+    if (inA) { inA.value = ""; inA.style.borderColor = ""; }
+    if (inB) { inB.value = ""; inB.style.borderColor = ""; }
     overlay.classList.add("open");
     overlay.setAttribute("aria-hidden", "false");
     setTimeout(() => {
-      try { inputEl.focus(); } catch (_e) {}
+      try { (document.getElementById("manualSettleInputA") || inputEl).focus(); } catch (_e) {}
     }, 30);
 
     const cleanup = function () {
@@ -24220,12 +24335,26 @@ function promptManualSettleValue(pick, status) {
       cancelBtn && cancelBtn.removeEventListener("click", onCancel);
       overlay.removeEventListener("click", onBackdrop);
       inputEl.removeEventListener("keydown", onKey);
+      ["manualSettleInputA", "manualSettleInputB"].forEach((id) => { const el = document.getElementById(id); el && el.removeEventListener("keydown", onKey); });
     };
     const onCancel = function () {
       cleanup();
       resolve(null);
     };
     const onOk = function () {
+      const _inA = document.getElementById("manualSettleInputA");
+      const _inB = document.getElementById("manualSettleInputB");
+      const teams = combineManualTeamScores(_inA && _inA.value, _inB && _inB.value);
+      if (teams === null) {
+        if (_inA) _inA.style.borderColor = "#d91f26";
+        if (_inB) _inB.style.borderColor = "#d91f26";
+        return;
+      }
+      if (teams) {
+        cleanup();
+        resolve(teams);
+        return;
+      }
       const norm = normalizeManualSettleValue(pick, inputEl.value);
       if (norm === null) {
         inputEl.style.borderColor = "#d91f26";
@@ -24247,6 +24376,7 @@ function promptManualSettleValue(pick, status) {
     cancelBtn && cancelBtn.addEventListener("click", onCancel);
     overlay.addEventListener("click", onBackdrop);
     inputEl.addEventListener("keydown", onKey);
+    ["manualSettleInputA", "manualSettleInputB"].forEach((id) => { const el = document.getElementById(id); el && el.addEventListener("keydown", onKey); });
   });
 }
 
@@ -24934,7 +25064,83 @@ function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
 }
 
                                                         
+/* FIX SC1: wrapper — grade with the original logic, then store each team's score for the market's period ("A - B",
+   Team A first) instead of a single combined total. The grade itself is never changed here. */
 function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlement = false) {
+  const grade = _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSettlement);
+  try {
+    if (grade && grade !== "pending") {
+      const sl = bbPeriodScorelineForPick(pick, competition);
+      if (sl) {
+        pick.actualScore = sl.text;
+        pick.scoreOrientation = sl.orientation;
+      }
+    }
+  } catch (_sc) {}
+  return grade;
+}
+
+function bbScNorm(s) {
+  return String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function bbScNameMatch(pickName, comp) {
+  const p = bbScNorm(pickName);
+  if (!p || !comp) return false;
+  const t = comp.team || {};
+  const names = [t.displayName, t.shortDisplayName, t.name, t.location, t.nickname, t.abbreviation, comp.name, comp.displayName]
+    .map(bbScNorm).filter(Boolean);
+  return names.some((n) => n === p || (n.length >= 4 && (p.indexOf(n) >= 0 || n.indexOf(p) >= 0)));
+}
+/* market -> period whose two team scores are stored */
+function bbScPeriodOfMarket(mk) {
+  mk = String(mk || "").toLowerCase();
+  if (/^q[1-4]/.test(mk)) return mk.slice(0, 2);
+  if (mk === "h1" || mk.indexOf("h1_") === 0 || mk === "handicap_h1") return "h1";
+  if (mk === "h2" || mk === "handicap_h2") return "h2";
+  return "ft";
+}
+function bbPeriodScorelineForPick(pick, competition) {
+  const comps = (competition && competition.competitors) || [];
+  const home = comps.find((c) => c.homeAway === "home") || comps[0];
+  const away = comps.find((c) => c.homeAway === "away") || comps[1];
+  if (!home || !away) return null;
+  const val = (v) => {
+    if (v === null || v === undefined || v === "") return NaN;
+    const n = parseFloat(typeof v === "object" ? (v.value ?? v.displayValue) : v);
+    return isFinite(n) ? n : NaN;
+  };
+  let lsH = home.linescores || [], lsA = away.linescores || [];
+  if ((lsH.length < 2 || lsA.length < 2) && pick.eventId && typeof g_liveGameStatus !== "undefined" && g_liveGameStatus.has(pick.eventId)) {
+    const qs = g_liveGameStatus.get(pick.eventId)?.qScores;
+    if (qs && Array.isArray(qs.home) && Array.isArray(qs.away)) { lsH = qs.home.map((v) => ({ value: v })); lsA = qs.away.map((v) => ({ value: v })); }
+  }
+  const regP = (typeof LEAGUE_FETCH_RULES !== "undefined" && LEAGUE_FETCH_RULES[pick.league || ""] && LEAGUE_FETCH_RULES[pick.league || ""].regulationPeriods) || 4;
+  const per = bbScPeriodOfMarket(pick.marketKey);
+  const sumIdx = (ls, idx) => idx.reduce((s, i) => s + val(ls[i]), 0);
+  let h = NaN, a = NaN;
+  if (per === "ft") { h = val(home.score); a = val(away.score); }
+  else if (per === "h1") {
+    if (regP >= 4) { h = sumIdx(lsH, [0, 1]); a = sumIdx(lsA, [0, 1]); } else { h = val(lsH[0]); a = val(lsA[0]); }
+  } else if (per === "h2") {
+    if (regP >= 4) { h = sumIdx(lsH, [2, 3]); a = sumIdx(lsA, [2, 3]); } else { h = val(lsH[1]); a = val(lsA[1]); }
+  } else {
+    const qi = Number(per.slice(1)) - 1;
+    if (regP >= 4) { h = val(lsH[qi]); a = val(lsA[qi]); }
+  }
+  if (!Number.isFinite(h) || !Number.isFinite(a)) return null;
+  /* Team A = pick.homeTeam. ids first, then names; otherwise the feed's home team is assumed to be Team A */
+  let aIsHome = null, orientation = "assumed";
+  const hid = String(pick.homeId || "");
+  if (hid && String(home.id ?? "") === hid) { aIsHome = true; orientation = "id"; }
+  else if (hid && String(away.id ?? "") === hid) { aIsHome = false; orientation = "id"; }
+  else if (bbScNameMatch(pick.homeTeam, home) || bbScNameMatch(pick.awayTeam, away)) { aIsHome = true; orientation = "name"; }
+  else if (bbScNameMatch(pick.homeTeam, away) || bbScNameMatch(pick.awayTeam, home)) { aIsHome = false; orientation = "name"; }
+  else aIsHome = true;
+  const ta = aIsHome ? h : a, tb = aIsHome ? a : h;
+  return { a: ta, b: tb, period: per, orientation, text: Math.round(ta) + " - " + Math.round(tb) };
+}
+
+function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSettlement = false) {
   if (!pick || !competition) return "pending";
 
   const oldStatus = pick.resultStatus;
@@ -25041,6 +25247,21 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
     String(pick.homeId || "") !== "" &&
     String(home && home.id != null ? home.id : "") !== "" &&
     String(pick.homeId) === String(home.id);
+  /* TEAM MEMORY: store the final score oriented to Team A (only when orientation is certain) */
+  try {
+    if (completed && Number.isFinite(sHome) && Number.isFinite(sAway)) {
+      const _awayIsA =
+        String(pick.homeId || "") !== "" &&
+        String(away && away.id != null ? away.id : "") !== "" &&
+        String(pick.homeId) === String(away.id);
+      if (isTeamAHome || _awayIsA) {
+        const _f = (v) => (Number.isFinite(v) ? v : null);
+        pick.gameScore = isTeamAHome
+          ? { a: sHome, b: sAway, h1a: _f(h1Home), h1b: _f(h1Away) }
+          : { a: sAway, b: sHome, h1a: _f(h1Away), h1b: _f(h1Home) };
+      }
+    }
+  } catch (_gs) {}
 
   if (market === "ft") {
     actual = sHome + sAway;
@@ -25292,6 +25513,12 @@ function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlem
 }
 
 async function refreshTrackedPickResults() {
+  /* TEAM MEMORY backfill (throttled to one pass / 10 min inside; never blocks settlement) */
+  try {
+    if (typeof bbTmBackfillGameScores === "function") {
+      setTimeout(() => { bbTmBackfillGameScores().catch(() => {}); }, 15000);
+    }
+  } catch (_tmBf) {}
   try {
     const active = Array.isArray(g_trackerState.activePicks) ? g_trackerState.activePicks : [];
     const archived = Array.isArray(g_trackerState.archivedPicks)
@@ -25500,6 +25727,7 @@ async function refreshTrackedPickResults() {
             pick.settledAt = new Date().toISOString();
             pick.settlementSource = "api";
             pick.settledVersion = ENGINE_MODEL_VERSION;
+            pick.updatedAt = pick.settledAt; /* FIX SC5 */
             changed = true;
             changedPicks.push(pick);
             if (!eventStillHasPendingPicks(pick.eventId, pick)) {
@@ -25581,6 +25809,7 @@ async function refreshTrackedPickResults() {
                 pick.settledAt = new Date().toISOString();
                 pick.settlementSource = "api_period";
                 pick.settledVersion = ENGINE_MODEL_VERSION;
+                pick.updatedAt = pick.settledAt; /* FIX SC5 */
                 changed = true;
                 changedPicks.push(pick);
                 if (!eventStillHasPendingPicks(pick.eventId, pick)) {
@@ -25647,7 +25876,7 @@ async function refreshTrackedPickResults() {
           })
           .forEach((p) => {
             const _proj = Number(p.proj),
-              _actual = Number(p.actualScore);
+              _actual = typeof actualForMarket === "function" && Number.isFinite(actualForMarket(p)) ? actualForMarket(p) : Number(p.actualScore); /* FIX SC2 */
             if (!isFinite(_proj) || !isFinite(_actual)) return;
             const _result = String(p.resultStatus || "").toLowerCase();
             const _outcome = _result === "win" ? 1 : _result === "loss" ? 0 : 0.5;
@@ -28628,6 +28857,15 @@ function setFixtureDay(offsetOrDate) {
 }
 
                                                                        
+/* FIX FETCH-TZ: shift a YYYYMMDD key by whole days (local calendar, DST-safe via noon anchor) */
+function bbShiftDateKey(key, days) {
+  const m = String(key || "").match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!m) return "";
+  const d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0, 0);
+  d.setDate(d.getDate() + (Number(days) || 0));
+  return getDateKeyLocal(d);
+}
+
 function dateStringToLocalKey(dateStr) {
   const m = String(dateStr || "").match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (!m) return "";
@@ -32728,7 +32966,11 @@ async function loadFixturesKbl(league, offset, myToken, absoluteDateKey) {
         rows = [];
       }
     }
-    if (!rows.length) {
+    /* FIX FETCH-TZ: /match/list/today is KST "today". West of Korea, tonight's local games are tomorrow in KST,
+       so a non-empty (often all-finished) today list used to hide them. Always also fetch the ±1 day range
+       and merge (deduped by gmkey); the local-day filter below picks the right games. */
+    {
+      let _rangeRows = [];
                                                                                         
       const y = Number(String(targetLocalKey).slice(0, 4));
       const m = Number(String(targetLocalKey).slice(4, 6));
@@ -32738,9 +32980,22 @@ async function loadFixturesKbl(league, offset, myToken, absoluteDateKey) {
       from.setDate(from.getDate() - 1);
       const to = new Date(center.getTime());
       to.setDate(to.getDate() + 1);
-      rows = await fetchKblMatchList(kblYmd(from), kblYmd(to), "all", {
-        seasonGrade: 1,
-        maxAgeMs: 60 * 1000,
+      try {
+        _rangeRows = await fetchKblMatchList(kblYmd(from), kblYmd(to), "all", {
+          seasonGrade: 1,
+          maxAgeMs: 60 * 1000,
+        });
+      } catch (_eRange) {
+        if (!rows.length) throw _eRange;
+        _rangeRows = [];
+      }
+      rows = Array.isArray(rows) ? rows.slice() : []; /* never mutate the cached today list */
+      const _seenK = new Set(rows.map((r) => String(r?.gmkey || r?.gmKey || "")).filter(Boolean));
+      (_rangeRows || []).forEach((r) => {
+        const k = String(r?.gmkey || r?.gmKey || "");
+        if (k && _seenK.has(k)) return;
+        if (k) _seenK.add(k);
+        rows.push(r);
       });
     }
     if (myToken !== _fixtureLoadToken) return;
@@ -32848,7 +33103,20 @@ async function fetchKblCore(league, teamAName, teamBName) {
       })
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
       .slice(0, 24);
-    const enrichedSlice = await enrichKblGamesWithQuarters(teamGames, 24);
+    /* FIX KBL-H2H-Q: list rows carry no quarter scores; /match/{gmkey} does (teamrecords.scoreq1..4). Only the 24
+       most recent A-or-B games were enriched, so older head-to-head meetings had no H1/Q values. Also enrich
+       the 5 most recent A-vs-B meetings. */
+    const _kblH2hIds = new Set(teamGames.map((g) => String(g.id)));
+    (allGames0 || [])
+      .filter((g) => {
+        const codes = new Set([String(g?.home?.code || ""), String(g?.away?.code || "")]);
+        return codes.has(String(teamAId)) && codes.has(String(teamBId)) &&
+          (kblGameIsPlayed(g) || String(g?.status || "").toLowerCase() === "result");
+      })
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
+      .slice(0, 5)
+      .forEach((g) => { if (!_kblH2hIds.has(String(g.id))) { _kblH2hIds.add(String(g.id)); teamGames.push(g); } });
+    const enrichedSlice = await enrichKblGamesWithQuarters(teamGames, teamGames.length);
     const enrichById = new Map(enrichedSlice.map((g) => [String(g.id), g]));
     const allGames = (allGames0 || []).map((g) => enrichById.get(String(g.id)) || g);
 
@@ -33069,6 +33337,45 @@ async function fetchKblCore(league, teamAName, teamBName) {
     }
 
                                                                                                      
+    /* FIX KBL-CTX: g_fetchMeta marks KBL inputs as fetched-authoritative, so the engine reads series from
+       AppState.context.data[side].overall — which this path never built (left null / stale from the previous
+       match). Every FT/H1/H2/team market was "Insufficient FT sample" with 10 games in the boxes. Build the same
+       context shape as the EuroLeague path. */
+    {
+      const _kblEventDate = String(selectedFixture?.dataset?.eventDate || "");
+      const _kblRest = (st) => {
+        const lastMs = Date.parse(st?.scoredDates?.[0] || "");
+        const eventMs = Date.parse(_kblEventDate);
+        if (!isFinite(lastMs) || !isFinite(eventMs)) return null;
+        const rawDays = Math.max(0, Math.round((eventMs - lastMs) / 86400000) - 1);
+        return rawDays <= 14 ? rawDays : null;
+      };
+      const _kblSide = (st, vst) => ({
+        overall: st
+          ? { ...st, ftScored10: st.scored10 || st.scored || [], ftAllowed10: st.allowed10 || st.allowed || [],
+              ftScoredDates10: st.scoredDates || [], ftAllowedDates10: st.allowedDates || [] }
+          : null,
+        q1Scored: st?.q1Scored || [], q2Scored: st?.q2Scored || [], q3Scored: st?.q3Scored || [], q4Scored: st?.q4Scored || [],
+        q1Allowed: st?.q1Allowed || [], q2Allowed: st?.q2Allowed || [], q3Allowed: st?.q3Allowed || [], q4Allowed: st?.q4Allowed || [],
+        quarterSpreads: typeof buildQuarterSpreadDual === "function" ? buildQuarterSpreadDual(st, vst, league) : undefined,
+        roster: [],
+        venue: vst
+          ? { ...vst, ftScored10: vst.scored10 || [], ftAllowed10: vst.allowed10 || [],
+              ftScoredDates10: vst.scoredDates || [], ftAllowedDates10: vst.allowedDates || [], venueDataAvailable: true }
+          : null,
+        ortg10: [], drtg10: [], pace10: [],
+        lastGameDate: st?.scoredDates?.[0] || "",
+        restDays: _kblRest(st),
+      });
+      AppState.context.data = {
+        league,
+        eventDate: _kblEventDate,
+        A: _kblSide(aStats, aVenueStats),
+        B: _kblSide(bStats, bVenueStats),
+        h2hGames: Array.isArray(h2hGames) ? h2hGames.slice(0, 10) : [],
+      };
+    }
+
     try {
       const latestA = (aStats?.eventIds || []).find(Boolean);
       if (latestA) {
@@ -33194,11 +33501,11 @@ async function loadFixturesESPN(league, offset, myToken, absoluteDateKey) {
   }
   const base = "https://site.api.espn.com/apis/site/v2/sports/basketball/" + leagueSlug;
   const targetLocalKey = absoluteDateKey || getLocalDateKey(offset);
-  const queryDates = absoluteDateKey
-    ? [absoluteDateKey]
-    : offset === 0
-      ? [getLocalDateKey(-1), getLocalDateKey(0)]
-      : [getLocalDateKey(0), getLocalDateKey(1)];
+  /* FIX FETCH-TZ: ESPN files events under its own (US Eastern) calendar day, not the viewer's local day.
+     A game that is "today" locally can sit in ESPN's previous OR next day bucket (e.g. Australia NBL
+     tip at 04:00Z Oct 4 = 9 pm PT Oct 3 is only in dates=20261004). Query target-1..target+1 and keep the
+     exact local-day filter below. Previously "today" queried only [yesterday, today]. */
+  const queryDates = [bbShiftDateKey(targetLocalKey, -1), targetLocalKey, bbShiftDateKey(targetLocalKey, 1)].filter(Boolean);
 
   try {
     if (myToken !== _fixtureLoadToken) return;
@@ -35225,9 +35532,15 @@ function isPlausibleBasketballPace(value, fraction = 1) {
 
 function sanitizePredictionResult(result, marketKey = "ft", reason = "non_finite_prediction") {
   if (!result || typeof result !== "object") return noPlayProjectionResult(marketKey, reason);
-  const numericKeys = ["projection", "proj", "edge", "ftProj", "ftEdge", "projAFT", "projBFT", "h1Proj", "h1Edge", "projA1H", "projB1H", "h2Proj", "h2Edge", "projA2H", "projB2H", "confidence", "winProbability"];
-  const bad = numericKeys.some((k) => result[k] != null && typeof result[k] !== "string" && !bbStrictFinite(result[k]));
-  if (bad) return noPlayProjectionResult(marketKey, reason);
+  /* FIX PROJ-NaN: edges (and confidence / winProbability) are NaN whenever the market line is blank. That means
+     "no line yet", not a broken projection. Previously any NaN edge replaced the WHOLE FT/H1/H2 result with a
+     NO PLAY stub (all projections null), so a blank line wiped finite projections (quarters, which don't pass
+     through here, stayed finite). Projections must be finite; edge-type keys may be NaN but never ±Infinity. */
+  const projectionKeys = ["projection", "proj", "ftProj", "projAFT", "projBFT", "h1Proj", "projA1H", "projB1H", "h2Proj", "projA2H", "projB2H"];
+  const lineDependentKeys = ["edge", "ftEdge", "h1Edge", "h2Edge", "confidence", "winProbability"];
+  const badProjection = projectionKeys.some((k) => result[k] != null && typeof result[k] !== "string" && !bbStrictFinite(result[k]));
+  const badLineDependent = lineDependentKeys.some((k) => typeof result[k] === "number" && !Number.isNaN(result[k]) && !Number.isFinite(result[k]));
+  if (badProjection || badLineDependent) return noPlayProjectionResult(marketKey, reason);
   return result;
 }
 
@@ -35313,6 +35626,656 @@ function getAdvancedStatsEligibility(league, ctxA, ctxB, marketKey = "ft", conte
   } catch (_e) {}
   return result;
 }
+
+/* ===================== TEAM MEMORY (silent projection adjustment) =====================
+   Learns from SETTLED tracked games (one game per eventId), using the actual score vs the model's own
+   pre-memory projection. The projection already contains recency-weighted form, so only the part the
+   model keeps missing is learned (residuals, not results, and not ticket wins/losses).
+   Output: getTeamMemoryAdjustment(league, teamA, teamB, opts) -> { dA, dB, notes, n, ... }.
+   No notes or badges are written on picks. The applied numbers are saved hidden on the tracked payload
+   (teamMemoryAdj) and listed in the tracker report "Team memory" section (master switch, ignore/avoid). */
+const BB_TM_ALIAS_KEY = "BB_TEAM_ALIASES_V1";
+const BB_TM_OVERRIDE_KEY = "BB_TEAM_MEMORY_OVERRIDES_V1";
+const BB_TM_SETTINGS_KEY = "BB_TEAM_MEMORY_SETTINGS_V1";
+const BB_TM_CFG = {
+  halfLifeDays: 45,
+  kTeam: 6,
+  kMatch: 4,
+  minTeamN: 3,
+  minMatchGames: 2,
+  capTeam: 3,
+  capMatchMargin: 4,
+  capMatchTotal: 4,
+  capTotal: 6,
+  capMargin: 5,
+  againstFormCap: 1.5,
+  formNeutral: 1.0,
+  refTotal: 165,
+};
+
+function bbTmLoad(key, def) {
+  try {
+    const raw = typeof localStorage !== "undefined" ? localStorage.getItem(key) : null;
+    const v = raw ? JSON.parse(raw) : null;
+    return v && typeof v === "object" ? v : def;
+  } catch (_e) {
+    return def;
+  }
+}
+function bbTmSave(key, v) {
+  try { if (typeof localStorage !== "undefined") localStorage.setItem(key, JSON.stringify(v)); } catch (_e) {}
+}
+function bbTeamMemoryEnabled(settings) {
+  const s = settings || bbTmLoad(BB_TM_SETTINGS_KEY, {});
+  return s.enabled !== false; /* default ON */
+}
+function bbTeamMemorySetEnabled(on) {
+  const s = bbTmLoad(BB_TM_SETTINGS_KEY, {});
+  s.enabled = !!on;
+  bbTmSave(BB_TM_SETTINGS_KEY, s);
+}
+function bbTmNum(v) {
+  return bbStrictFinite(v) ? Number(v) : NaN;
+}
+function bbTmIsPlaceholderName(name) {
+  const n = normalizeTeamName(name);
+  return !n || ["a", "b", "—", "-", "team a", "team b", "home", "away", "unknown"].includes(n);
+}
+function bbTmCleanId(id) {
+  if (id == null || id === "") return "";
+  const s = typeof normalizeId === "function" ? normalizeId(id) : String(id);
+  return /^\d+$/.test(String(s)) ? String(s) : "";
+}
+
+/* Canonical team key: league + ESPN id when present, else normalised name via the alias map. */
+function bbTeamKey(league, id, name, aliases) {
+  const lg = String(league || "unknown").toLowerCase();
+  const al = aliases || bbTmLoad(BB_TM_ALIAS_KEY, {});
+  const cid = bbTmCleanId(id);
+  if (cid) return lg + ":id:" + cid;
+  if (bbTmIsPlaceholderName(name)) return "";
+  const nm = normalizeTeamName(name);
+  const manual = (al.names && al.names[lg]) || {};
+  const canon = manual[nm] || nm;
+  const idFor = al.nameToId && al.nameToId[lg] ? al.nameToId[lg][canon] || al.nameToId[lg][nm] : "";
+  if (idFor) return lg + ":id:" + idFor;
+  return lg + ":n:" + canon;
+}
+
+/* Auto-learn: an id seen with a (new) name maps that name to the id. Returns true if the map changed. */
+function bbTmLearnAliases(picks, aliases) {
+  let changed = false;
+  aliases.nameToId = aliases.nameToId || {};
+  aliases.idNames = aliases.idNames || {};
+  (picks || []).forEach((p) => {
+    if (!p) return;
+    const lg = String(p.league || "unknown").toLowerCase();
+    [[p.homeId, p.homeTeam], [p.awayId, p.awayTeam]].forEach(([id, name]) => {
+      const cid = bbTmCleanId(id);
+      if (!cid || bbTmIsPlaceholderName(name)) return;
+      const nm = normalizeTeamName(name);
+      aliases.nameToId[lg] = aliases.nameToId[lg] || {};
+      aliases.idNames[lg] = aliases.idNames[lg] || {};
+      if (aliases.nameToId[lg][nm] !== cid) { aliases.nameToId[lg][nm] = cid; changed = true; }
+      const list = aliases.idNames[lg][cid] || (aliases.idNames[lg][cid] = []);
+      if (!list.includes(String(name))) { list.push(String(name)); changed = true; }
+    });
+  });
+  return changed;
+}
+function bbTeamMemorySetAlias(league, variant, canonical) {
+  const al = bbTmLoad(BB_TM_ALIAS_KEY, {});
+  const lg = String(league || "unknown").toLowerCase();
+  al.names = al.names || {};
+  al.names[lg] = al.names[lg] || {};
+  const v = normalizeTeamName(variant);
+  const c = normalizeTeamName(canonical);
+  if (!v || !c) return false;
+  if (v === c) delete al.names[lg][v];
+  else al.names[lg][v] = c;
+  bbTmSave(BB_TM_ALIAS_KEY, al);
+  return true;
+}
+
+function bbTmParseScoreline(raw) {
+  const m = String(raw == null ? "" : raw).trim().match(/^(\d+(?:\.\d+)?)\s*[-–:]\s*(\d+(?:\.\d+)?)$/);
+  return m ? { a: Number(m[1]), b: Number(m[2]) } : null;
+}
+function bbTmIsSettled(p) {
+  const s = String(p?.resultStatus || p?.engineResultStatus || "").toLowerCase();
+  return s === "win" || s === "loss" || s === "push" || s === "no_play_settled";
+}
+function bbTmGameTs(p) {
+  const cands = [p?.eventDate, p?.settledAt, p?.createdAt];
+  for (const c of cands) {
+    if (c == null || c === "") continue;
+    const num = typeof c === "number" ? c : /^\d{9,}$/.test(String(c).trim()) ? Number(String(c).trim()) : NaN;
+    const t = Number.isFinite(num) ? (num < 1e12 ? num * 1000 : num) : Date.parse(String(c));
+    if (Number.isFinite(t)) return t;
+  }
+  return NaN;
+}
+
+/* One record per settled game (eventId), Team-A oriented. */
+function bbTmExtractGames(picks, aliases) {
+  const byEvent = new Map();
+  (picks || []).forEach((p) => {
+    if (!p || !p.eventId || !bbTmIsSettled(p)) return;
+    const lg = String(p.league || "unknown").toLowerCase();
+    const keyA = bbTeamKey(lg, p.homeId, p.homeTeam, aliases);
+    const keyB = bbTeamKey(lg, p.awayId, p.awayTeam, aliases);
+    if (!keyA || !keyB || keyA === keyB) return;
+    const id = lg + "|" + String(p.eventId);
+    let g = byEvent.get(id);
+    if (!g) {
+      g = { eventId: String(p.eventId), league: lg, keyA, keyB, nameA: p.homeTeam, nameB: p.awayTeam, ts: NaN,
+        actA: NaN, actB: NaN, actTotal: NaN, actH1A: NaN, actH1B: NaN, actH1Total: NaN,
+        projA: NaN, projB: NaN, projTotal: NaN, projH1Total: NaN, baseFromMemory: false };
+      byEvent.set(id, g);
+    }
+    const ts = bbTmGameTs(p);
+    if (Number.isFinite(ts) && (!Number.isFinite(g.ts) || ts < g.ts)) g.ts = ts;
+    const mk = String(p.marketKey || "").toLowerCase();
+    const set = (field, v) => { if (!Number.isFinite(g[field]) && Number.isFinite(v)) g[field] = v; };
+    /* actuals */
+    const gs = p.gameScore;
+    if (gs && typeof gs === "object") {
+      set("actA", bbTmNum(gs.a)); set("actB", bbTmNum(gs.b));
+      set("actH1A", bbTmNum(gs.h1a)); set("actH1B", bbTmNum(gs.h1b));
+    }
+    const act = typeof actualForMarket === "function" ? actualForMarket(p) : NaN;
+    if (mk === "team_a") set("actA", act);
+    else if (mk === "team_b") set("actB", act);
+    else if (mk === "ft") set("actTotal", act);
+    else if (mk === "h1") set("actH1Total", act);
+    else if (mk === "h1_team_a") set("actH1A", act);
+    else if (mk === "h1_team_b") set("actH1B", act);
+    {
+      /* FIX SC3: scorelines are stored Team A first for every market (manual and automatic) */
+      const sl = bbTmParseScoreline(p.actualScore);
+      const per = /^q[1-4]/.test(mk) ? "q" : (mk === "h1" || mk.indexOf("h1_") === 0 || mk === "handicap_h1") ? "h1" : (mk === "h2" || mk === "handicap_h2") ? "h2" : "ft";
+      if (sl && mk !== "htft") {
+        if (per === "ft") { set("actA", sl.a); set("actB", sl.b); }
+        else if (per === "h1") { set("actH1A", sl.a); set("actH1B", sl.b); }
+      }
+    }
+    /* projections: prefer the saved pre-memory base (never learn from our own adjustment) */
+    const base = p.teamMemoryAdj && p.teamMemoryAdj.base;
+    if (base && typeof base === "object") {
+      if (!g.baseFromMemory) {
+        g.projA = bbTmNum(base.a); g.projB = bbTmNum(base.b);
+        g.projTotal = bbTmNum(base.total); g.projH1Total = bbTmNum(base.h1Total);
+        g.baseFromMemory = true;
+      }
+    } else if (!g.baseFromMemory) {
+      const pr = bbTmNum(p.projection);
+      if (mk === "team_a") set("projA", pr);
+      else if (mk === "team_b") set("projB", pr);
+      else if (mk === "ft") set("projTotal", pr);
+      else if (mk === "h1") set("projH1Total", pr);
+    }
+  });
+  const out = [];
+  byEvent.forEach((g) => {
+    if (!Number.isFinite(g.actTotal) && Number.isFinite(g.actA) && Number.isFinite(g.actB)) g.actTotal = g.actA + g.actB;
+    if (!Number.isFinite(g.actH1Total) && Number.isFinite(g.actH1A) && Number.isFinite(g.actH1B)) g.actH1Total = g.actH1A + g.actH1B;
+    if (!Number.isFinite(g.projTotal) && Number.isFinite(g.projA) && Number.isFinite(g.projB)) g.projTotal = g.projA + g.projB;
+    /* one-sided team residuals are kept: a settled Team B total alone still says how B scored / A allowed */
+    if (Number.isFinite(g.actA) && Number.isFinite(g.projA)) g.resA = g.actA - g.projA;
+    if (Number.isFinite(g.actB) && Number.isFinite(g.projB)) g.resB = g.actB - g.projB;
+    if (Number.isFinite(g.resA) && Number.isFinite(g.resB)) {
+      g.resTotal = g.resA + g.resB;
+      g.resMargin = g.resA - g.resB;
+    } else if (Number.isFinite(g.actTotal) && Number.isFinite(g.projTotal)) {
+      g.resTotal = g.actTotal - g.projTotal;
+    }
+    g.actMargin = Number.isFinite(g.actA) && Number.isFinite(g.actB) ? g.actA - g.actB : NaN;
+    if (Number.isFinite(g.resTotal) || Number.isFinite(g.actMargin) || Number.isFinite(g.resA) || Number.isFinite(g.resB)) out.push(g);
+  });
+  return out;
+}
+
+function bbTmPairKey(k1, k2) {
+  return k1 < k2 ? k1 + "||" + k2 : k2 + "||" + k1;
+}
+function bbTmShrunk(sumWR, sumW, k) {
+  return sumWR / (sumW + k);
+}
+function bbTmClamp(v, cap) {
+  return Math.max(-cap, Math.min(cap, v));
+}
+
+/* Build team and matchup statistics from games settled strictly before asOf, excluding excludeEventId. */
+function bbTmBuildStats(games, league, asOf, excludeEventId, cfg) {
+  const C = cfg || BB_TM_CFG;
+  const lg = String(league || "unknown").toLowerCase();
+  const teams = {};
+  const matchups = {};
+  const team = (k) => teams[k] || (teams[k] = { key: k, wS: 0, wrS: 0, wA: 0, wrA: 0, games: 0, name: "" });
+  (games || []).forEach((g) => {
+    if (g.league !== lg) return;
+    if (excludeEventId && String(g.eventId) === String(excludeEventId)) return; /* leakage: never the event being projected */
+    if (!Number.isFinite(g.ts) || !(g.ts < asOf)) return; /* leakage: only games before this event */
+    const ageDays = Math.max(0, (asOf - g.ts) / 86400000);
+    const w = Math.pow(0.5, ageDays / C.halfLifeDays);
+    const tA = team(g.keyA), tB = team(g.keyB);
+    tA.name = tA.name || g.nameA; tB.name = tB.name || g.nameB;
+    tA.games++; tB.games++;
+    if (Number.isFinite(g.resA) && Number.isFinite(g.resB)) {
+      tA.wS += w; tA.wrS += w * g.resA; tA.wA += w; tA.wrA += w * g.resB;
+      tB.wS += w; tB.wrS += w * g.resB; tB.wA += w; tB.wrA += w * g.resA;
+    } else if (Number.isFinite(g.resA) || Number.isFinite(g.resB)) {
+      /* only one side's total is known */
+      if (Number.isFinite(g.resA)) { tA.wS += w; tA.wrS += w * g.resA; tB.wA += w; tB.wrA += w * g.resA; }
+      if (Number.isFinite(g.resB)) { tB.wS += w; tB.wrS += w * g.resB; tA.wA += w; tA.wrA += w * g.resB; }
+    } else if (Number.isFinite(g.resTotal)) {
+      /* only the total is known: split it, at half weight */
+      const hw = 0.5 * w, half = g.resTotal / 2;
+      [tA, tB].forEach((t) => { t.wS += hw; t.wrS += hw * half; t.wA += hw; t.wrA += hw * half; });
+    }
+    const pk = bbTmPairKey(g.keyA, g.keyB);
+    const m = matchups[pk] || (matchups[pk] = { key: pk, first: pk.split("||")[0], second: pk.split("||")[1], names: {},
+      games: 0, wM: 0, wrM: 0, wT: 0, wrT: 0, sumActMargin: 0, nActMargin: 0, sumActTotal: 0, nActTotal: 0, sumH1Total: 0, nH1: 0 });
+    m.names[g.keyA] = m.names[g.keyA] || g.nameA;
+    m.names[g.keyB] = m.names[g.keyB] || g.nameB;
+    const sign = g.keyA === m.first ? 1 : -1; /* margins stored from the "first" team's perspective */
+    m.games++;
+    if (Number.isFinite(g.resMargin)) { m.wM += w; m.wrM += w * sign * g.resMargin; }
+    if (Number.isFinite(g.resTotal)) { m.wT += w; m.wrT += w * g.resTotal; }
+    if (Number.isFinite(g.actMargin)) { m.sumActMargin += sign * g.actMargin; m.nActMargin++; }
+    if (Number.isFinite(g.actTotal)) { m.sumActTotal += g.actTotal; m.nActTotal++; }
+    if (Number.isFinite(g.actH1Total)) { m.sumH1Total += g.actH1Total; m.nH1++; }
+  });
+  Object.values(teams).forEach((t) => {
+    t.scoredBias = t.wS >= C.minTeamN ? bbTmShrunk(t.wrS, t.wS, C.kTeam) : 0;
+    t.allowedBias = t.wA >= C.minTeamN ? bbTmShrunk(t.wrA, t.wA, C.kTeam) : 0;
+    t.nEff = Math.max(t.wS, t.wA);
+  });
+  Object.values(matchups).forEach((m) => {
+    const ok = m.games >= C.minMatchGames;
+    m.marginBias = ok && m.wM > 0 ? bbTmShrunk(m.wrM, m.wM, C.kMatch) : 0; /* first-team perspective */
+    m.totalBias = ok && m.wT > 0 ? bbTmShrunk(m.wrT, m.wT, C.kMatch) : 0;
+    m.avgActMargin = m.nActMargin ? m.sumActMargin / m.nActMargin : NaN;
+    m.avgActTotal = m.nActTotal ? m.sumActTotal / m.nActTotal : NaN;
+    m.avgH1Total = m.nH1 ? m.sumH1Total / m.nH1 : NaN;
+  });
+  return { teams, matchups };
+}
+
+function bbTmLeagueScale(league, cfg) {
+  const C = cfg || BB_TM_CFG;
+  let eb = NaN;
+  try { eb = typeof getLeagueScoreBase === "function" ? Number(getLeagueScoreBase(league)) : NaN; } catch (_e) {}
+  return Number.isFinite(eb) && eb > 0 ? Math.max(0.85, Math.min(1.3, eb / C.refTotal)) : 1;
+}
+
+/* Pure core: everything injected, so it can be tested in isolation. */
+function bbTeamMemoryCompute(picks, league, teamA, teamB, opts) {
+  const o = opts || {};
+  const C = o.cfg || BB_TM_CFG;
+  const zero = { dA: 0, dB: 0, notes: [], n: 0, applied: false, keyA: "", keyB: "", reason: "" };
+  const settings = o.settings || {};
+  if (!bbTeamMemoryEnabled(settings)) return { ...zero, reason: "master switch off" };
+  const aliases = o.aliases || {};
+  const overrides = (o.overrides && o.overrides.entries) || {};
+  const lg = String(league || "unknown").toLowerCase();
+  const keyA = bbTeamKey(lg, teamA && teamA.id, teamA && teamA.name, aliases);
+  const keyB = bbTeamKey(lg, teamB && teamB.id, teamB && teamB.name, aliases);
+  if (!keyA || !keyB || keyA === keyB) return { ...zero, keyA, keyB, reason: "team identity unknown" };
+  const asOf = Number.isFinite(o.asOf) ? o.asOf : Date.now();
+  const games = o.games || bbTmExtractGames(picks, aliases);
+  const stats = bbTmBuildStats(games, lg, asOf, o.eventId, C);
+  const scale = Number.isFinite(o.scale) ? o.scale : 1;
+  const pk = bbTmPairKey(keyA, keyB);
+  const avoid = overrides[keyA] === "avoid" || overrides[keyB] === "avoid" || overrides["m:" + pk] === "avoid";
+  const ign = (k) => overrides[k] === "ignore";
+  const tA = !ign(keyA) ? stats.teams[keyA] : null;
+  const tB = !ign(keyB) ? stats.teams[keyB] : null;
+  const capT = C.capTeam * scale;
+  /* team part: own offence residual + opponent defence residual, averaged; capped per side */
+  const teamA_d = bbTmClamp(0.5 * ((tA ? tA.scoredBias : 0) + (tB ? tB.allowedBias : 0)), capT);
+  const teamB_d = bbTmClamp(0.5 * ((tB ? tB.scoredBias : 0) + (tA ? tA.allowedBias : 0)), capT);
+  /* matchup part */
+  const m = !ign("m:" + pk) && !ign(keyA) && !ign(keyB) ? stats.matchups[pk] : null;
+  const sign = m && m.first === keyA ? 1 : -1;
+  const mMargin = m ? bbTmClamp(sign * m.marginBias, C.capMatchMargin * scale) : 0;
+  const mTotal = m ? bbTmClamp(m.totalBias, C.capMatchTotal * scale) : 0;
+  const total = bbTmClamp(teamA_d + teamB_d + mTotal, C.capTotal * scale);
+  const margin = bbTmClamp(teamA_d - teamB_d + mMargin, C.capMargin * scale);
+  const dA = (total + margin) / 2;
+  const dB = (total - margin) / 2;
+  const notes = [];
+  if (m && m.games >= C.minMatchGames) {
+    const nmA = (m.names[keyA] || keyA), nmB = (m.names[keyB] || keyB);
+    notes.push(`Matchup memory: ${nmA} vs ${nmB}, ${m.games} games, ${nmA} ${Number.isFinite(m.avgActMargin) ? (sign * m.avgActMargin >= 0 ? "+" : "") + (sign * m.avgActMargin).toFixed(1) : "?"} avg margin, model off by ${(sign * (m.wM ? m.wrM / m.wM : 0) >= 0 ? "+" : "") + (sign * (m.wM ? m.wrM / m.wM : 0)).toFixed(1)} → adjusted ${(mMargin >= 0 ? "+" : "") + mMargin.toFixed(1)}`);
+  }
+  if (tA && tA.nEff >= C.minTeamN) notes.push(`Team memory A: scored ${tA.scoredBias.toFixed(1)}, allowed ${tA.allowedBias.toFixed(1)} (eff n ${tA.nEff.toFixed(1)})`);
+  if (tB && tB.nEff >= C.minTeamN) notes.push(`Team memory B: scored ${tB.scoredBias.toFixed(1)}, allowed ${tB.allowedBias.toFixed(1)} (eff n ${tB.nEff.toFixed(1)})`);
+  const n = (tA ? tA.games : 0) + (tB ? tB.games : 0);
+  return {
+    dA: Number(dA.toFixed(3)), dB: Number(dB.toFixed(3)), notes, n,
+    applied: Math.abs(dA) > 1e-9 || Math.abs(dB) > 1e-9,
+    keyA, keyB, pairKey: pk, avoid,
+    parts: { teamA: teamA_d, teamB: teamB_d, matchupMargin: mMargin, matchupTotal: mTotal, total, margin, scale },
+    matchupGames: m ? m.games : 0,
+    teamNEff: { A: tA ? Number(tA.nEff.toFixed(2)) : 0, B: tB ? Number(tB.nEff.toFixed(2)) : 0 },
+  };
+}
+
+/* Form sanity guard: an adjustment against the team's recent form direction is limited to againstFormCap.
+   series: most recent first (same order as MODEL_TUNING.recencyWeights). */
+function bbTmFormDirection(series, cfg) {
+  const C = cfg || BB_TM_CFG;
+  const s = (Array.isArray(series) ? series : []).filter(bbStrictFinite).map(Number);
+  if (s.length < 5) return 0;
+  const recent = (s[0] + s[1] + s[2]) / 3;
+  const all = s.reduce((a, b) => a + b, 0) / s.length;
+  const d = recent - all;
+  return Math.abs(d) >= C.formNeutral ? Math.sign(d) : 0;
+}
+function bbTmFormGuard(d, series, scale, cfg) {
+  const C = cfg || BB_TM_CFG;
+  const dir = bbTmFormDirection(series, C);
+  const cap = C.againstFormCap * (Number.isFinite(scale) ? scale : 1);
+  if (dir !== 0 && Math.sign(d) === -dir && Math.abs(d) > cap) return { d: Math.sign(d) * cap, guarded: true, dir };
+  return { d, guarded: false, dir };
+}
+
+function bbTmAllTrackedPicks() {
+  try {
+    /* same pool as the Tracked Picks header / report (active + archived, deleted removed, deduped) */
+    if (typeof getCanonicalTrackedPicksPool === "function") return getCanonicalTrackedPicksPool();
+    const st = AppState?.tracker?.state || {};
+    return [...(Array.isArray(st.activePicks) ? st.activePicks : []), ...(Array.isArray(st.archivedPicks) ? st.archivedPicks : [])];
+  } catch (_e) {
+    return [];
+  }
+}
+
+/* BACKFILL: picks settled before team memory existed carry no game score, and events where only quarter / 1H /
+   handicap picks were settled have no usable FT figure. Fetch the final score once per such event (same sources
+   the settlement uses) and store gameScore (Team-A oriented) on every pick of that event. Throttled: at most
+   BB_TM_BACKFILL_MAX events per pass, one pass per 10 min, failed events retried after 3 days. */
+const BB_TM_BACKFILL_KEY = "bb_team_memory_backfill_v1";
+const BB_TM_BACKFILL_MAX = 25;
+let g_bbTmBackfillAt = 0;
+let g_bbTmBackfillBusy = false;
+function bbTmScoreFromCompetition(competition, homeId) {
+  const comps = (competition && competition.competitors) || [];
+  const st = (competition && competition.status && competition.status.type) || {};
+  if (!(st.completed || st.state === "post" || st.name === "STATUS_FINAL")) return null;
+  const home = comps.find((c) => c && c.homeAway === "home") || comps[0];
+  const away = comps.find((c) => c && c.homeAway === "away") || comps[1];
+  if (!home || !away) return null;
+  const val = (v) => {
+    if (v == null) return NaN;
+    const n = parseFloat(typeof v === "object" ? (v.value ?? v.displayValue) : v);
+    return Number.isFinite(n) ? n : NaN;
+  };
+  const sH = val(home.score), sA = val(away.score);
+  if (!(sH > 0 && sA > 0)) return null;
+  const id = String(homeId == null ? "" : homeId);
+  if (!id) return null;
+  let aIsHome;
+  if (id === String(home.id == null ? "" : home.id)) aIsHome = true;
+  else if (id === String(away.id == null ? "" : away.id)) aIsHome = false;
+  else return null; /* orientation unknown: never guess */
+  const ls = (c) => (Array.isArray(c.linescores) ? c.linescores : []).map(val);
+  const lh = ls(home), la = ls(away);
+  const h1h = lh.length >= 4 && Number.isFinite(lh[0] + lh[1]) ? lh[0] + lh[1] : null;
+  const h1a = la.length >= 4 && Number.isFinite(la[0] + la[1]) ? la[0] + la[1] : null;
+  return aIsHome ? { a: sH, b: sA, h1a: h1h, h1b: h1a } : { a: sA, b: sH, h1a: h1a, h1b: h1h };
+}
+function bbTmBackfillCandidates(picks, attempted, now) {
+  const byEvent = new Map();
+  (picks || []).forEach((p) => {
+    if (!p || !p.eventId || !bbTmIsSettled(p)) return;
+    const k = String(p.league || "").toLowerCase() + "|" + String(p.eventId);
+    const e = byEvent.get(k) || { key: k, league: p.league, eventId: p.eventId, homeId: p.homeId, picks: [], has: false };
+    if (p.gameScore && bbTmNum(p.gameScore.a) > 0 && bbTmNum(p.gameScore.b) > 0) e.has = true;
+    if (!e.homeId && p.homeId) e.homeId = p.homeId;
+    e.picks.push(p);
+    byEvent.set(k, e);
+  });
+  const retryMs = 3 * 86400000;
+  return [...byEvent.values()].filter((e) => !e.has && e.homeId && !(attempted[e.key] && now - attempted[e.key] < retryMs));
+}
+async function bbTmFetchCompetition(league, eventId) {
+  if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
+    return typeof fetchIncrowdEuroCompetitionForEvent === "function" ? await fetchIncrowdEuroCompetitionForEvent(league, eventId) : null;
+  }
+  if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
+    return typeof fetchKblCompetitionForEvent === "function" ? await fetchKblCompetitionForEvent(league, eventId) : null;
+  }
+  const base = typeof getTrackedLeagueApiBase === "function" ? getTrackedLeagueApiBase(league) : "";
+  if (!base || typeof proxyFetch !== "function") return null;
+  const data = await proxyFetch(base + "/summary?event=" + encodeURIComponent(eventId), 6000).catch(() => null);
+  return (data && data.header && data.header.competitions && data.header.competitions[0]) || null;
+}
+async function bbTmBackfillGameScores(opts) {
+  const o = opts || {};
+  const now = Date.now();
+  if (g_bbTmBackfillBusy || (!o.force && now - g_bbTmBackfillAt < 10 * 60 * 1000)) return { filled: 0, tried: 0, skipped: true };
+  if (!bbTeamMemoryEnabled()) return { filled: 0, tried: 0, skipped: true };
+  g_bbTmBackfillBusy = true;
+  g_bbTmBackfillAt = now;
+  let filled = 0, tried = 0;
+  try {
+    const attempted = bbTmLoad(BB_TM_BACKFILL_KEY, {});
+    const fetcher = o.fetchCompetition || bbTmFetchCompetition;
+    const todo = bbTmBackfillCandidates(o.picks || bbTmAllTrackedPicks(), attempted, now).slice(0, o.max || BB_TM_BACKFILL_MAX);
+    for (const e of todo) {
+      tried++;
+      let comp = null;
+      try { comp = await fetcher(e.league, e.eventId); } catch (_e) { comp = null; }
+      const gs = comp ? bbTmScoreFromCompetition(comp, e.homeId) : null;
+      if (gs) {
+        /* write onto the LIVE pick objects (a save/hydrate may have replaced them during the await) */
+        const live = o.picks ? e.picks : bbTmRawTrackedPicks().filter((p) => p && String(p.eventId) === String(e.eventId) && String(p.league || "").toLowerCase() === String(e.league || "").toLowerCase());
+        live.forEach((p) => { if (String(p.homeId || "") === String(e.homeId)) p.gameScore = { ...gs }; });
+        filled++;
+        delete attempted[e.key];
+      } else {
+        attempted[e.key] = now;
+      }
+    }
+    bbTmSave(BB_TM_BACKFILL_KEY, attempted);
+    if (filled && !o.picks && typeof forceTrackerSaveNow === "function") {
+      try { await forceTrackerSaveNow([]); } catch (_s) {}
+    }
+  } finally {
+    g_bbTmBackfillBusy = false;
+  }
+  return { filled, tried, skipped: false };
+}
+
+/* raw (mutable) tracker pick objects: writes must land on these, not on the canonical-pool copies */
+function bbTmRawTrackedPicks() {
+  try {
+    const st = AppState?.tracker?.state || {};
+    return [...(Array.isArray(st.activePicks) ? st.activePicks : []), ...(Array.isArray(st.archivedPicks) ? st.archivedPicks : [])];
+  } catch (_e) {
+    return [];
+  }
+}
+/* Live wrapper used by runEngine. */
+function getTeamMemoryAdjustment(league, teamA, teamB, opts) {
+  const o = opts || {};
+  try {
+    const picks = o.picks || bbTmAllTrackedPicks();
+    const aliases = bbTmLoad(BB_TM_ALIAS_KEY, {});
+    if (bbTmLearnAliases(picks, aliases)) bbTmSave(BB_TM_ALIAS_KEY, aliases);
+    return bbTeamMemoryCompute(picks, league, teamA, teamB, {
+      ...o,
+      aliases,
+      overrides: bbTmLoad(BB_TM_OVERRIDE_KEY, { entries: {} }),
+      settings: bbTmLoad(BB_TM_SETTINGS_KEY, {}),
+      scale: bbTmLeagueScale(league),
+    });
+  } catch (e) {
+    if (typeof engineDebug === "function") engineDebug("team memory failed (no adjustment)", { error: e?.message || String(e) });
+    return { dA: 0, dB: 0, notes: [], n: 0, applied: false, keyA: "", keyB: "", reason: "error" };
+  }
+}
+
+/* Near-duplicate names (same league, name keys only): likely the same team under two spellings. */
+function bbTmLevenshtein(a, b) {
+  if (a === b) return 0;
+  const m = a.length, n = b.length;
+  if (!m || !n) return m || n;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+function bbTeamMemoryNearDuplicates(keys) {
+  const byLeague = {};
+  (keys || []).forEach((k) => {
+    const parts = String(k).split(":");
+    if (parts.length < 3 || parts[1] !== "n") return;
+    (byLeague[parts[0]] = byLeague[parts[0]] || []).push(parts.slice(2).join(":"));
+  });
+  const out = [];
+  Object.keys(byLeague).forEach((lg) => {
+    const names = [...new Set(byLeague[lg])];
+    for (let i = 0; i < names.length; i++) {
+      for (let j = i + 1; j < names.length; j++) {
+        const a = names[i], b = names[j];
+        const contains = a.length >= 4 && b.length >= 4 && (a.includes(b) || b.includes(a));
+        if (contains || bbTmLevenshtein(a, b) <= 2) out.push({ league: lg, a, b });
+      }
+    }
+  });
+  return out;
+}
+
+/* Avoid list: NO PLAY through the single writer. Respects the master switch. */
+function bbApplyTeamMemoryAvoid(picks, tm) {
+  if (!tm || !tm.avoid || !Array.isArray(picks)) return 0;
+  let n = 0;
+  picks.forEach((p) => {
+    if (!p || p.pick === "NO PLAY") return;
+    forcePickNoPlayWithNote(p, "Team memory avoid list");
+    p.lockRestricted = true;
+    n++;
+  });
+  return n;
+}
+
+/* Tracker report section (not a pick note). */
+function bbTeamMemoryReportData() {
+  const picks = bbTmAllTrackedPicks();
+  const aliases = bbTmLoad(BB_TM_ALIAS_KEY, {});
+  if (bbTmLearnAliases(picks, aliases)) bbTmSave(BB_TM_ALIAS_KEY, aliases);
+  const games = bbTmExtractGames(picks, aliases);
+  const leagues = [...new Set(games.map((g) => g.league))];
+  const rowsT = [], rowsM = [];
+  const scaleOf = {};
+  leagues.forEach((lg) => {
+    scaleOf[lg] = bbTmLeagueScale(lg);
+    const st = bbTmBuildStats(games, lg, Date.now() + 1, null, BB_TM_CFG);
+    Object.values(st.teams).forEach((t) => rowsT.push({ league: lg, ...t }));
+    Object.values(st.matchups).forEach((m) => rowsM.push({ league: lg, ...m }));
+  });
+  rowsT.sort((a, b) => b.nEff - a.nEff);
+  rowsM.sort((a, b) => b.games - a.games);
+  const nameKeys = rowsT.map((t) => t.key);
+  const settledPicks = typeof bbTrackerRecord === "function"
+    ? bbTrackerRecord(picks).settled
+    : (picks || []).filter((p) => ["win", "loss", "push"].includes(String(p?.resultStatus || p?.engineResultStatus || "").toLowerCase())).length;
+  /* displayed counts are PICKS (same definition as the Tracked Picks header); games stay internal to the math */
+  const teamPicks = {}, pairPicks = {};
+  (picks || []).forEach((p) => {
+    if (typeof bbTrackerPickOutcome === "function" ? !bbTrackerPickOutcome(p) : !bbTmIsSettled(p)) return;
+    const lg = String(p.league || "unknown").toLowerCase();
+    const kA = bbTeamKey(lg, p.homeId, p.homeTeam, aliases), kB = bbTeamKey(lg, p.awayId, p.awayTeam, aliases);
+    if (kA) teamPicks[kA] = (teamPicks[kA] || 0) + 1;
+    if (kB) teamPicks[kB] = (teamPicks[kB] || 0) + 1;
+    if (kA && kB && kA !== kB) { const pk = bbTmPairKey(kA, kB); pairPicks[pk] = (pairPicks[pk] || 0) + 1; }
+  });
+  rowsT.forEach((t) => { t.picks = teamPicks[t.key] || 0; });
+  rowsM.forEach((m) => { m.picks = pairPicks[m.key] || 0; });
+  return { games: games.length, settledPicks, rowsT, rowsM, nearDup: bbTeamMemoryNearDuplicates(nameKeys), scaleOf };
+}
+function bbTeamMemoryToggle(key, mode) {
+  const ov = bbTmLoad(BB_TM_OVERRIDE_KEY, { entries: {} });
+  ov.entries = ov.entries || {};
+  if (!mode || ov.entries[key] === mode) delete ov.entries[key];
+  else ov.entries[key] = mode;
+  bbTmSave(BB_TM_OVERRIDE_KEY, ov);
+  try { if (typeof renderTrackerAnalytics === "function") renderTrackerAnalytics(); } catch (_e) {}
+}
+function bbTeamMemoryClick(el) {
+  if (!el || !el.dataset) return;
+  if (el.dataset.tmMaster) {
+    bbTeamMemorySetEnabled(!bbTeamMemoryEnabled());
+    try { if (typeof renderTrackerAnalytics === "function") renderTrackerAnalytics(); } catch (_e) {}
+    return;
+  }
+  if (el.dataset.tmMergeLeague) {
+    bbTeamMemorySetAlias(el.dataset.tmMergeLeague, el.dataset.tmMergeFrom, el.dataset.tmMergeTo);
+    try { if (typeof renderTrackerAnalytics === "function") renderTrackerAnalytics(); } catch (_e) {}
+    return;
+  }
+  bbTeamMemoryToggle(el.dataset.tmKey, el.dataset.tmMode);
+}
+window.bbTeamMemoryClick = bbTeamMemoryClick;
+window.bbTeamMemorySetAlias = bbTeamMemorySetAlias;
+window.bbTeamMemorySetEnabled = bbTeamMemorySetEnabled;
+window.getTeamMemoryAdjustment = getTeamMemoryAdjustment;
+
+function bbRenderTeamMemorySection() {
+  try {
+    const esc = (s) => (typeof safeText === "function" ? safeText(s) : String(s == null ? "" : s));
+    const on = bbTeamMemoryEnabled();
+    const d = bbTeamMemoryReportData();
+    const ov = (bbTmLoad(BB_TM_OVERRIDE_KEY, { entries: {} }).entries) || {};
+    const fmt = (v) => (Number.isFinite(v) ? (v >= 0 ? "+" : "") + v.toFixed(1) : "—");
+    const btn = (key, mode, label) =>
+      `<button type="button" class="btn" style="padding:2px 6px;font-size:10px;${ov[key] === mode ? "background:#5a1d1d;color:#fff;" : ""}" data-tm-key="${esc(key)}" data-tm-mode="${mode}" onclick="bbTeamMemoryClick(this)">${ov[key] === mode ? label + " ✓" : label}</button>`;
+    const C = BB_TM_CFG;
+    const teamRowsHtml = d.rowsT.slice(0, 20).map((t) => {
+      const sc = d.scaleOf[t.league] || 1;
+      const active = t.nEff >= C.minTeamN;
+      return `<tr><td>${esc(t.name || t.key)}<div class="note" style="font-size:9px;">${esc(t.key)}</div></td><td class="num">${t.picks}</td><td class="num">${active ? fmt(bbTmClamp(t.scoredBias, C.capTeam * sc)) : "—"}</td><td class="num">${active ? fmt(bbTmClamp(t.allowedBias, C.capTeam * sc)) : "—"}</td><td>${btn(t.key, "ignore", "ignore")} ${btn(t.key, "avoid", "avoid")}</td></tr>`;
+    }).join("");
+    const matchRowsHtml = d.rowsM.slice(0, 20).map((m) => {
+      const sc = d.scaleOf[m.league] || 1;
+      const active = m.games >= C.minMatchGames;
+      const label = `${m.names[m.first] || m.first} vs ${m.names[m.second] || m.second}`;
+      return `<tr><td>${esc(label)}</td><td class="num">${m.picks}</td><td class="num">${fmt(m.avgActMargin)}</td><td class="num">${active ? fmt(bbTmClamp(m.marginBias, C.capMatchMargin * sc)) : "—"}</td><td class="num">${active ? fmt(bbTmClamp(m.totalBias, C.capMatchTotal * sc)) : "—"}</td><td>${btn("m:" + m.key, "ignore", "ignore")} ${btn("m:" + m.key, "avoid", "avoid")}</td></tr>`;
+    }).join("");
+    const dupHtml = d.nearDup.length
+      ? d.nearDup.slice(0, 15).map((x) => `<div class="note">${esc(x.league)}: "${esc(x.a)}" ≈ "${esc(x.b)}" <button type="button" class="btn" style="padding:1px 5px;font-size:10px;" data-tm-merge-league="${esc(x.league)}" data-tm-merge-from="${esc(x.b)}" data-tm-merge-to="${esc(x.a)}" onclick="bbTeamMemoryClick(this)">merge into "${esc(x.a)}"</button></div>`).join("")
+      : `<div class="note">No near-duplicate team names.</div>`;
+    return `
+      <div class="tracker-analytics-card" style="margin-top:10px;">
+        <div class="tracker-analytics-card-head">
+          <div class="tracker-analytics-card-title">Team memory</div>
+          <div class="tracker-analytics-card-meta">Learning from ${d.settledPicks} settled picks · silent projection adjustment
+            <button type="button" class="btn" style="padding:2px 8px;font-size:10px;margin-left:6px;" data-tm-master="1" onclick="bbTeamMemoryClick(this)">${on ? "ON" : "OFF"}</button></div>
+        </div>
+        <div class="tracker-analytics-card-body">
+          <div class="note" style="margin-bottom:6px;">Bias = actual − model projection, recency-weighted (45-day half-life) and shrunk toward 0. Team: needs ~${C.minTeamN}+ recent meetings with a final score, capped ±${C.capTeam}/side. Matchup: needs ${C.minMatchGames}+ meetings, capped ±${C.capMatchMargin} margin / ±${C.capMatchTotal} total (caps scale with league scoring). Ignore = not used. Avoid = NO PLAY for that team/matchup.</div>
+          <div class="table-wrap tracker-report-table-wrap"><table class="tracker-analytics-table">
+            <thead><tr><th>Team</th><th class="num">Settled picks</th><th class="num">Scored bias</th><th class="num">Allowed bias</th><th>Override</th></tr></thead>
+            <tbody>${teamRowsHtml || `<tr><td colspan="6" class="note">No settled picks with a final game score yet.</td></tr>`}</tbody>
+          </table></div>
+          <div class="table-wrap tracker-report-table-wrap" style="margin-top:8px;"><table class="tracker-analytics-table">
+            <thead><tr><th>Matchup (first-named perspective)</th><th class="num">Settled picks</th><th class="num">Avg margin</th><th class="num">Margin adj</th><th class="num">Total adj</th><th>Override</th></tr></thead>
+            <tbody>${matchRowsHtml || `<tr><td colspan="6" class="note">No repeat matchups yet.</td></tr>`}</tbody>
+          </table></div>
+          <div style="margin-top:8px;"><div class="note" style="font-weight:700;">Possible duplicate team names</div>${dupHtml}</div>
+        </div>
+      </div>`;
+  } catch (e) {
+    return `<div class="note">Team memory unavailable: ${String(e && e.message ? e.message : e).replace(/[<>&"]/g, "")}</div>`;
+  }
+}
+/* =================== END TEAM MEMORY =================== */
 
 function computeFTProjection({
   league,
@@ -35754,6 +36717,24 @@ function computeFTProjection({
   projBFT = clipProjectionToBaseline(projBFT, _ftBaselineBeforeH2H?.b, volLimit);
   ftProj = isFinite(projAFT) && isFinite(projBFT) ? projAFT + projBFT : NaN;
 
+  /* TEAM MEMORY: silent residual adjustment (live runs only: passed in via config.teamMemoryAdj, so replays and
+     the tuner never see it). Form guard: a push against the team's recent scoring direction is limited. */
+  let teamMemoryApplied = null;
+  if (config && config.teamMemoryAdj && isFinite(projAFT) && isFinite(projBFT)) {
+    const _tm = config.teamMemoryAdj;
+    const _tmScale = bbStrictFinite(_tm.scale) ? Number(_tm.scale) : 1;
+    const _tmGA = bbTmFormGuard(bbStrictFinite(_tm.dA) ? Number(_tm.dA) : 0, aFTS, _tmScale);
+    const _tmGB = bbTmFormGuard(bbStrictFinite(_tm.dB) ? Number(_tm.dB) : 0, bFTS, _tmScale);
+    teamMemoryApplied = {
+      baseA: projAFT, baseB: projBFT, baseTotal: ftProj,
+      dA: _tmGA.d, dB: _tmGB.d,
+      guardedA: _tmGA.guarded, guardedB: _tmGB.guarded, formDirA: _tmGA.dir, formDirB: _tmGB.dir,
+    };
+    projAFT = projAFT + _tmGA.d;
+    projBFT = projBFT + _tmGB.d;
+    ftProj = projAFT + projBFT;
+  }
+
   const netVenueEffect =
     (aVenueDiag?.enabled ? Number(aVenueDiag.offensiveAdjustment) || 0 : 0) +
     (bVenueDiag?.enabled ? Number(bVenueDiag.offensiveAdjustment) || 0 : 0);
@@ -35776,6 +36757,7 @@ function computeFTProjection({
     preAdjustmentProjAFT: _preAdjFT.a,
     preAdjustmentProjBFT: _preAdjFT.b,
     preAdjustmentFtProj: _preAdjFT.total,
+    teamMemoryApplied,
     fatigueDiag,
     ftSampleTier,
     pointsOnlyPrior: !!_pointsOnlyPrior,
@@ -36139,6 +37121,16 @@ function compute1HProjection({
   projA1H = clipProjectionToBaseline(projA1H, _preH2H_A1, volLimit);
   projB1H = clipProjectionToBaseline(projB1H, _preH2H_B1, volLimit);
   h1Proj = isFinite(projA1H) && isFinite(projB1H) ? projA1H + projB1H : NaN;
+  /* TEAM MEMORY: half share of the FT adjustment (live runs only) */
+  let teamMemoryApplied = null;
+  if (config && config.teamMemoryAdj && isFinite(projA1H) && isFinite(projB1H)) {
+    const _tmdA = bbStrictFinite(config.teamMemoryAdj.dA) ? Number(config.teamMemoryAdj.dA) : 0;
+    const _tmdB = bbStrictFinite(config.teamMemoryAdj.dB) ? Number(config.teamMemoryAdj.dB) : 0;
+    teamMemoryApplied = { baseA: projA1H, baseB: projB1H, baseTotal: h1Proj, dA: _tmdA, dB: _tmdB };
+    projA1H = projA1H + _tmdA;
+    projB1H = projB1H + _tmdB;
+    h1Proj = projA1H + projB1H;
+  }
 
   const h1Edge =
     isFinite(h1Proj) && isFinite(lines.h1Line) && lines.h1Line > 0 ? h1Proj - lines.h1Line : NaN;
@@ -36153,6 +37145,7 @@ function compute1HProjection({
     fatigueDiag: typeof _fatDiagH1 !== "undefined" ? _fatDiagH1 : null,
     h1Edge,
     projA1H,
+    teamMemoryApplied,
     projB1H,
     h1SampleTier,
     h1HasH2H,
@@ -36492,6 +37485,16 @@ function compute2HProjection({
   projA2H = clipProjectionToBaseline(projA2H, _preH2H_A2, volLimit);
   projB2H = clipProjectionToBaseline(projB2H, _preH2H_B2, volLimit);
   h2Proj = isFinite(projA2H) && isFinite(projB2H) ? projA2H + projB2H : NaN;
+  /* TEAM MEMORY: half share of the FT adjustment (live runs only) */
+  let teamMemoryApplied = null;
+  if (config && config.teamMemoryAdj && isFinite(projA2H) && isFinite(projB2H)) {
+    const _tmdA = bbStrictFinite(config.teamMemoryAdj.dA) ? Number(config.teamMemoryAdj.dA) : 0;
+    const _tmdB = bbStrictFinite(config.teamMemoryAdj.dB) ? Number(config.teamMemoryAdj.dB) : 0;
+    teamMemoryApplied = { baseA: projA2H, baseB: projB2H, baseTotal: h2Proj, dA: _tmdA, dB: _tmdB };
+    projA2H = projA2H + _tmdA;
+    projB2H = projB2H + _tmdB;
+    h2Proj = projA2H + projB2H;
+  }
 
   const h2Edge =
     isFinite(h2Proj) && isFinite(lines.h2Line) && lines.h2Line > 0 ? h2Proj - lines.h2Line : NaN;
@@ -36499,6 +37502,7 @@ function compute2HProjection({
     h2Proj,
     h2Edge,
     projA2H,
+    teamMemoryApplied,
     projB2H,
     h2Method: "independent",
     h2TargetSource: "compute2HProjection",
@@ -38016,6 +39020,15 @@ function buildTrackedPickPayload({
     trackerImpactLabel,
     trackerSoftInfluence: pickRow.trackerSoftInfluence || null,
     trackerFeedback: pickRow.trackerFeedback || null,
+    /* TEAM MEMORY: hidden audit of the applied adjustment (replaces the old stripped teamMemory field) */
+    teamMemoryAdj: (() => {
+      try {
+        const r = typeof window !== "undefined" ? window.__bbTeamMemoryRun : null;
+        return r && fixtureMeta.eventId && String(r.eventId) === String(fixtureMeta.eventId) ? JSON.parse(JSON.stringify(r)) : null;
+      } catch (_e) {
+        return null;
+      }
+    })(),
 
     lockRestricted: !!pickRow.lockRestricted,
     confidenceGrade: grade,
@@ -39310,6 +40323,24 @@ async function runEngine() {
 
     /* FIX #6: the inner forcePickNoPlayWithNote copy was removed; every NO PLAY uses the single top-level writer */
 
+    /* TEAM MEMORY: one lookup per run (Team A = home orientation). Learns only from games settled before
+       this event and never from this eventId. Silent: no pick notes; hidden audit fields only. */
+    window.__bbTeamMemoryRun = null;
+    let _bbTM = null;
+    try {
+      const _tmAsOf = bbTmGameTs({ eventDate: fixtureMeta?.eventDate });
+      _bbTM = getTeamMemoryAdjustment(
+        league,
+        { id: fixtureMeta?.homeId, name: fixtureMeta?.homeTeam },
+        { id: fixtureMeta?.awayId, name: fixtureMeta?.awayTeam },
+        { eventId: fixtureMeta?.eventId || "", asOf: Number.isFinite(_tmAsOf) ? _tmAsOf : Date.now() },
+      );
+      if (_bbTM && (_bbTM.applied || _bbTM.avoid)) engineDebug("team memory", { dA: _bbTM.dA, dB: _bbTM.dB, parts: _bbTM.parts, notes: _bbTM.notes, avoid: !!_bbTM.avoid });
+    } catch (_tmErr) {
+      _bbTM = null;
+    }
+    const _bbTMCfg = _bbTM && _bbTM.applied ? { dA: _bbTM.dA, dB: _bbTM.dB, scale: _bbTM.parts ? _bbTM.parts.scale : 1 } : null;
+
 /* CALCULATION SECTION */
     const ftCalc = computeFTProjection({
       league,
@@ -39323,12 +40354,21 @@ async function runEngine() {
         oppWeight: (_dynWeights && _dynWeights.oppWeight) != null ? _dynWeights.oppWeight : 0.35,
         recencyWeights: ftConfigOverride.recencyProfile || _runFTWeights,
         intel: computeIntelligencePack(league, finalLines, parsed, "ft"),
+        teamMemoryAdj: _bbTMCfg,
       },
       contextData: AppState.context?.data || null,
     });
     ftCalc.volatilityBlock = false;
 
     MODEL_TUNING.recencyWeights = h1ConfigOverride.recencyProfile || _runH1Weights;
+    /* TEAM MEMORY: split the applied FT adjustment across halves with the league half share */
+    const _bbTmH1Share = (() => {
+      const raw = typeof getParam === "function" ? getParam("halfShareH1", league) : null;
+      return bbStrictFinite(raw) ? Math.min(0.7, Math.max(0.3, Number(raw))) : 0.5;
+    })();
+    const _bbTmFT = ftCalc && ftCalc.teamMemoryApplied ? ftCalc.teamMemoryApplied : null;
+    const _bbTmH1Cfg = _bbTmFT ? { dA: _bbTmFT.dA * _bbTmH1Share, dB: _bbTmFT.dB * _bbTmH1Share } : null;
+    const _bbTmH2Cfg = _bbTmFT ? { dA: _bbTmFT.dA * (1 - _bbTmH1Share), dB: _bbTmFT.dB * (1 - _bbTmH1Share) } : null;
 
     const _h1PreSampleA = getManualSeries("A", "h1", parsed, AppState.context?.data || null);
     const _h1PreSampleB = getManualSeries("B", "h1", parsed, AppState.context?.data || null);
@@ -39368,6 +40408,7 @@ async function runEngine() {
         oppWeight: (_dynWeightsH1 && _dynWeightsH1.oppWeight) != null ? _dynWeightsH1.oppWeight : 0.35,
         recencyWeights: h1ConfigOverride.recencyProfile || _runH1Weights,
         intel: computeIntelligencePack(league, finalLines, parsed, "h1"),
+        teamMemoryAdj: _bbTmH1Cfg,
       },
       contextData: AppState.context?.data || null, 
     }) : { h1Proj: NaN, h1Edge: NaN, aS1: NaN, bS1: NaN, projA1H: NaN, projB1H: NaN, sampleTier1H: "invalid", volatilityError: true };
@@ -39406,10 +40447,42 @@ async function runEngine() {
       lines: finalLines,
       injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
       injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      config: { ...h2ConfigOverride, teamWeight: _safeH2W.teamWeight, oppWeight: _safeH2W.oppWeight, recencyWeights: h2ConfigOverride.recencyProfile || _runH2Weights, intel: computeIntelligencePack(league, finalLines, parsed, "h2"), h2hFactor: h2ConfigOverride.h2hFactor },
+      config: { ...h2ConfigOverride, teamWeight: _safeH2W.teamWeight, oppWeight: _safeH2W.oppWeight, recencyWeights: h2ConfigOverride.recencyProfile || _runH2Weights, intel: computeIntelligencePack(league, finalLines, parsed, "h2"), h2hFactor: h2ConfigOverride.h2hFactor, teamMemoryAdj: _bbTmH2Cfg },
       contextData: AppState.context?.data || null, 
     }) : { h2Proj: NaN, h2Edge: NaN, projA2H: NaN, projB2H: NaN, h2SampleTier: "invalid", volatilityError: true };
     MODEL_TUNING.recencyWeights = _runFTWeights;
+
+    /* TEAM MEMORY: hidden audit record for the tracked payload (base = pre-memory projections, used for learning) */
+    try {
+      if (_bbTM && _bbTM.keyA && _bbTM.keyB) {
+        const _r2 = (v) => (bbStrictFinite(v) ? Number(Number(v).toFixed(2)) : null);
+        const _h1A = h1Calc && h1Calc.teamMemoryApplied;
+        window.__bbTeamMemoryRun = {
+          eventId: fixtureMeta?.eventId || "",
+          league,
+          keyA: _bbTM.keyA,
+          keyB: _bbTM.keyB,
+          applied: !!_bbTMCfg,
+          avoid: !!_bbTM.avoid,
+          dA: _bbTmFT ? _r2(_bbTmFT.dA) : 0,
+          dB: _bbTmFT ? _r2(_bbTmFT.dB) : 0,
+          requested: { dA: _r2(_bbTM.dA), dB: _r2(_bbTM.dB) },
+          guardedA: !!(_bbTmFT && _bbTmFT.guardedA),
+          guardedB: !!(_bbTmFT && _bbTmFT.guardedB),
+          parts: _bbTM.parts || null,
+          matchupGames: _bbTM.matchupGames || 0,
+          teamNEff: _bbTM.teamNEff || null,
+          h1Share: _bbTmH1Share,
+          base: {
+            a: _r2(_bbTmFT ? _bbTmFT.baseA : ftCalc.projAFT),
+            b: _r2(_bbTmFT ? _bbTmFT.baseB : ftCalc.projBFT),
+            total: _r2(_bbTmFT ? _bbTmFT.baseTotal : ftCalc.ftProj),
+            h1Total: _r2(_h1A ? _h1A.baseTotal : h1Calc && h1Calc.h1Proj),
+          },
+          notes: Array.isArray(_bbTM.notes) ? _bbTM.notes.slice(0, 4) : [],
+        };
+      }
+    } catch (_tmRec) {}
 
     const _h2ReconFT = isFinite(ftCalc.ftProj) ? ftCalc.ftProj : NaN;
     const _h2ReconH1 = isFinite(h1Calc.h1Proj) ? h1Calc.h1Proj : NaN;
@@ -40709,6 +41782,7 @@ async function runEngine() {
 
                                                
     applySoftTrackerInfluenceToPicks(finalPicksForDisplay, fixtureMeta, phase2Activation);
+    bbApplyTeamMemoryAvoid(finalPicksForDisplay, _bbTM); /* TEAM MEMORY: manual avoid list */
     const intelligencePack = computeIntelligencePack(league, finalLines, parsed);
     annotateIntelligenceDiagnostics(finalPicksForDisplay, intelligencePack, league);
 
