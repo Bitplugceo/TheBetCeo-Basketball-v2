@@ -1,9 +1,8 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
                        
-  <meta name="generator" content="bb-engine-show-needed-edge-20261003" />
+  <meta name="generator" content="bb-engine-h2h-same-competition-20261003" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -912,6 +911,11 @@ small.muted-note {
 .conf-d {
   background: #c91920 !important;
   color: #fff !important;
+  font-weight: 800 !important;
+}
+.conf-warn {
+  background: #e6b800 !important;
+  color: #111 !important;
   font-weight: 800 !important;
 }
 
@@ -19717,8 +19721,9 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
         const underFactor = bbUnderEdgeFactor(league, mk);
         const warningThreshold = baseThreshold * (side === "UNDER" ? underFactor : 1) * 1.25;
         if (bbStrictFinite(p.edge) && Math.abs(Number(p.edge)) < warningThreshold) {
-          p.noPlayReason = "integrity warning raised threshold to " + warningThreshold.toFixed(1);
-          forcePickNoPlayWithNote(p, "INTEGRITY WARNING: edge below warning threshold " + warningThreshold.toFixed(1));
+          p.gradeYellow = true;
+          p.integrityWarningNote = "Soft warning: edge " + Number(p.edge).toFixed(1) + " cleared " + baseThreshold.toFixed(1) + " but not the caution bar " + warningThreshold.toFixed(1) + ". Grade shown yellow.";
+          if (p.isLock) p.isLock = false;
         } else if (typeof getConfidenceRank === "function") {
           const g = String(p.confidenceGrade || p.confidence || "").trim().charAt(0).toUpperCase();
           if (/[ABCD]/.test(g) && getConfidenceRank(g) > getConfidenceRank("B")) { /* BB-FIX2: cap at B (was inverted: it raised C/D and left A untouched) */
@@ -27996,19 +28001,10 @@ function selectAutoH2HWindow(games, league, contextRoot = null) {
   let _bbSame = 0;
   let _bbOther = 0;
   let _bbDominantType = _currentComp.seasonType != null ? String(_currentComp.seasonType) : (_currentComp.competitionName || _currentComp.competitionId || lk || "?");
-  if (_sameNPool >= 3) {
-    picked = _samePool.slice(0, Math.max(3, chosen));
-    _bbSame = picked.length;
-    _bbOther = 0;
-  } else {
-    const sameIds = new Set(_samePool.map((g) => String(g?.id || g?.eventId || `${g?.date || ""}:${h2hGameTotalPts(g)}`)));
-    const same = _samePool.slice(0, _sameNPool);
-    const other = pool.filter((g) => !sameIds.has(String(g?.id || g?.eventId || `${g?.date || ""}:${h2hGameTotalPts(g)}`)));
-    picked = same.concat(other.slice(0, Math.max(0, chosen - same.length)));
-    _bbSame = same.length;
-    _bbOther = other.slice(0, Math.max(0, chosen - same.length)).length;
-    _bbMixed = _bbOther > 0 && _bbSame < 3; /* BB-FIX #11 */
-  }
+  picked = _samePool.slice(0, Math.max(0, chosen));
+  _bbSame = picked.length;
+  _bbOther = 0;
+  _bbMixed = false;
   const _bbTypes = {};
   picked.forEach((g) => { const k = h2hCompetitionKey(g); _bbTypes[k] = (_bbTypes[k] || 0) + 1; });
   const decision = {
@@ -36982,6 +36978,7 @@ function getPickExplanationFactors(p, isLock) {
       "🔒 Selected as the Lock pick (highest confidence + edge among this game's actionable markets; Winner is excluded from the lock when another play exists).",
     );
 
+  if (p.integrityWarningNote) factors.push(p.integrityWarningNote);
   if (p.highEdgeFlag) {
     factors.push(
       `⚠ Edge is ${p.highEdgeMultiple}x the normal threshold for this market — worth double-checking the line before staking.`,
@@ -41017,7 +41014,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
 
     const tdConf = document.createElement("td");
     const _confDisplay = isNoPlay ? "—" : confText;
-    tdConf.className = isNoPlay ? "conf-none" : getConfidenceClass(confText);
+    tdConf.className = isNoPlay ? "conf-none" : (p.gradeYellow ? "conf-warn" : getConfidenceClass(confText));
     tdConf.textContent = _confDisplay;
     row.appendChild(tdConf);
 
