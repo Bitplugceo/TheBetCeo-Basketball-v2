@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -15658,18 +15659,15 @@ function bbLrScheduleRefresh() {
 function bbLrTeamMemoryDelta(mk, tm) {
   if (!tm || !tm.applied) return 0;
   const dA = Number(tm.dA) || 0, dB = Number(tm.dB) || 0;
-  const sh = Number.isFinite(Number(tm.h1Share)) ? Number(tm.h1Share) : 0.5;
-  switch (mk) {
+  /* FIX TM-LR: live Team Memory is applied only to FT, FT team totals, Winner and FT Handicap.
+     H1/H2 and their team/spread markets explicitly receive null Team Memory configs in this run,
+     so the learner must not invent a half-share and subtract memory that was never applied. */
+  switch (String(mk || "").toLowerCase()) {
     case "ft": return dA + dB;
     case "team_a": return dA;
     case "team_b": return dB;
-    case "h1": return (dA + dB) * sh;
-    case "h2": return (dA + dB) * (1 - sh);
-    case "h1_team_a": return dA * sh;
-    case "h1_team_b": return dB * sh;
-    case "handicap": case "winner": return dA - dB;
-    case "handicap_h1": return (dA - dB) * sh;
-    case "handicap_h2": return (dA - dB) * (1 - sh);
+    case "handicap":
+    case "winner": return dA - dB;
     default: return 0;
   }
 }
@@ -15757,7 +15755,9 @@ function bbLrApplyToPicks(picks, ctx) {
         p.winProbability = d.p;
         if (p.confidenceTrace && typeof p.confidenceTrace === "object") p.confidenceTrace.finalWinProbability = d.p;
       }
-    } catch (_pe) {}
+    } catch (_pe) {
+      if (typeof engineDebug === "function") engineDebug("learner per-pick application failed", { marketKey: p?.marketKey || null, error: _pe?.message || String(_pe) });
+    }
   });
 }
 function bbLrSegLabel(k) {
@@ -19463,7 +19463,9 @@ function bbMergeT6IntoIntegrity(picks) {
         p.blockedPick = p.pick;
         forcePickNoPlayWithNote(p, "TRAP BLOCK: " + sigs.filter((x) => x.level === "BLOCK").map((x) => x.note).join("; "));
       }
-    } catch (_e) {}
+    } catch (_e) {
+      if (typeof engineDebug === "function") engineDebug("T6 integrity merge failed", { marketKey: p?.marketKey || null, error: _e?.message || String(_e) });
+    }
   });
   return picks;
 }
@@ -19588,12 +19590,23 @@ function bbTrapSample(mk, parsed) {
 /* BB-FIX: team A margin history (scored - allowed) for handicap markets. mk: handicap | handicap_h1 | handicap_h2 */
 /* BB-FIX #9: per-market Under factors. Provisional defaults apply only while the factor is still the untuned 1.5; never below 1.3. */
 const BB_UNDER_FACTOR_DEFAULTS = { ft: 1.5, h1: 1.5, h2: 1.6, q1: 1.6, q2: 1.6, q3: 1.6, q4: 1.6, team_a: 1.6, team_b: 1.6, h1_team_a: 1.6, h1_team_b: 1.6 };
-function bbUnderEdgeFactor(league, mk) {
-  const base = Number(getParam("underEdgeFactor", league, mk) ?? UNDER_EDGE_FACTOR);
+/* BB-FIX #UNDER-SSOT: one authoritative Under-edge factor resolver. Explicit overrides are exact;
+   otherwise the live parameter is used, with the existing per-market defaults only when the parameter
+   is still the untuned 1.5 sentinel. The hard floor remains 1.3. */
+function getUnderEdgeFactor(league, mk, explicitOverride = null) {
   const key = String(mk || "").toLowerCase();
+  if (explicitOverride != null) {
+    const ov = Number(explicitOverride);
+    return Math.max(1.3, Number.isFinite(ov) ? ov : 1.5);
+  }
+  const raw = getParam("underEdgeFactor", league, mk);
+  const base = Number(raw ?? UNDER_EDGE_FACTOR);
   const tuned = Number.isFinite(base) && Math.abs(base - 1.5) > 1e-9;
-  const v = !tuned && BB_UNDER_FACTOR_DEFAULTS[key] ? BB_UNDER_FACTOR_DEFAULTS[key] : base;
+  const v = !tuned && BB_UNDER_FACTOR_DEFAULTS[key] != null ? BB_UNDER_FACTOR_DEFAULTS[key] : base;
   return Math.max(1.3, Number.isFinite(v) ? v : 1.5);
+}
+function bbUnderEdgeFactor(league, mk, explicitOverride = null) {
+  return getUnderEdgeFactor(league, mk, explicitOverride);
 }
 function bbMarginSample(mk, parsed) {
   try {
@@ -28909,10 +28922,8 @@ function getPick(edge, line, league, marketKey, context = {}) {
 
   let pointThreshold = getLeagueEdgePointThreshold(league, marketKey);
                                                          
-  const _uefRaw = context?.underEdgeFactorOverride != null
-    ? context.underEdgeFactorOverride
-    : (getParam("underEdgeFactor", league, marketKey) ?? UNDER_EDGE_FACTOR);
-  const _underEdgeFactor = Math.max(1.3, bbStrictFinite(_uefRaw) ? Number(_uefRaw) : 1.5); /* BB-FIX: hard floor 1.3 so no tuner can make Unders easy */
+  const _underEdgeFactor = getUnderEdgeFactor(league, marketKey, context?.underEdgeFactorOverride);
+  if (context && typeof context === "object") context.underEdgeFactorUsed = _underEdgeFactor;
 
   if (edge < 0) pointThreshold *= _underEdgeFactor;
 
@@ -29541,7 +29552,9 @@ function bbMarketGradeThresholds(league, marketKey) {
     if (t && bbStrictFinite(t.aThresh) && bbStrictFinite(t.bThresh) && bbStrictFinite(t.cThresh)) {
       return { aThresh: Number(t.aThresh), bThresh: Number(t.bThresh), cThresh: Number(t.cThresh), scope: scoped ? (lk + "::" + mk) : "bundle" };
     }
-  } catch (_eT) {}
+  } catch (_eT) {
+    if (typeof engineDebug === "function") engineDebug("confidence threshold bundle unavailable; using fallback thresholds", { league, marketKey, error: _eT?.message || String(_eT) });
+  }
   return fallback;
 }
 function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKey = "", outMeta = null) {
@@ -29632,7 +29645,6 @@ function getConfidenceGrade(params) {
   bbClearServedConfidence(params);
   const {
     pick,
-    note,
     line,
     edge,
     sampleTier,
@@ -29640,14 +29652,6 @@ function getConfidenceGrade(params) {
     volatility,
     volLimit,
     trap,
-    paceGapRisk,
-    blowoutGap,
-    lineupQuality,
-    siblingEdge,
-    q4Edge,
-    q2Edge,
-    defensiveFloorFlag,
-    quarterFormAgreement,
     league = "",
   } = params || {};
                                                                           
@@ -40789,10 +40793,9 @@ function buildTrackedPickPayload({
     blockedPick: pickRow.blockedPick || null,
     noPlayReason: pickRow.noPlayReason || null,
     adjustmentDependence: pickRow.adjustmentDependence || null,
-    underEdgeFactorUsed: (() => {
-      const raw = getParam("underEdgeFactor", league, marketKey);
-      return bbStrictFinite(raw) ? Math.max(1.3, Number(raw)) : 1.5;
-    })(),
+    underEdgeFactorUsed: bbStrictFinite(pickRow.underEdgeFactorUsed)
+      ? Number(pickRow.underEdgeFactorUsed)
+      : getUnderEdgeFactor(league, marketKey),
     integrityDecisionPath: pickRow.marketIntegrity?.status || (pickRow.pick === "NO PLAY" ? "NO_PLAY" : "CLEAR"),
     advancedStatsDiagnostic: pickRow.advancedStatsDiagnostic || window.__bbAdvDiagByMarket?.[marketKey] || null,
     fatigueDiag: pickRow.fatigueDiag || null,
@@ -42163,33 +42166,35 @@ async function runEngine() {
     try {
       if (_bbTM && _bbTM.keyA && _bbTM.keyB) {
         const _r2 = (v) => (bbStrictFinite(v) ? Number(Number(v).toFixed(2)) : null);
-        const _h1A = h1Calc && h1Calc.teamMemoryApplied;
+        const _tmFT = ftCalc && ftCalc.teamMemoryApplied && typeof ftCalc.teamMemoryApplied === "object"
+          ? ftCalc.teamMemoryApplied
+          : null;
         window.__bbTeamMemoryRun = {
           eventId: fixtureMeta?.eventId || "",
           league,
           keyA: _bbTM.keyA,
           keyB: _bbTM.keyB,
-          applied: !!_bbTMCfg,
+          applied: !!_bbTMCfg && !!_tmFT,
           avoid: !!_bbTM.avoid,
-          dA: _bbTmFT ? _r2(_bbTmFT.dA) : 0,
-          dB: _bbTmFT ? _r2(_bbTmFT.dB) : 0,
+          dA: _tmFT ? _r2(_tmFT.dA) : 0,
+          dB: _tmFT ? _r2(_tmFT.dB) : 0,
           requested: { dA: _r2(_bbTM.dA), dB: _r2(_bbTM.dB) },
-          guardedA: !!(_bbTmFT && _bbTmFT.guardedA),
-          guardedB: !!(_bbTmFT && _bbTmFT.guardedB),
+          guardedA: !!(_tmFT && _tmFT.guardedA),
+          guardedB: !!(_tmFT && _tmFT.guardedB),
           parts: _bbTM.parts || null,
           matchupGames: _bbTM.matchupGames || 0,
           teamNEff: _bbTM.teamNEff || null,
-          h1Share: _bbTmH1Share,
           base: {
-            a: _r2(_bbTmFT ? _bbTmFT.baseA : ftCalc.projAFT),
-            b: _r2(_bbTmFT ? _bbTmFT.baseB : ftCalc.projBFT),
-            total: _r2(_bbTmFT ? _bbTmFT.baseTotal : ftCalc.ftProj),
-            h1Total: _r2(_h1A ? _h1A.baseTotal : h1Calc && h1Calc.h1Proj),
+            a: _r2(_tmFT ? _tmFT.baseA : null),
+            b: _r2(_tmFT ? _tmFT.baseB : null),
+            total: _r2(_tmFT ? _tmFT.baseTotal : null),
           },
           notes: Array.isArray(_bbTM.notes) ? _bbTM.notes.slice(0, 4) : [],
         };
       }
-    } catch (_tmRec) {}
+    } catch (_tmRec) {
+      if (typeof engineDebug === "function") engineDebug("team memory audit record failed", { error: _tmRec?.message || String(_tmRec) });
+    }
 
     const _h2ReconFT = isFinite(ftCalc.ftProj) ? ftCalc.ftProj : NaN;
     const _h2ReconH1 = isFinite(h1Calc.h1Proj) ? h1Calc.h1Proj : NaN;
