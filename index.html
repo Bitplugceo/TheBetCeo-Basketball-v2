@@ -1,8 +1,9 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
                        
-  <meta name="generator" content="bb-engine-strict-competition-20261003" />
+  <meta name="generator" content="bb-engine-basketball-search-20261003" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -5006,25 +5007,46 @@ function searchSofascorePlayer(side) {
     return;
   }
   let searchName = rawName.split(",")[0].trim();
-  /* BB-AUDIT: drop generic words ("Basketball"/"Basket") from the query; SofaScore matches on the stored team name,
-     so "Dubai Basketball" returned {"results":[]} while "Dubai" matches. */
+  /* BB-AUDIT: SofaScore search matches on name tokens. Generic words like "Basketball" are usually NOT part of the
+     stored team name ("Dubai Basketball" -> often just "Dubai"), which made the exact query return {"results":[]}. */
   const _stripped = searchName.replace(/\b(basketball|basket)\b/gi, " ").replace(/\s+/g, " ").trim();
   if (_stripped.length >= 3) searchName = _stripped;
 
-  /* Original basketball-only endpoint kept (NOT /search/all, which returns every sport). */
+  /* /search/teams?sport=basketball returns empty. /search/all returns every sport.
+     Fetch all, keep basketball teams only, and open that list — never the mixed page. */
   const searchUrl =
-    SOFA_API_BASE + "/search/teams?q=" +
+    SOFA_API_BASE + "/search/all?q=" +
     encodeURIComponent(searchName) +
-    "&sport=basketball";
-  window.open(searchUrl, "_blank");
+    "&page=0";
   const st = document.getElementById("ssFetchStatus");
   if (st) {
     st.style.color = "#d98a00";
-    st.textContent =
-      "🔍 Basketball-only search opened for " +
-      side +
-      " — paste that search JSON here, or copy the team ID into the ID box.";
+    st.textContent = "Searching basketball teams for " + searchName + "...";
   }
+  (async function () {
+    try {
+      const payload = typeof proxyFetch === "function" ? await proxyFetch(searchUrl) : await (await fetch(searchUrl)).json();
+      const teams = ssCollectSearchTeams(payload);
+      const body = JSON.stringify({ results: teams.map(function (tm) {
+        return { type: "team", entity: { id: Number(tm.id), name: tm.name, slug: tm.slug, gender: tm.gender, sport: { slug: "basketball" }, country: { name: tm.country } } };
+      }) }, null, 2);
+      const html = "<!doctype html><meta charset=utf-8><title>Basketball teams</title><pre style=\"font:14px/1.4 sans-serif;padding:12px\">" +
+        body.replace(/&/g, "&").replace(/</g, "<") + "</pre>";
+      const blob = new Blob([html], { type: "text/html" });
+      window.open(URL.createObjectURL(blob), "_blank");
+      if (st) {
+        st.style.color = teams.length ? "#2f8f4a" : "#d92d2a";
+        st.textContent = teams.length
+          ? "Basketball only: " + teams.length + " team(s) for " + searchName + ". Paste that JSON, or copy the team ID."
+          : "No basketball team for " + searchName + ".";
+      }
+    } catch (err) {
+      if (st) {
+        st.style.color = "#d92d2a";
+        st.textContent = "Basketball search failed: " + (err && err.message ? err.message : "request blocked");
+      }
+    }
+  })();
 }
 
 window.__lastEventsA = null;
