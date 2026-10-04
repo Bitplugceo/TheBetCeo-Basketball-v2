@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5065,7 +5064,17 @@ function ssRenderTeamPicker(side, teams, pickedId) {
     const meta = [t.country, t.gender === "F" ? "Women" : t.gender === "M" ? "Men" : "", t.national ? "National team" : ""]
       .filter(Boolean).join(" · ");
     b.textContent = (isPicked ? "✓ " : "") + t.name + (meta ? "  ·  " + meta : "") + "  ·  ID " + t.id;
-    b.addEventListener("click", function () { ssLockTeamAndLoad(side, t); });
+    b.addEventListener("click", function () {
+      /* MANUAL-ONLY SOFASCORE: selecting a search result only locks the team.
+         It must never fetch games automatically. The operator uses the ID/p0
+         links and pastes the returned JSON manually. */
+      ssLockTeamFields(side, t);
+      ssSetSearchStatus(
+        "#d98a00",
+        "✓ Locked " + t.name + " (" + t.id + "). No automatic fetch. " +
+        "Use the 🔗 p0 link beside the ID, copy the JSON, then paste it into “Paste JSON " + side + "”."
+      );
+    });
     box.appendChild(b);
   });
   return box;
@@ -5101,37 +5110,20 @@ function ssExplainNoBasketball(parsed, query) {
   return "No events found in pasted JSON. If this is a team search result, keep the team ID and paste /events/last/0 instead.";
 }
 
-async function ssLockTeamAndLoad(side, picked) {
-  window.__ssLoadBusy = window.__ssLoadBusy || {};
-  if (window.__ssLoadBusy[side]) return;
-  window.__ssLoadBusy[side] = true;
-  const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
-  try {
-    ssLockTeamFields(side, picked);
-    const known = (window.__ssPickTeams && window.__ssPickTeams[side]) || null;
-    if (known) ssRenderTeamPicker(side, known, picked.id);
-    ssSetSearchStatus("#d98a00", "⏳ Locked " + picked.name + " (" + picked.id + "). Loading its basketball games…");
-    const _tag = document.getElementById(side === "A" ? "aAutoTag" : "bAutoTag");
-    if (_tag) { _tag.style.display = "inline"; _tag.textContent = "⏳ Fetching…"; _tag.style.color = "#d98a00"; }
-    const all = await ssFetchTeamLastEvents(picked.id);
-    const events = all.filter(function (ev) { return ssIsBasketballEvent(ev); });
-    if (!events.length) {
-      ssClearFetchTags(side);
-      ssSetSearchStatus("#d98a00", all.length
-        ? "⚠ " + picked.name + " (" + picked.id + "): SofaScore returned " + all.length + " games but none are basketball."
-        : "⚠ Team locked: " + picked.name + " (" + picked.id + "), but SofaScore blocked the in-app games request. " +
-          "Tap the 🔗 p0 link next to the ID, copy that JSON and paste it into “Paste JSON " + side + "”.");
-      return;
-    }
-    if (pasteEl) pasteEl.value = JSON.stringify({ events: events });
-    await parseSofascoreIndividual(side);
-  } catch (err) {
-    ssClearFetchTags(side);
-    ssSetSearchStatus("#d92d2a", "❌ Could not load games: " + String((err && err.message) || err));
-  } finally {
-    if (pasteEl) pasteEl.value = "";
-    window.__ssLoadBusy[side] = false;
-  }
+function ssLockTeamAndLoad(side, picked) {
+  /* MANUAL-ONLY SOFASCORE:
+     This function name is retained for compatibility with any existing callers,
+     but it deliberately performs NO network request. */
+  if (!picked) return;
+  ssLockTeamFields(side, picked);
+  const known = (window.__ssPickTeams && window.__ssPickTeams[side]) || null;
+  if (known) ssRenderTeamPicker(side, known, picked.id);
+  ssClearFetchTags(side);
+  ssSetSearchStatus(
+    "#d98a00",
+    "✓ Locked " + picked.name + " (" + picked.id + "). No automatic fetch. " +
+    "Use the 🔗 p0 link beside the ID, copy the JSON, and paste it into “Paste JSON " + side + "”."
+  );
 }
 
 function searchSofascorePlayer(side) {
@@ -5153,7 +5145,7 @@ function searchSofascorePlayer(side) {
     st.style.color = "#d98a00";
     st.textContent =
       "🔍 Search opened for " + side + " — copy the JSON and paste it into “Paste JSON " + side +
-      "”. Only basketball teams are kept (other sports are dropped on paste).";
+      "”. Nothing is auto-fetched. Only basketball teams are kept (other sports are dropped on paste).";
   }
 }
 
@@ -6149,39 +6141,29 @@ async function ssFetchTeamLastEvents(teamId) {
   return Array.from(merged.values());
 }
 
-async function ssApplySearchPaste(side, parsed, st) {
+function ssApplySearchPaste(side, parsed, st) {
+  /* MANUAL-ONLY SOFASCORE:
+     Search JSON is only for resolving the team and ID. Never fetch the team's
+     games automatically after paste. */
   const leagueSelect = document.getElementById("leagueSelect")?.value || "";
   const teams = ssCollectSearchTeams(parsed);
   if (!teams.length) return null;
+
   const picked = ssPickTeamFromSearch(teams, leagueSelect);
   if (!picked) return null;
 
   ssLockTeamFields(side, picked);
-  ssRenderTeamPicker(side, teams, picked.id); /* BB-FIX SEARCH-3: wrong auto-pick? the user can tap another basketball team */
+  ssRenderTeamPicker(side, teams, picked.id);
 
-  if (st) {
-    st.style.color = "#d98a00";
-    st.textContent =
-      "🔍 Search JSON detected — basketball only. Locked " + picked.name + " (" + picked.id + "). Fetching last games…";
-  }
-
-  const _fetchTagEl = document.getElementById(side === "A" ? "aAutoTag" : "bAutoTag");
-  const _fetchIntegrityEl = document.getElementById(side === "A" ? "aIntegrityTag" : "bIntegrityTag");
-  if (_fetchTagEl) { _fetchTagEl.style.display = "inline"; _fetchTagEl.textContent = "⏳ Fetching…"; _fetchTagEl.style.color = "#d98a00"; }
-  if (_fetchIntegrityEl) { _fetchIntegrityEl.style.display = "inline"; _fetchIntegrityEl.style.color = "#d98a00"; _fetchIntegrityEl.textContent = "· waiting"; }
-  const allEvents = await ssFetchTeamLastEvents(picked.id);
-  const events = allEvents.filter(function (ev) { return ssIsBasketballEvent(ev); });
-  if (events.length) return { resolvedTeam: picked, events: events };
-
-  /* BB-FIX SEARCH-4: this used to leave the tags stuck on "Fetching…" and paint a failure green. */
   ssClearFetchTags(side);
   if (st) {
     st.style.color = "#d98a00";
     st.textContent =
-      "⚠ Team locked: " + picked.name + " (" + picked.id + "), but the games could not be loaded in-app" +
-      (allEvents.length ? " (none of the " + allEvents.length + " returned were basketball)" : " (SofaScore blocked the request)") +
-      ". Tap the 🔗 p0 link beside the ID, copy that JSON and paste it into “Paste JSON " + side + "”.";
+      "🔍 Search JSON received — " + picked.name + " (" + picked.id + ") locked. " +
+      "No automatic fetch. Use the 🔗 p0 link beside the ID, copy the games JSON, " +
+      "then paste it into “Paste JSON " + side + "”.";
   }
+
   return { resolvedTeam: picked, events: [] };
 }
 
@@ -6279,15 +6261,12 @@ async function parseSofascoreIndividual(side) {
     }
     let events = ssExtractPastedEvents(parsed);
     if (!events.length) {
-      const applied = await ssApplySearchPaste(side, parsed, st);
-      if (applied && applied.events && applied.events.length) {
-        events = applied.events;
-      } else if (applied && applied.resolvedTeam) {
+      const applied = ssApplySearchPaste(side, parsed, st);
+      if (applied && applied.resolvedTeam) {
         if (pasteEl) pasteEl.value = "";
         return;
-      } else {
-        throw new Error(ssExplainNoBasketball(parsed, ""));
       }
+      throw new Error(ssExplainNoBasketball(parsed, ""));
     }
 
     const leagueSelect = document.getElementById("leagueSelect")?.value || "";
