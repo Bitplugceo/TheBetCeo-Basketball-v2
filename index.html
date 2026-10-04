@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -4996,9 +4995,7 @@ function searchSofascorePlayer(side) {
   if (st) {
     st.style.color = "#d98a00";
     st.textContent =
-      "🔍 Basketball-only search opened for " +
-      side +
-      " — paste that search JSON here, or copy the team ID into the ID box.";
+      "🔍 Search opened — copy the JSON and paste it into “Paste JSON " + side + "”. (Manual only: the engine does not read the opened page.)";
   }
 }
 
@@ -5940,45 +5937,8 @@ function ssPickTeamFromSearch(teams, leagueKey) {
   return list[0] || null;
 }
 
-async function ssFetchTeamLastEvents(teamId) {
-                                                                 
-  const id = String(teamId || "").trim();
-  if (!/^[0-9]+$/.test(id)) return [];
-  if (typeof proxyFetch !== "function") return [];
-  const pages = [];
-  try {
-    for (let page = 0; page <= 3; page++) {
-      try {
-        let payload = null;
-        try {
-          payload = await proxyFetch(SOFA_API_BASE + "/team/" + id + "/events/last/" + page);
-        } catch (_eWww) {
-          payload = await proxyFetch(SOFA_API_BASE_LEGACY + "/team/" + id + "/events/last/" + page);
-        }
-        if (!payload) break;
-        pages.push(payload);
-                                                                                
-                                                                                  
-                                                                                    
-                                                 
-        if (page >= 3) break;
-      } catch (_ePage) {
-        if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents/p" + page, _ePage);
-        break;
-      }
-    }
-  } catch (_e0) {
-    if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents", _e0);
-    return [];
-  }
-  const merged = new Map();
-  pages.forEach(function (payload) {
-    ssExtractPastedEvents(payload).forEach(function (ev) {
-      if (ev && ev.id != null) merged.set(ev.id, ev);
-    });
-  });
-  return Array.from(merged.values());
-}
+/* BB-REPAIR SOFA-MANUAL: ssFetchTeamLastEvents() removed. SofaScore is MANUAL-ONLY: the engine never requests
+   /team/{id}/events/last/*, search results, or any other SofaScore endpoint. The user opens the p0 link, copies the JSON and pastes it. */
 
 async function ssApplySearchPaste(side, parsed, st) {
   const leagueSelect = document.getElementById("leagueSelect")?.value || "";
@@ -5995,35 +5955,12 @@ async function ssApplySearchPaste(side, parsed, st) {
   if (idEl) idEl.value = picked.id;
   if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
 
-  if (st) {
-    st.style.color = "#d98a00";
-    st.textContent =
-      "🔍 Search JSON detected — locked " +
-      picked.name +
-      " (" +
-      picked.id +
-      "). Fetching last events…";
-  }
-
-  const _fetchTagId = side === "A" ? "aAutoTag" : "bAutoTag";
-  const _fetchIntegrityId = side === "A" ? "aIntegrityTag" : "bIntegrityTag";
-  const _fetchTagEl = document.getElementById(_fetchTagId);
-  const _fetchIntegrityEl = document.getElementById(_fetchIntegrityId);
-  if (_fetchTagEl) { _fetchTagEl.style.display = "inline"; _fetchTagEl.textContent = "⏳ Fetching…"; _fetchTagEl.style.color = "#d98a00"; }
-  if (_fetchIntegrityEl) { _fetchIntegrityEl.style.display = "inline"; _fetchIntegrityEl.style.color = "#d98a00"; _fetchIntegrityEl.textContent = "· waiting"; }
-  const events = await ssFetchTeamLastEvents(picked.id);
-  if (events.length) return { resolvedTeam: picked, events: events };
-
+  /* BB-REPAIR SOFA-MANUAL: LOCK TEAM ONLY. No network request of any kind happens here. */
   if (st) {
     st.style.color = "#2f8f4a";
     st.textContent =
-      "✅ Team locked: " +
-      picked.name +
-      " (" +
-      picked.id +
-      "). This paste was a SEARCH result, not games. Open JSON " +
-      side +
-      " and paste /events/last/0.";
+      "✅ Team locked: " + picked.name + " (" + picked.id + "). No automatic fetch. " +
+      "Use the p0 link, copy the JSON, then paste it into Paste JSON " + side + ".";
   }
   return { resolvedTeam: picked, events: [] };
 }
@@ -6117,20 +6054,18 @@ async function parseSofascoreIndividual(side) {
     }
     if (parsed && parsed.error && String(parsed.error.reason || "").toLowerCase() === "challenge") {
       throw new Error(
-        "SofaScore returned a 403 anti-bot challenge, not data. Open the link from the www.sofascore.com host (the buttons now do this), or try again from a desktop/other browser.",
+        "SofaScore returned a 403 anti-bot challenge, not data (an external SofaScore limitation the engine cannot bypass). Open the link manually in your browser, copy the JSON it shows, and paste that here.",
       );
     }
     let events = ssExtractPastedEvents(parsed);
     if (!events.length) {
       const applied = await ssApplySearchPaste(side, parsed, st);
-      if (applied && applied.events && applied.events.length) {
-        events = applied.events;
-      } else if (applied && applied.resolvedTeam) {
+      if (applied && applied.resolvedTeam) { /* search JSON: team locked, STOP (manual-only workflow) */
         if (pasteEl) pasteEl.value = "";
         return;
       } else {
         throw new Error(
-          "No events found in pasted JSON. If this is a team search result, keep the team ID and paste /events/last/0 instead.",
+          "No basketball team and no usable game events found in the pasted JSON. Paste the SEARCH JSON (to lock a team) or the team's /events/last/0 JSON (game history).",
         );
       }
     }
@@ -6370,6 +6305,11 @@ if (typeof engineDebug === "function") engineDebug("json paste A path", { note: 
           side,
           error: msg,
         });
+      }
+      /* BB-REPAIR SOFA-MANUAL: text ends in } or ] (gate above) yet does not parse -> broken/truncated copy. Say so; never stay silent. */
+      if (st) {
+        st.style.color = "#d92d2a";
+        st.textContent = "❌ Invalid JSON (" + msg.slice(0, 80) + "). Copy the WHOLE JSON from the SofaScore page and paste it again.";
       }
       return;
     }
@@ -11553,6 +11493,8 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
         settled = settledUniverse.slice(0, _tunerCutIdx);
       }
     } catch (_eCut) {
+      /* BB-REPAIR CATCH: corrupt BB_OOS_CUTOFF_global changes the train/holdout split; fallback (80/20 chronological) unchanged, now logged. */
+      if (typeof engineDebug === "function") engineDebug("runCoordinateAscentTuner: BB_OOS_CUTOFF_global unreadable, using 80/20 chronological split", { error: String(_eCut && _eCut.message || _eCut) });
       const _tunerCutIdx = Math.floor(settledUniverse.length * 0.8);
       settled = settledUniverse.slice(0, _tunerCutIdx);
     }
@@ -12214,30 +12156,7 @@ function getPhase2ActivationState() {
   };
 }
 
-/* CALCULATION SECTION */
-function getLeagueUnderBlockRatio(league) {
-  const map = {
-    nba: 0.82,
-    ncaa: 0.75,
-    ncaaw: 0.75,
-    wnba: 0.8,
-    wnba_pre: 0.8,
-    nba_gl: 0.82,
-    euroleague: 0.9,
-    eurocup: 0.88,
-    champions_league: 0.88,
-    acb: 0.87,
-    lba: 0.87,
-    bbl: 0.85,
-    turkey_bsl: 0.86,
-    ausnbl: 0.83,
-    bleague: 0.84,
-    united_league: 0.86,
-    proa: 0.85,
-  };
-
-  return map[String(league || "").toLowerCase()] || 0.82;
-}
+/* BB-REPAIR DEAD-CODE: getLeagueUnderBlockRatio() removed — sole textual reference was its definition; no dynamic/HTML/global use (audited). */
 
 const LEAGUE_EDGE_POINT_THRESHOLDS = {
   nba: {
@@ -17197,13 +17116,7 @@ function extractMatchupFromBoxMaps(sMapMine, sMapOpp) {
     tpPctAllowed: tpPctOpp,
   };
 }
-function _avgFiniteSeries(arr) {
-  const xs = (Array.isArray(arr) ? arr : []).map(Number).filter(function (n) {
-    return Number.isFinite(n) && n >= 0;
-  });
-  if (!xs.length) return NaN;
-  return xs.reduce(function (a, b) { return a + b; }, 0) / xs.length;
-}
+/* BB-REPAIR DEAD-CODE: _avgFiniteSeries() removed — sole textual reference was its definition; no dynamic/HTML/global use (audited). */
 
 function _extractTeamBoxStatMap(boxTeam) {
   const sMap = {};
@@ -17821,7 +17734,6 @@ function parseMarketRangeMeta(val) {
   const raw = String(val).trim();
   const normalizedRaw = normalizeDashes(raw);
   const normalizeLine = (num) => Number(num);
-  const finitePositive = (num) => Number.isFinite(num) && num > 0;
 
                                                                         
                                                                            
@@ -18084,11 +17996,6 @@ function applySiblingMarketContradictionGate(picks, rawMarketInputs) {
       p.marketContradictionBlocked = true;
     });
   };
-  const pickEdgeScale = (key) => {
-    const p = picks.find((x) => x && x.marketKey === key);
-    const e = Number(p?.edge);
-    return Number.isFinite(e) ? Math.abs(e) : 0;
-  };
   const pickProjection = (key) => {
     const p = picks.find((x) => x && x.marketKey === key);
     return bbStrictFinite(p?.proj) ? Number(p.proj) : NaN; /* BB-FIX2: Number(null) is 0, so null must stay missing */
@@ -18182,7 +18089,10 @@ function bbMergeT6IntoIntegrity(picks) {
       if (hasBlock) mi.status = "BLOCK";
       else if (mi.status === "CLEAR") mi.status = "WARNING";
       p.marketIntegrity = mi;
-    } catch (_e) {}
+    } catch (_e) {
+      /* BB-REPAIR CATCH: merge only records T6 metadata (outlier already forced NO PLAY in blockOutlier), but a failure must be visible. */
+      if (typeof engineDebug === "function") engineDebug("bbMergeT6IntoIntegrity failed for " + String(p && p.marketKey), { error: String(_e && _e.message || _e) });
+    }
   });
   return picks;
 }
@@ -18311,13 +18221,23 @@ function bbTrapSample(mk, parsed) {
 /* BB-FIX: team A margin history (scored - allowed) for handicap markets. mk: handicap | handicap_h1 | handicap_h2 */
 /* BB-FIX #9: per-market Under factors. Provisional defaults apply only while the factor is still the untuned 1.5; never below 1.3. */
 const BB_UNDER_FACTOR_DEFAULTS = { ft: 1.5, h1: 1.5, h2: 1.6, q1: 1.6, q2: 1.6, q3: 1.6, q4: 1.6, team_a: 1.6, team_b: 1.6, h1_team_a: 1.6, h1_team_b: 1.6 };
-function bbUnderEdgeFactor(league, mk) {
-  const base = Number(getParam("underEdgeFactor", league, mk) ?? UNDER_EDGE_FACTOR);
-  const key = String(mk || "").toLowerCase();
+/* BB-REPAIR UNDER-FACTOR: single authoritative resolver. getPick(), T10/T-warning thresholds, bbUnderEdgeFactor() and the
+   audit record's underEdgeFactorUsed ALL call this. Semantics are unchanged from the former bbUnderEdgeFactor():
+   explicit override (tuner counterfactual) > tuned param/constant > per-market provisional default (only while untuned 1.5);
+   hard floor 1.3; non-finite -> 1.5. */
+function getUnderEdgeFactor(league, marketKey, explicitOverride) {
+  if (explicitOverride != null && explicitOverride !== "") {
+    const o = Number(explicitOverride);
+    return Math.max(1.3, Number.isFinite(o) ? o : 1.5);
+  }
+  const base = Number(getParam("underEdgeFactor", league, marketKey) ?? UNDER_EDGE_FACTOR);
+  const key = String(marketKey || "").toLowerCase();
   const tuned = Number.isFinite(base) && Math.abs(base - 1.5) > 1e-9;
   const v = !tuned && BB_UNDER_FACTOR_DEFAULTS[key] ? BB_UNDER_FACTOR_DEFAULTS[key] : base;
   return Math.max(1.3, Number.isFinite(v) ? v : 1.5);
 }
+window.getUnderEdgeFactor = getUnderEdgeFactor;
+function bbUnderEdgeFactor(league, mk) { return getUnderEdgeFactor(league, mk); } /* kept as thin alias; no independent logic */
 function bbMarginSample(mk, parsed) {
   try {
     const root = (typeof AppState !== "undefined" ? AppState.context?.data : null) || null;
@@ -18554,12 +18474,16 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
         const _move = getLineMoveAgainstSide(league, mk, L, side);
         if (_move?.available && _move.adverse) add("T7", "WARN", "line moved against this side from first-seen line (Δ " + Number(_move.delta).toFixed(2) + ")");
         else if (_move?.available && Math.abs(Number(_move.delta || 0)) < 0.001) sig.push({ id: "T7", level: "INFO", note: "first-seen line" });
-      } catch (_t7) {}
+      } catch (_t7) { /* BB-REPAIR CATCH: a lost T7 WARN can let an Under pass; log it */
+        if (typeof engineDebug === "function") engineDebug("applyBBMarketGate T7 failed for " + mk, { error: String(_t7 && _t7.message || _t7) });
+      }
       if (S && S.mixedCompetition) sig.push({ id: "T9S", level: side === "UNDER" ? "WARN" : "INFO", note: "history sample mixes competitions (other-competition games weighted 0.5)" });
       try {
         const _mix = window.__bbAutoH2H;
         if (_mix?.mixedCompetition) add("T9", "WARN", "mixed-competition H2H (n_same=" + Number(_mix.sameCompetitionCount || 0) + ", n_other=" + Number(_mix.otherCompetitionCount || 0) + ", fallback weight 0.5)");
-      } catch (_t9) {}
+      } catch (_t9) { /* BB-REPAIR CATCH: a lost T9 WARN can let an Under pass; log it */
+        if (typeof engineDebug === "function") engineDebug("applyBBMarketGate T9 failed for " + mk, { error: String(_t9 && _t9.message || _t9) });
+      }
       if (side === "UNDER" && bbStrictFinite(p.preAdjustmentProj) && bbStrictFinite(p.line)) {
         const preEdge = Number(p.preAdjustmentProj) - Number(p.line);
         const baseThreshold = Number(getLeagueEdgePointThreshold(league, mk));
@@ -18625,7 +18549,9 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
             forcePickNoPlayWithNote(p, "TRAP BLOCK: " + _msg);
           }
         }
-      } catch (_ge2) {}
+      } catch (_ge2) { /* BB-REPAIR CATCH: the fail-closed handler itself failed -> pick left unverified; must be visible */
+        if (typeof engineDebug === "function") engineDebug("applyBBMarketGate fail-closed handler failed", { error: String(_ge2 && _ge2.message || _ge2) });
+      }
     }
   });
   return picks;
@@ -26604,14 +26530,7 @@ function getPeriodAdvancedSeries(ctx, marketKey) {
   return none;
 }
 
-/* CALCULATION SECTION */
-function getSampleQuality(...arrays) {
-  const lens = arrays.map((a) => (Array.isArray(a) ? a.length : 0));
-  const minLen = Math.min(...(lens.length ? lens : [0]));
-  if (minLen <= 0) return 0;
-  const t = clampNumber((minLen - 3) / 9, 0, 1);
-  return t * t * (3 - 2 * t);
-}
+/* BB-REPAIR DEAD-CODE: getSampleQuality() removed — sole textual reference was its definition; no dynamic/HTML/global use (audited). */
 
 /* CALCULATION SECTION */
 function getEffectivePaceClamp(league) {
@@ -26826,12 +26745,12 @@ function getPick(edge, line, league, marketKey, context = {}) {
 
   let pointThreshold = getLeagueEdgePointThreshold(league, marketKey);
                                                          
-  const _uefRaw = context?.underEdgeFactorOverride != null
-    ? context.underEdgeFactorOverride
-    : (getParam("underEdgeFactor", league, marketKey) ?? UNDER_EDGE_FACTOR);
-  const _underEdgeFactor = Math.max(1.3, bbStrictFinite(_uefRaw) ? Number(_uefRaw) : 1.5); /* BB-FIX: hard floor 1.3 so no tuner can make Unders easy */
+  const _underEdgeFactor = getUnderEdgeFactor(league, marketKey, context?.underEdgeFactorOverride); /* BB-REPAIR UNDER-FACTOR: single resolver (floor 1.3 inside) */
 
-  if (edge < 0) pointThreshold *= _underEdgeFactor;
+  if (edge < 0) {
+    pointThreshold *= _underEdgeFactor;
+    if (context && typeof context === "object") context.underEdgeFactorUsed = _underEdgeFactor;
+  }
 
   if (isFinite(context?.blowoutGap)) {
     const _blowoutGapThresh = getParam("h2hBlowoutGapThreshold", league) ?? 15;
@@ -27461,7 +27380,10 @@ function resolveConfidenceGradeFromWinProbability(winProb, league = "", marketKe
     if (versionOk && schemaOk && t && bbStrictFinite(t.aThresh) && bbStrictFinite(t.bThresh) && bbStrictFinite(t.cThresh)) {
       liveThresholds = t;
     }
-  } catch (_eThresholds) {}
+  } catch (_eThresholds) {
+    /* BB-REPAIR CATCH: a corrupt BB_CONFIDENCE_MODEL_LIVE silently swapped live A/B/C thresholds for defaults (changes grade). Now logged; fallback unchanged. */
+    if (typeof engineDebug === "function") engineDebug("resolveConfidenceGradeFromWinProbability: live thresholds unreadable, using default thresholds", { error: String(_eThresholds && _eThresholds.message || _eThresholds) });
+  }
   const threshA = liveThresholds ? Number(liveThresholds.aThresh) : (getParam("confidenceAThresh", league) ?? 0.66);
   const threshB = liveThresholds ? Number(liveThresholds.bThresh) : (getParam("confidenceBThresh", league) ?? 0.58);
   const threshC = liveThresholds ? Number(liveThresholds.cThresh) : (getParam("confidenceCThresh", league) ?? 0.51);
@@ -27535,9 +27457,11 @@ function getConfidenceModelProvenance(league, marketKey = "ft") {
 
 /* CALCULATION SECTION */
 function getConfidenceGrade(params) {
+  /* BB-REPAIR CONF: removed never-read destructured names (note, paceGapRisk, blowoutGap, lineupQuality, siblingEdge, q4Edge,
+     q2Edge, defensiveFloorFlag, quarterFormAgreement). Proof: 0 reads in body, no params[...]/spread/arguments access.
+     Callers may still pass them; they are simply ignored as before. volLimit is supplied at all 8 call sites. */
   const {
     pick,
-    note,
     line,
     edge,
     sampleTier,
@@ -27545,14 +27469,6 @@ function getConfidenceGrade(params) {
     volatility,
     volLimit,
     trap,
-    paceGapRisk,
-    blowoutGap,
-    lineupQuality,
-    siblingEdge,
-    q4Edge,
-    q2Edge,
-    defensiveFloorFlag,
-    quarterFormAgreement,
     league = "",
   } = params || {};
                                                                           
@@ -28125,23 +28041,9 @@ const CITY_COORDS = {
   "reno,nv": [39.529, -119.813],
 };
 
-function haversineMiles(lat1, lon1, lat2, lon2) {
-  if (![lat1, lon1, lat2, lon2].every(isFinite)) return null;
-  const R = 3958.8;
-  const toRad = (d) => (d * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return Math.round(R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
-}
+/* BB-REPAIR DEAD-CODE: haversineMiles() removed — sole textual reference was its definition; no dynamic/HTML/global use (audited). */
 
-function lookupCityCoords(city, state) {
-  if (!city) return null;
-  const key = (String(city).trim() + "," + String(state || "").trim()).toLowerCase();
-  return CITY_COORDS[key] || null;
-}
+/* BB-REPAIR DEAD-CODE: lookupCityCoords() removed — sole textual reference was its definition; no dynamic/HTML/global use (audited). */
 
                                         
                                                                                       
@@ -36996,7 +36898,6 @@ function calibrateConfidenceModel() {
   const models = {};
   const modelSampleSizes = {};
   const _families = ["TOTAL", "TOTAL_H1", "TOTAL_H2", "TEAM", "Q", "MARGIN"];
-  const _scopeForPick = (p) => getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
   const _globalFamilyScope = (family) => "global::" + family;
 
   _families.forEach((family) => {
@@ -38028,10 +37929,7 @@ function buildTrackedPickPayload({
     blockedPick: pickRow.blockedPick || null,
     noPlayReason: pickRow.noPlayReason || null,
     adjustmentDependence: pickRow.adjustmentDependence || null,
-    underEdgeFactorUsed: (() => {
-      const raw = getParam("underEdgeFactor", league, marketKey);
-      return bbStrictFinite(raw) ? Math.max(1.3, Number(raw)) : 1.5;
-    })(),
+    underEdgeFactorUsed: getUnderEdgeFactor(league, marketKey), /* BB-REPAIR UNDER-FACTOR: same resolver getPick() uses */
     integrityDecisionPath: pickRow.marketIntegrity?.status || (pickRow.pick === "NO PLAY" ? "NO_PLAY" : "CLEAR"),
     advancedStatsDiagnostic: pickRow.advancedStatsDiagnostic || window.__bbAdvDiagByMarket?.[marketKey] || null,
     fatigueDiag: pickRow.fatigueDiag || null,
@@ -38714,106 +38612,7 @@ function validateExtractedInputs(extracted, league) {
     return { ok: false, errorHtml: "⚠ <b>Input Errors:</b><br>" + errors.join("<br>") };
   return { ok: true };
 }
-function captureAllInputs() {
-  
-  const inputs = {};
-
-  const ids = [
-    "leagueSelect",
-    "teamAName",
-    "teamBName",
-    "aFTScored",
-    "aFTAllowed",
-    "bFTScored",
-    "bFTAllowed",
-    "a1HScored",
-    "a1HAllowed",
-    "b1HScored",
-    "b1HAllowed",
-    "aQ1Scored",
-    "aQ1Allowed",
-    "aQ2Scored",
-    "aQ2Allowed",
-    "aQ3Scored",
-    "aQ3Allowed",
-    "aQ4Scored",
-    "aQ4Allowed",
-    "bQ1Scored",
-    "bQ1Allowed",
-    "bQ2Scored",
-    "bQ2Allowed",
-    "bQ3Scored",
-    "bQ3Allowed",
-    "bQ4Scored",
-    "bQ4Allowed",
-    "aFTH2H",
-    "bFTH2H",
-    "a1HH2H",
-    "b1HH2H",
-    "aQ1H2H",
-    "bQ1H2H",
-    "aQ2H2H",
-    "bQ2H2H",
-    "aQ3H2H",
-    "bQ3H2H",
-    "aQ4H2H",
-    "bQ4H2H",
-    "aFTScoredHome",
-    "aFTAllowedHome",
-    "aFTScoredAway",
-    "aFTAllowedAway",
-    "a1HScoredHome","a1HAllowedHome","a1HScoredAway","a1HAllowedAway",
-    "a2HScoredHome","a2HAllowedHome","a2HScoredAway","a2HAllowedAway",
-    "aQ1ScoredHome","aQ1AllowedHome","aQ1ScoredAway","aQ1AllowedAway",
-    "aQ2ScoredHome","aQ2AllowedHome","aQ2ScoredAway","aQ2AllowedAway",
-    "aQ3ScoredHome","aQ3AllowedHome","aQ3ScoredAway","aQ3AllowedAway",
-    "aQ4ScoredHome","aQ4AllowedHome","aQ4ScoredAway","aQ4AllowedAway",
-    "bFTScoredHome",
-    "bFTAllowedHome",
-    "bFTScoredAway",
-    "bFTAllowedAway",
-    "b1HScoredHome","b1HAllowedHome","b1HScoredAway","b1HAllowedAway",
-    "b2HScoredHome","b2HAllowedHome","b2HScoredAway","b2HAllowedAway",
-    "bQ1ScoredHome","bQ1AllowedHome","bQ1ScoredAway","bQ1AllowedAway",
-    "bQ2ScoredHome","bQ2AllowedHome","bQ2ScoredAway","bQ2AllowedAway",
-    "bQ3ScoredHome","bQ3AllowedHome","bQ3ScoredAway","bQ3AllowedAway",
-    "bQ4ScoredHome","bQ4AllowedHome","bQ4ScoredAway","bQ4AllowedAway",
-    "ftMarket",
-    "h1Market",
-    "h2Market",
-    "handicapMarket",
-    "handicapH1Market",
-    "handicapH2Market",
-    "teamAMarket",
-    "teamBMarket",
-    "q1Market",
-    "q2Market",
-    "q3Market",
-    "q4Market",
-    "h1TeamAMarket",
-    "h1TeamBMarket",
-    "q1TeamAMarket",
-    "q1TeamBMarket",
-    "ssTeamAName",
-    "ssTeamAId",
-    "ssTeamBName",
-    "ssTeamBId",
-  ];
-  ids.forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) {
-      if (el.type === "checkbox") inputs[id] = el.checked;
-      else inputs[id] = el.value;
-    } else {
-      inputs[id] = null;
-    }
-  });
-
-  ["useFTH2H", "use1HH2H", "useQ1H2H", "useQ2H2H", "useQ3H2H", "useQ4H2H"].forEach((id) => {
-    inputs[id] = document.getElementById(id)?.checked || false;
-  });
-  return inputs;
-}
+/* BB-REPAIR DEAD-CODE: captureAllInputs() removed — sole textual reference was its definition; no dynamic/HTML/global use (audited). */
 try {
   if (typeof computeFTProjection === "function") window.computeFTProjection = computeFTProjection;
   if (typeof compute1HProjection === "function") window.compute1HProjection = compute1HProjection;
