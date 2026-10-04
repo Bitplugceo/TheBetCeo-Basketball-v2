@@ -1,9 +1,8 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
                        
-  <meta name="generator" content="bb-engine-basketball-search-20261003" />
+  <meta name="generator" content="bb-engine-strict-competition-20261003" />
   <meta charset="UTF-8" />
   <meta
     name="viewport"
@@ -3520,6 +3519,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
         <a id="ssTeamALink2" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p2</a>
         <a id="ssTeamALink3" href="#" target="_blank" style="color:#4ea9ff;font-size:12px;font-weight:800;text-decoration:underline;display:none;white-space:nowrap">p3</a>
       </div>
+      <div id="ssPickA" style="display:none;margin-top:6px;padding:6px;border:1px solid var(--panel-border);background:var(--panel-soft)"></div>
     </div>
 
     <div
@@ -3663,6 +3663,7 @@ const BB_LOCK_REGISTRY = Object.freeze([
           >🔗 p3</a
         >
       </div>
+      <div id="ssPickB" style="display:none;margin-top:6px;padding:6px;border:1px solid var(--panel-border);background:var(--panel-soft)"></div>
     </div>
 
     <div style="margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--panel-border)">
@@ -4959,6 +4960,8 @@ function clearPasteJSON(side) {
     st.textContent = "";
   }
   window.__ssLastPasteMsg = "";
+  const _pk = document.getElementById(side === "A" ? "ssPickA" : "ssPickB");
+  if (_pk) { _pk.textContent = ""; _pk.style.display = "none"; }
 }
 
 
@@ -4998,6 +5001,138 @@ function updateSofascoreLinks(side) {
   }
 }
 
+/* BB-FIX SEARCH-1: SofaScore's search lists every sport and cannot be filtered by URL. The 🔍 still opens that tab exactly as
+   before; the app keeps ONLY entity.sport === basketball when the JSON is pasted back, and shows those teams as a tappable list. */
+function ssEntityIsBasketball(ent) {
+  if (!ent || typeof ent !== "object") return false;
+  const sp = ent.sport || (ent.team && ent.team.sport) || null;
+  if (!sp) return false;
+  const slug = String(sp.slug || sp.name || "").toLowerCase();
+  if (slug) return slug === "basketball";
+  return Number(sp.id) === 2;
+}
+
+function ssPickBox(side) { return document.getElementById(side === "A" ? "ssPickA" : "ssPickB"); }
+
+function ssSetSearchStatus(color, text) {
+  const st = document.getElementById("ssFetchStatus");
+  if (!st) return;
+  st.style.color = color;
+  st.textContent = text;
+}
+
+function ssClearFetchTags(side) {
+  [side === "A" ? "aAutoTag" : "bAutoTag", side === "A" ? "aIntegrityTag" : "bIntegrityTag"].forEach(function (id) {
+    const el = document.getElementById(id);
+    if (el) { el.style.display = "none"; el.textContent = ""; }
+  });
+}
+
+function ssRankTeamsForLeague(teams, leagueKey) {
+  const wantWomen = typeof isWomenLeagueKey === "function" && isWomenLeagueKey(leagueKey);
+  const junk = /esport|e-sport|e sport|cyber|u16|u17|u18|u19|u20|u21|youth|junior|academy/i;
+  const bad = function (t) { return junk.test((t.name || "") + " " + (t.slug || "")) ? 1 : 0; };
+  const wrongGender = function (t) {
+    if (!t.gender) return 0;
+    return (wantWomen ? t.gender === "F" : t.gender === "M") ? 0 : 1;
+  };
+  return teams.slice().sort(function (a, b) {
+    return bad(a) - bad(b) || wrongGender(a) - wrongGender(b) ||
+      (b.userCount || 0) - (a.userCount || 0) || (b.score || 0) - (a.score || 0);
+  });
+}
+
+function ssRenderTeamPicker(side, teams, pickedId) {
+  const box = ssPickBox(side);
+  if (!box) return null;
+  window.__ssPickTeams = window.__ssPickTeams || {};
+  window.__ssPickTeams[side] = teams;
+  box.textContent = "";
+  box.style.display = "block";
+  const head = document.createElement("div");
+  head.style.cssText = "font-size:11px;font-weight:800;margin-bottom:4px";
+  head.textContent = "🏀 Basketball teams only — tap the right one";
+  box.appendChild(head);
+  const leagueKey = (document.getElementById("leagueSelect") || {}).value || "";
+  ssRankTeamsForLeague(teams, leagueKey).slice(0, 8).forEach(function (t) {
+    const isPicked = pickedId != null && String(t.id) === String(pickedId);
+    const b = document.createElement("button");
+    b.type = "button";
+    b.style.cssText =
+      "display:block;width:100%;text-align:left;margin:0 0 4px 0;padding:6px 8px;font-size:12px;line-height:1.3;" +
+      "color:#fff;border:none;cursor:pointer;background:" + (isPicked ? "#2f8f4a" : "#3a404c");
+    const meta = [t.country, t.gender === "F" ? "Women" : t.gender === "M" ? "Men" : "", t.national ? "National team" : ""]
+      .filter(Boolean).join(" · ");
+    b.textContent = (isPicked ? "✓ " : "") + t.name + (meta ? "  ·  " + meta : "") + "  ·  ID " + t.id;
+    b.addEventListener("click", function () { ssLockTeamAndLoad(side, t); });
+    box.appendChild(b);
+  });
+  return box;
+}
+
+function ssLockTeamFields(side, picked) {
+  const nameEl = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
+  const idEl = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
+  const mainEl = document.getElementById(side === "A" ? "teamAName" : "teamBName");
+  if (nameEl) nameEl.value = picked.name;
+  if (mainEl && picked.name) mainEl.value = picked.name;
+  if (idEl) idEl.value = picked.id;
+  if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
+}
+
+function ssExplainNoBasketball(parsed, query) {
+  const stats = { rows: 0, teamRows: 0, basketball: 0, otherSports: {} };
+  ssCollectSearchTeams(parsed, stats);
+  const tail = " Try one distinctive word, or the club's local name / city.";
+  if (Array.isArray(parsed && parsed.results)) {
+    if (!parsed.results.length) {
+      return "SofaScore returned 0 results" + (query ? " for “" + query + "”" : "") + "." + tail;
+    }
+    if (stats.teamRows && !stats.basketball) {
+      const sports = Object.keys(stats.otherSports).join(", ") || "other sports";
+      return "SofaScore found " + stats.teamRows + " team(s)" + (query ? " for “" + query + "”" : "") +
+        ", but none are basketball (" + sports + " hidden)." + tail;
+    }
+    if (!stats.teamRows) {
+      return "This JSON has no team rows. Use the search link for TEAMS (…/search/teams?q=…).";
+    }
+  }
+  return "No events found in pasted JSON. If this is a team search result, keep the team ID and paste /events/last/0 instead.";
+}
+
+async function ssLockTeamAndLoad(side, picked) {
+  window.__ssLoadBusy = window.__ssLoadBusy || {};
+  if (window.__ssLoadBusy[side]) return;
+  window.__ssLoadBusy[side] = true;
+  const pasteEl = document.getElementById(side === "A" ? "ssPasteA" : "ssPasteB");
+  try {
+    ssLockTeamFields(side, picked);
+    const known = (window.__ssPickTeams && window.__ssPickTeams[side]) || null;
+    if (known) ssRenderTeamPicker(side, known, picked.id);
+    ssSetSearchStatus("#d98a00", "⏳ Locked " + picked.name + " (" + picked.id + "). Loading its basketball games…");
+    const _tag = document.getElementById(side === "A" ? "aAutoTag" : "bAutoTag");
+    if (_tag) { _tag.style.display = "inline"; _tag.textContent = "⏳ Fetching…"; _tag.style.color = "#d98a00"; }
+    const all = await ssFetchTeamLastEvents(picked.id);
+    const events = all.filter(function (ev) { return ssIsBasketballEvent(ev); });
+    if (!events.length) {
+      ssClearFetchTags(side);
+      ssSetSearchStatus("#d98a00", all.length
+        ? "⚠ " + picked.name + " (" + picked.id + "): SofaScore returned " + all.length + " games but none are basketball."
+        : "⚠ Team locked: " + picked.name + " (" + picked.id + "), but SofaScore blocked the in-app games request. " +
+          "Tap the 🔗 p0 link next to the ID, copy that JSON and paste it into “Paste JSON " + side + "”.");
+      return;
+    }
+    if (pasteEl) pasteEl.value = JSON.stringify({ events: events });
+    await parseSofascoreIndividual(side);
+  } catch (err) {
+    ssClearFetchTags(side);
+    ssSetSearchStatus("#d92d2a", "❌ Could not load games: " + String((err && err.message) || err));
+  } finally {
+    if (pasteEl) pasteEl.value = "";
+    window.__ssLoadBusy[side] = false;
+  }
+}
+
 function searchSofascorePlayer(side) {
   const nameEl = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
   const mainEl = document.getElementById(side === "A" ? "teamAName" : "teamBName");
@@ -5006,47 +5141,19 @@ function searchSofascorePlayer(side) {
     alert("Enter a player/team name first.");
     return;
   }
-  let searchName = rawName.split(",")[0].trim();
-  /* BB-AUDIT: SofaScore search matches on name tokens. Generic words like "Basketball" are usually NOT part of the
-     stored team name ("Dubai Basketball" -> often just "Dubai"), which made the exact query return {"results":[]}. */
-  const _stripped = searchName.replace(/\b(basketball|basket)\b/gi, " ").replace(/\s+/g, " ").trim();
-  if (_stripped.length >= 3) searchName = _stripped;
-
-  /* /search/teams?sport=basketball returns empty. /search/all returns every sport.
-     Fetch all, keep basketball teams only, and open that list — never the mixed page. */
-  const searchUrl =
-    SOFA_API_BASE + "/search/all?q=" +
-    encodeURIComponent(searchName) +
-    "&page=0";
+  const searchName = rawName.split(",")[0].trim();
+  /* BB-FIX SEARCH-1: opens the SofaScore tab exactly as before. The removed "&sport=basketball" was never a real SofaScore
+     parameter (it was ignored, or at best gave nothing), so it is gone. SofaScore cannot filter by sport, so the tab lists
+     every sport; the basketball-only filter happens when the JSON is pasted back (ssCollectSearchTeams + picker). */
+  const searchUrl = SOFA_API_BASE + "/search/teams?q=" + encodeURIComponent(searchName);
+  window.open(searchUrl, "_blank");
   const st = document.getElementById("ssFetchStatus");
   if (st) {
     st.style.color = "#d98a00";
-    st.textContent = "Searching basketball teams for " + searchName + "...";
+    st.textContent =
+      "🔍 Search opened for " + side + " — copy the JSON and paste it into “Paste JSON " + side +
+      "”. Only basketball teams are kept (other sports are dropped on paste).";
   }
-  (async function () {
-    try {
-      const payload = typeof proxyFetch === "function" ? await proxyFetch(searchUrl) : await (await fetch(searchUrl)).json();
-      const teams = ssCollectSearchTeams(payload);
-      const body = JSON.stringify({ results: teams.map(function (tm) {
-        return { type: "team", entity: { id: Number(tm.id), name: tm.name, slug: tm.slug, gender: tm.gender, sport: { slug: "basketball" }, country: { name: tm.country } } };
-      }) }, null, 2);
-      const html = "<!doctype html><meta charset=utf-8><title>Basketball teams</title><pre style=\"font:14px/1.4 sans-serif;padding:12px\">" +
-        body.replace(/&/g, "&").replace(/</g, "<") + "</pre>";
-      const blob = new Blob([html], { type: "text/html" });
-      window.open(URL.createObjectURL(blob), "_blank");
-      if (st) {
-        st.style.color = teams.length ? "#2f8f4a" : "#d92d2a";
-        st.textContent = teams.length
-          ? "Basketball only: " + teams.length + " team(s) for " + searchName + ". Paste that JSON, or copy the team ID."
-          : "No basketball team for " + searchName + ".";
-      }
-    } catch (err) {
-      if (st) {
-        st.style.color = "#d92d2a";
-        st.textContent = "Basketball search failed: " + (err && err.message ? err.message : "request blocked");
-      }
-    }
-  })();
 }
 
 window.__lastEventsA = null;
@@ -5940,18 +6047,32 @@ function ssExtractPastedEvents(parsed) {
   return [];
 }
 
-function ssCollectSearchTeams(parsed) {
+function ssCollectSearchTeams(parsed, stats) {
   const out = [];
+  const seen = new Set();
+  const S = stats || null;
+  if (S) { S.rows = S.rows || 0; S.teamRows = S.teamRows || 0; S.basketball = S.basketball || 0; S.otherSports = S.otherSports || {}; }
   const push = function (row) {
     if (!row) return;
-    const ent = row.entity || row.team || row;
-    if (!ent || ent.id == null) return;
-    const sportSlug = String((ent.sport && (ent.sport.slug || ent.sport.name)) || "").toLowerCase();
-    if (sportSlug && sportSlug !== "basketball") return;
     const type = String(row.type || "").toLowerCase();
     if (type && type !== "team") return;
+    const ent = row.entity || row.team || row;
+    if (!ent || ent.id == null) return;
+    const key = String(ent.id);
+    if (seen.has(key)) return;
+    seen.add(key);
+    if (S) { S.rows++; S.teamRows++; }
+    /* BB-FIX SEARCH-2: strict. A row with a missing/other sport is NOT kept (it used to pass when sport was absent). */
+    if (!ssEntityIsBasketball(ent)) {
+      if (S) {
+        const sp = String((ent.sport && (ent.sport.slug || ent.sport.name)) || "unknown").toLowerCase();
+        S.otherSports[sp] = (S.otherSports[sp] || 0) + 1;
+      }
+      return;
+    }
+    if (S) S.basketball++;
     out.push({
-      id: String(ent.id),
+      id: key,
       name: String(ent.name || ""),
       gender: String(ent.gender || "").toUpperCase(),
       slug: String(ent.slug || ""),
@@ -6034,43 +6155,31 @@ async function ssApplySearchPaste(side, parsed, st) {
   const picked = ssPickTeamFromSearch(teams, leagueSelect);
   if (!picked) return null;
 
-  const nameEl = document.getElementById(side === "A" ? "ssTeamAName" : "ssTeamBName");
-  const idEl = document.getElementById(side === "A" ? "ssTeamAId" : "ssTeamBId");
-  const mainEl = document.getElementById(side === "A" ? "teamAName" : "teamBName");
-  if (nameEl) nameEl.value = picked.name;
-  if (mainEl && picked.name) mainEl.value = picked.name;
-  if (idEl) idEl.value = picked.id;
-  if (typeof updateSofascoreLinks === "function") updateSofascoreLinks(side);
+  ssLockTeamFields(side, picked);
+  ssRenderTeamPicker(side, teams, picked.id); /* BB-FIX SEARCH-3: wrong auto-pick? the user can tap another basketball team */
 
   if (st) {
     st.style.color = "#d98a00";
     st.textContent =
-      "🔍 Search JSON detected — locked " +
-      picked.name +
-      " (" +
-      picked.id +
-      "). Fetching last events…";
+      "🔍 Search JSON detected — basketball only. Locked " + picked.name + " (" + picked.id + "). Fetching last games…";
   }
 
-  const _fetchTagId = side === "A" ? "aAutoTag" : "bAutoTag";
-  const _fetchIntegrityId = side === "A" ? "aIntegrityTag" : "bIntegrityTag";
-  const _fetchTagEl = document.getElementById(_fetchTagId);
-  const _fetchIntegrityEl = document.getElementById(_fetchIntegrityId);
+  const _fetchTagEl = document.getElementById(side === "A" ? "aAutoTag" : "bAutoTag");
+  const _fetchIntegrityEl = document.getElementById(side === "A" ? "aIntegrityTag" : "bIntegrityTag");
   if (_fetchTagEl) { _fetchTagEl.style.display = "inline"; _fetchTagEl.textContent = "⏳ Fetching…"; _fetchTagEl.style.color = "#d98a00"; }
   if (_fetchIntegrityEl) { _fetchIntegrityEl.style.display = "inline"; _fetchIntegrityEl.style.color = "#d98a00"; _fetchIntegrityEl.textContent = "· waiting"; }
-  const events = await ssFetchTeamLastEvents(picked.id);
+  const allEvents = await ssFetchTeamLastEvents(picked.id);
+  const events = allEvents.filter(function (ev) { return ssIsBasketballEvent(ev); });
   if (events.length) return { resolvedTeam: picked, events: events };
 
+  /* BB-FIX SEARCH-4: this used to leave the tags stuck on "Fetching…" and paint a failure green. */
+  ssClearFetchTags(side);
   if (st) {
-    st.style.color = "#2f8f4a";
+    st.style.color = "#d98a00";
     st.textContent =
-      "✅ Team locked: " +
-      picked.name +
-      " (" +
-      picked.id +
-      "). This paste was a SEARCH result, not games. Open JSON " +
-      side +
-      " and paste /events/last/0.";
+      "⚠ Team locked: " + picked.name + " (" + picked.id + "), but the games could not be loaded in-app" +
+      (allEvents.length ? " (none of the " + allEvents.length + " returned were basketball)" : " (SofaScore blocked the request)") +
+      ". Tap the 🔗 p0 link beside the ID, copy that JSON and paste it into “Paste JSON " + side + "”.";
   }
   return { resolvedTeam: picked, events: [] };
 }
@@ -6168,12 +6277,6 @@ async function parseSofascoreIndividual(side) {
       );
     }
     let events = ssExtractPastedEvents(parsed);
-    if (!events.length && parsed && Array.isArray(parsed.results) && parsed.results.length === 0) {
-      /* BB-AUDIT: an empty search result used to fall through to the misleading "No events found" error. */
-      throw new Error(
-        "SofaScore search returned 0 results. Try a shorter name (drop words like Basketball/BC/KK), or open the team page on sofascore.com and copy the number at the end of the URL into the ID box.",
-      );
-    }
     if (!events.length) {
       const applied = await ssApplySearchPaste(side, parsed, st);
       if (applied && applied.events && applied.events.length) {
@@ -6182,9 +6285,7 @@ async function parseSofascoreIndividual(side) {
         if (pasteEl) pasteEl.value = "";
         return;
       } else {
-        throw new Error(
-          "No events found in pasted JSON. If this is a team search result, keep the team ID and paste /events/last/0 instead.",
-        );
+        throw new Error(ssExplainNoBasketball(parsed, ""));
       }
     }
 
