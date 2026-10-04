@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -5005,12 +5006,18 @@ function searchSofascorePlayer(side) {
     alert("Enter a player/team name first.");
     return;
   }
-  const searchName = rawName.split(",")[0].trim();
+  let searchName = rawName.split(",")[0].trim();
+  /* BB-AUDIT: SofaScore search matches on name tokens. Generic words like "Basketball" are usually NOT part of the
+     stored team name ("Dubai Basketball" -> often just "Dubai"), which made the exact query return {"results":[]}. */
+  const _stripped = searchName.replace(/\b(basketball|basket)\b/gi, " ").replace(/\s+/g, " ").trim();
+  if (_stripped.length >= 3) searchName = _stripped;
 
+  /* BB-AUDIT: /search/all is the documented mixed-entity search; "sport=basketball" is not a real filter on
+     /search/teams. Basketball filtering is done locally in ssCollectSearchTeams (sport.slug + type === "team"). */
   const searchUrl =
-    SOFA_API_BASE + "/search/teams?q=" +
+    SOFA_API_BASE + "/search/all?q=" +
     encodeURIComponent(searchName) +
-    "&sport=basketball";
+    "&page=0";
   window.open(searchUrl, "_blank");
   const st = document.getElementById("ssFetchStatus");
   if (st) {
@@ -6141,6 +6148,12 @@ async function parseSofascoreIndividual(side) {
       );
     }
     let events = ssExtractPastedEvents(parsed);
+    if (!events.length && parsed && Array.isArray(parsed.results) && parsed.results.length === 0) {
+      /* BB-AUDIT: an empty search result used to fall through to the misleading "No events found" error. */
+      throw new Error(
+        "SofaScore search returned 0 results. Try a shorter name (drop words like Basketball/BC/KK), or open the team page on sofascore.com and copy the number at the end of the URL into the ID box.",
+      );
+    }
     if (!events.length) {
       const applied = await ssApplySearchPaste(side, parsed, st);
       if (applied && applied.events && applied.events.length) {
