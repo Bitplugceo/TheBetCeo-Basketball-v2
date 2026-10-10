@@ -1,3 +1,4 @@
+H
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -103,7 +104,8 @@ var BB_EV_CONFIG = {
   calibratedAfter: 200,
   oppAdj: { factor: 0.7, cap: 6, minOppGames: 3, minLeagueTeamGames: 20 },
   earlySeason: { blendBelow: 8, prior: 8, firstRounds: 5 },
-  h2h: { minMeetings: 4, maxWeight: 0.20, prior: 20, halfLifeDays: 182.6 }
+  h2h: { minMeetings: 4, maxWeight: 0.20, prior: 20, halfLifeDays: 182.6 },
+  sanity: { maxEV: 0.40, maxGapVsFair: 0.20 } /* P2: a price this far from the model is almost always a typo or a wrong line */
 };
 function bbEvBucket(mk) {
   mk = String(mk || "ft").toLowerCase();
@@ -173,7 +175,7 @@ function bbProbit(p) { var lo = -8, hi = 8; for (var i = 0; i < 60; i++) { var m
 function bbOddsNum(id) {
   var el = typeof document !== "undefined" ? document.getElementById(id) : null;
   var v = el ? Number(String(el.value || "").trim().replace(",", ".")) : NaN;
-  return Number.isFinite(v) && v > 1.01 && v < 50 ? v : null;
+  return Number.isFinite(v) && v >= 1.01 && v <= 50 ? v : null; /* P2: 1.01 is a real price */
 }
 var BB_ODDS_IDS = {
   ft: ["ftOverOdds", "ftUnderOdds"], h1: ["h1OverOdds", "h1UnderOdds"], h2: ["h2OverOdds", "h2UnderOdds"],
@@ -279,8 +281,12 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   out.grade = (best.ev >= BB_EV_CONFIG.grade.A && best.p - best.be >= BB_EV_CONFIG.grade.Ape) ? "A" : best.ev >= BB_EV_CONFIG.grade.B ? "B" : best.ev >= BB_EV_CONFIG.grade.C ? "C" : "D";
   var minEV = bbMinEV();
   var head = sideTxt(best.side) + " P=" + (best.p * 100).toFixed(1) + "%" + (push > 0 ? " (push " + (push * 100).toFixed(1) + "%)" : "") + " vs breakeven " + (best.be * 100).toFixed(1) + "% @ " + best.dec.toFixed(2) + ", EV " + (best.ev >= 0 ? "+" : "") + (best.ev * 100).toFixed(1) + "%";
+  if (!fair) { out.reason = "NO PLAY - NEED BOTH ODDS (" + head + "; enter the " + sideTxt(best.side === "a" ? "b" : "a") + " price too so the bookmaker margin can be removed and checked" + fl + ")"; out.needBothOdds = true; return out; } /* v2.5: a PLAY requires both sides */
   if (best.p - best.be < BB_EV_CONFIG.minEdgeVsBreakeven) { out.reason = head + ": P - breakeven < " + (BB_EV_CONFIG.minEdgeVsBreakeven * 100) + "pp" + fl; return out; }
   if (best.ev < minEV) { out.reason = head + " < +" + (minEV * 100) + "%" + (minEV > BB_EV_CONFIG.minEV ? " (early season)" : "") + fl; return out; }
+  if (best.ev > BB_EV_CONFIG.sanity.maxEV || (best.fair != null && Math.abs(best.p - best.fair) > BB_EV_CONFIG.sanity.maxGapVsFair)) {
+    out.reason = "CHECK ODDS/LINE - " + head + (best.fair != null ? ", market fair " + (best.fair * 100).toFixed(1) + "%" : "") + ": too far from the model to trust (likely a typo, stale or wrong line)" + fl; out.sanityBlock = true; return out;
+  }
   out.ok = true; out.reason = head;
   return out;
 }
@@ -439,7 +445,8 @@ function bbFitShrinkFromTracker() {
     var d = by[b], n = d.length; if (n < 20) return;
     var mx = 0, my = 0; d.forEach(function (r) { mx += r[0]; my += r[1]; }); mx /= n; my /= n;
     var sxx = 0, sxy = 0, syy = 0; d.forEach(function (r) { sxx += (r[0] - mx) * (r[0] - mx); sxy += (r[0] - mx) * (r[1] - my); syy += (r[1] - my) * (r[1] - my); });
-    out[b] = { n: n, k: sxx > 0 ? sxy / sxx : null, sd: Math.sqrt(syy / (n - 1)), fittedAt: new Date().toISOString() };
+    var kk = sxx > 0 ? sxy / sxx : null; /* P2: sigma = residual SD around the fitted shrink, not the raw SD of (actual - line) */
+    out[b] = { n: n, k: kk, sd: Math.sqrt(Math.max(1e-9, (syy - (kk != null ? kk * sxy : 0)) / Math.max(1, n - 2))), fittedAt: new Date().toISOString() };
   });
   try { localStorage.setItem("BB_EV_LEARNED", JSON.stringify(out)); } catch (_e) {}
   return out;
@@ -581,7 +588,9 @@ function bbAdjustTeamStats(stats, events, teamId, label) {
     var idx = bbStoreIndex(), C = BB_EV_CONFIG.oppAdj, ES = BB_EV_CONFIG.earlySeason;
     var evById = {}; (events || []).forEach(function (e) { if (e && e.id != null) evById[String(e.id)] = e; });
     var recOf = function (eventId) { return idx.games[String(eventId)] || null; };
-    var rowsFor = function (src) { return src === "overall" ? (stats.overallGameRows || []) : ((stats.venueGameRows || {})[src] || []); };
+    var rowsFor = function (src, period) { /* v2.5: quarter/half lists come from the period-complete rows */
+      if (period && period !== "ft" && stats.periodGameRows) return src === "overall" ? stats.periodGameRows : ((stats.venuePeriodGameRows || {})[src] || []);
+      return src === "overall" ? (stats.overallGameRows || []) : ((stats.venueGameRows || {})[src] || []); };
     var overall = stats.overallGameRows || [];
     var curKey = null;
     if (overall.length) { var r0 = recOf(overall[0].eventId); if (r0) curKey = bbSeasonKeyOf(r0); }
@@ -599,7 +608,7 @@ function bbAdjustTeamStats(stats, events, teamId, label) {
     };
     BB_LIST_MAP.forEach(function (m) {
       var list = stats[m[0]]; if (!Array.isArray(list) || !list.length) return;
-      var rows = rowsFor(m[1]); if (rows.length !== list.length) return;
+      var rows = rowsFor(m[1], m[3]); if (rows.length !== list.length) return;
       var period = m[3], metric = m[2], adjList = list.slice();
       rows.forEach(function (row, i) {
         var rec = recOf(row.eventId), v = Number(list[i]); if (!rec || !Number.isFinite(v)) return;
@@ -737,7 +746,8 @@ function bbSportyPickLine(markets, id, quarter, wantLine) {
   var spec = String(fav.specifier || ""), mt = /(total|hcp)=(-?[\d.]+)/.exec(spec);
   var outs = fav.outcomes || [], find = function (re, ids) { return outs.find(function (o) { return ids.indexOf(String(o.id)) >= 0 || re.test(String(o.desc || "")); }); };
   var a = find(/^(over|home)/i, ["12", "4", "1714", "1"]), b = find(/^(under|away)/i, ["13", "5", "1715", "2"]);
-  return { line: mt ? Number(mt[2]) : null, oddsA: a ? Number(a.odds) : null, oddsB: b ? Number(b.odds) : null, specifier: spec, favourite: Number(fav.favourite) === 1 };
+  var od = function (o) { if (!o || (o.isActive != null && Number(o.isActive) === 0)) return null; var v = Number(o.odds); return Number.isFinite(v) && v > 1 ? v : null; }; /* P2: suspended / 0 odds = missing */
+  return { line: mt ? Number(mt[2]) : null, oddsA: od(a), oddsB: od(b), specifier: spec, favourite: Number(fav.favourite) === 1 };
 }
 var BB_SPORTY_FIELDS = [
   ["225", null, "ftMarket", "ftOverOdds", "ftUnderOdds", "FT total"],
@@ -761,7 +771,7 @@ function bbSportyFill(parsed) {
   var filled = [];
   Object.keys(parsed).forEach(function (name) {
     var f = parsed[name].field, r = parsed[name].r;
-    var set = function (id, v) { var el = document.getElementById(id); if (el && v != null && Number.isFinite(Number(v))) { el.value = String(v); el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return true; } return false; };
+    var set = function (id, v) { var el = document.getElementById(id); if (el && v != null && Number.isFinite(Number(v)) && (id === f[2] || Number(v) > 1)) { el.value = String(v); el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); return true; } return false; };
     var ok = false;
     if (f[2] && r.line != null) ok = set(f[2], r.line) || ok;
     ok = set(f[3], r.oddsA) || ok; ok = set(f[4], r.oddsB) || ok;
@@ -5689,13 +5699,13 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
     const periodsComplete = _regP <= 2
       ? [q1,q2,oq1,oq2].every(Number.isFinite)
       : [q1,q2,q3,q4,oq1,oq2,oq3,oq4].every(Number.isFinite);
-    if (!periodsComplete) return;
-    const h1 = _regP <= 2 ? q1 : q1 + q2;
-    const oh1 = _regP <= 2 ? oq1 : oq1 + oq2;
-    const h2 = _regP <= 2 ? q2 : q3 + q4;
-    const oh2 = _regP <= 2 ? oq2 : oq3 + oq4;
+    const _noP = !periodsComplete; /* v2.5: no quarter data -> keep the FT (regulation) score, exclude from quarter/half lists only */
+    const h1 = _noP ? null : _regP <= 2 ? q1 : q1 + q2;
+    const oh1 = _noP ? null : _regP <= 2 ? oq1 : oq1 + oq2;
+    const h2 = _noP ? null : _regP <= 2 ? q2 : q3 + q4;
+    const oh2 = _noP ? null : _regP <= 2 ? oq2 : oq3 + oq4;
     canonicalRows.push({
-      eventId, date, isHome, myFT, oppFT, wentOT: _isOT(ev, myScore, oppScore),
+      eventId, date, isHome, myFT, oppFT, wentOT: _isOT(ev, myScore, oppScore), noPeriods: _noP,
       q1: _regP > 2 ? q1 : null, q2: _regP > 2 ? q2 : h2, q3: _regP > 2 ? q3 : null, q4: _regP > 2 ? q4 : null,
       oppQ1: _regP > 2 ? oq1 : null, oppQ2: _regP > 2 ? oq2 : oh2, oppQ3: _regP > 2 ? oq3 : null, oppQ4: _regP > 2 ? oq4 : null,
       h1, oh1, h2, oh2,
@@ -5706,11 +5716,17 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
     home: canonicalRows.filter(r => r.isHome).slice(0, 10),
     away: canonicalRows.filter(r => !r.isHome).slice(0, 10),
   };
-  const appendOverall = (rows) => {
+  const _periodRowsAll = canonicalRows.filter(r => !r.noPeriods);
+  const periodRows = _periodRowsAll.slice(0, 10);
+  const venuePeriodRows = { home: _periodRowsAll.filter(r => r.isHome).slice(0, 10), away: _periodRowsAll.filter(r => !r.isHome).slice(0, 10) };
+  const appendOverall = (rows, part) => {
     rows.forEach(r => {
+      if (part !== "periods") {
       scoredList.push(r.myFT); allowedList.push(r.oppFT); eventIds.push(r.eventId);
       overallGamesMeta.push({ eventId:r.eventId, isHome:r.isHome, myFT:r.myFT, oppFT:r.oppFT, wentOT:r.wentOT });
       ftScoredDates.push(r.date);
+      }
+      if (part === "ft") return;
       h1ScoredList.push(r.h1); h1AllowedList.push(r.oh1); h1ScoredDates.push(r.date);
       h2ScoredList.push(r.h2); h2AllowedList.push(r.oh2); h2ScoredDates.push(r.date);
       if (_regP > 2) {
@@ -5721,14 +5737,15 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
       }
     });
   };
-  appendOverall(overallRows);
-  const appendVenue = (rows, type) => {
+  appendOverall(overallRows, "ft");
+  appendOverall(periodRows, "periods");
+  const appendVenue = (rows, type, part) => {
     rows.forEach(r => {
       const s = type === "home" ? homeScoredList : awayScoredList;
       const a = type === "home" ? homeAllowedList : awayAllowedList;
       const sd = type === "home" ? homeScoredDates : awayScoredDates;
       const ad = type === "home" ? homeAllowedDates : awayAllowedDates;
-      s.push(r.myFT); a.push(r.oppFT); sd.push(r.date); ad.push(r.date);
+      if (part === "ft") { s.push(r.myFT); a.push(r.oppFT); sd.push(r.date); ad.push(r.date); return; }
       const hs = type === "home" ? h1HomeScoredList : h1AwayScoredList;
       const ha = type === "home" ? h1HomeAllowedList : h1AwayAllowedList;
       const hsd = type === "home" ? h1HomeScoredDates : h1AwayScoredDates;
@@ -5756,8 +5773,10 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
       }
     });
   };
-  appendVenue(venueRows.home, "home");
-  appendVenue(venueRows.away, "away");
+  appendVenue(venueRows.home, "home", "ft");
+  appendVenue(venueRows.away, "away", "ft");
+  appendVenue(venuePeriodRows.home, "home", "periods");
+  appendVenue(venuePeriodRows.away, "away", "periods");
   const _integrity = {
     source: "sofascore_events",
     ok: overallRows.length >= Math.min(10, canonicalRows.length) && overallRows.length >= 8,
@@ -5774,7 +5793,8 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
       away: { count: venueRows.away.length, eventIds: venueRows.away.map(r=>r.eventId), aligned: true },
     },
     periodsPerGame: _regP <= 2 ? ["h1","h2"] : ["h1","h2","q1","q2","q3","q4"],
-    completeGameRule: "one canonical event record supplies FT/H1/H2/Q1-Q4; incomplete period rows are excluded",
+    completeGameRule: "one canonical event record supplies FT/H1/H2/Q1-Q4; rows without quarter data count for FT only",
+    periodGames: periodRows.length,
     reason: overallRows.length >= 8 ? null : "Fewer than 8 complete regulation-period games available",
   };
   updateLeagueVolCache(_league, scoredList, eventIds);
@@ -5797,7 +5817,7 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
     h2AwayScoredList,h2AwayAllowedList,h2AwayScoredDates,h2AwayAllowedDates,
     h1ScoredDates,ftScoredDates,q1ScoredList,q2ScoredList,q3ScoredList,q4ScoredList,
     q1AllowedList,q2AllowedList,q3AllowedList,q4AllowedList,q1ScoredDates,q2ScoredDates,q3ScoredDates,q4ScoredDates,
-    lastGameDate,eventIds,overallGamesMeta,overallGameRows: overallRows, venueGameRows: venueRows, inputIntegrity: _integrity,
+    lastGameDate,eventIds,overallGamesMeta,overallGameRows: overallRows, venueGameRows: venueRows, periodGameRows: periodRows, venuePeriodGameRows: venuePeriodRows, inputIntegrity: _integrity,
     pace10: [], ortg10: [], drtg10: [],
   };
 }
@@ -19559,7 +19579,7 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
         }
       }
       if (status === "BLOCK") {
-        const why = "TRAP BLOCK: " + sig.filter((x) => x.level !== "INFO").map((x) => x.note).join("; ");
+        const why = "TRAP BLOCK: " + sig.filter((x) => x.level !== "INFO").map((x) => "[" + x.level + "] " + x.note).join("; ");
         p.blockedPick = p.pick;
         forcePickNoPlayWithNote(p, why); /* BB-FIX #4: apply NO PLAY first so the shadow log reads the final noPlayReason */
         try {
@@ -27426,10 +27446,16 @@ function bbLeagueHCA(league) {
   return 2.5;
 }
 function bbSeriesCount(id) { var el = typeof document !== "undefined" ? document.getElementById(id) : null; return el ? String(el.value || "").split(/[,\s]+/).filter(function (x) { return x !== "" && Number.isFinite(Number(x)); }).length : 0; }
-function bbMarginHCA(period, league) {
+function bbMarginHCA(period, league, ctx) {
   var scale = period === "h1" || period === "h2" ? 0.5 : /^q[1-4]$/.test(String(period)) ? 0.25 : 1;
+  var root = ctx || (typeof AppState !== "undefined" && AppState.context ? AppState.context.data : null) || {};
+  try { if (typeof isVenueNeutral === "function" && isVenueNeutral(root, null)) { window.__bbHCAInfo = { neutral: true, applied: 0, period: period }; return 0; } } catch (_n) {}
   var w = function (n) { try { return getVenueBlendWeights(n).wVenue; } catch (_e) { return 0; } };
-  var wv = (w(bbSeriesCount("aFTScoredHome")) + w(bbSeriesCount("bFTScoredAway"))) / 2;
+  var cnt = function (side, id) { /* P2: the venue series the projection really used (fetched context or the boxes) */
+    try { if (typeof getResolvedVenueSeries === "function") { var v = getResolvedVenueSeries(side, "ft", "scored", root, null); if (Array.isArray(v)) return v.length; } } catch (_c) {}
+    return bbSeriesCount(id);
+  };
+  var wv = (w(cnt("A", "aFTScoredHome")) + w(cnt("B", "bFTScoredAway"))) / 2;
   var lg = league || (typeof document !== "undefined" ? String((document.getElementById("leagueSelect") || {}).value || "") : "");
   var h = bbLeagueHCA(lg) * scale * (1 - wv);
   window.__bbHCAInfo = { league: lg, hcaFull: bbLeagueHCA(lg), venueWeight: wv, applied: h, period: period };
@@ -27439,7 +27465,7 @@ function computeMarginProjection(teamAProj, teamBProj, options = null) {
   if (!isFinite(teamAProj) || !isFinite(teamBProj)) return NaN;
   if (options && options.hcaPeriod) {
     const _m = computeMarginProjection(teamAProj, teamBProj, Object.assign({}, options, { hcaPeriod: null }));
-    return Number.isFinite(_m) ? _m + bbMarginHCA(options.hcaPeriod) : _m; /* Team A is always home */
+    return Number.isFinite(_m) ? _m + bbMarginHCA(options.hcaPeriod, null, options.contextData || null) : _m; /* Team A is always home */
   }
   let roleA = "";
   try {
@@ -38912,6 +38938,7 @@ function validateInputIntegrityForRun(extracted, league) {
         if (!rows.length || rowIds.size !== rows.length) errors.push("Team " + side + ": canonical game-row event IDs are missing or duplicated.");
         const fourPeriod = Number(LEAGUE_FETCH_RULES?.[league]?.regulationPeriods || 4) > 2;
         const rowComplete = rows.every((r) => {
+          if (r && r.noPeriods) return r.eventId && [r.myFT, r.oppFT].every(Number.isFinite); /* v2.5: FT-only row */
           const nums = fourPeriod
             ? [r.myFT,r.oppFT,r.q1,r.q2,r.q3,r.q4,r.oppQ1,r.oppQ2,r.oppQ3,r.oppQ4,r.h1,r.oh1,r.h2,r.oh2]
             : [r.myFT,r.oppFT,r.h1,r.oh1,r.h2,r.oh2];
