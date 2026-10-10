@@ -1,4 +1,3 @@
-S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -243,35 +242,43 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   var out = { ok: false, reason: "", mk: mk };
   if (!Number.isFinite(signedSignal)) { out.reason = "no projection (missing inputs)"; return out; }
   var k = Number.isFinite(kOverride) ? kOverride : bbEvK(league, mk), sd = bbEvSigma(league, mk), mu = k * signedSignal;
-  var pa = Math.min(BB_EV_CONFIG.maxProb, Math.max(1 - BB_EV_CONFIG.maxProb, bbNormCdf(mu / sd)));
+  /* CALC-AUDIT B1: whole-number lines can push (stake refunded). Scores are integers, so
+     P(win a) = P(X >= line+1) ~ Phi((mu-0.5)/sd), P(win b) ~ Phi((-mu-0.5)/sd), push = the rest.
+     Half-point lines keep Phi(mu/sd). Winner has no line (OT decides). */
+  var isInt = Number.isFinite(extra.line) && Math.abs(extra.line - Math.round(extra.line)) < 1e-9;
+  var cap = function (x) { return Math.min(BB_EV_CONFIG.maxProb, Math.max(1 - BB_EV_CONFIG.maxProb, x)); };
+  var pa, pbWin, push = 0;
+  if (isInt) { var _ra = bbNormCdf((mu - 0.5) / sd), _rb = bbNormCdf((-mu - 0.5) / sd); push = Math.max(0, 1 - _ra - _rb); pa = Math.min(BB_EV_CONFIG.maxProb, _ra); pbWin = Math.min(BB_EV_CONFIG.maxProb, _rb); } /* push from the raw CDFs so the 80% cap never inflates it */
+  else { pa = cap(bbNormCdf(mu / sd)); pbWin = 1 - pa; }
   var odds = bbReadOdds(mk), fair = bbDevig(odds.a, odds.b);
-  out.k = k; out.sd = sd; out.mu = mu; out.pA = pa;
+  out.k = k; out.sd = sd; out.mu = mu; out.pA = pa; out.pPush = push;
   out.fairLine = Number.isFinite(extra.line) ? (extra.margin ? extra.line - mu : extra.line + mu) : null; /* line at which the model is 50/50 */
-  out.fairOddsA = 1 / pa; out.fairOddsB = 1 / (1 - pa);
+  out.fairOddsA = (1 - push) / pa; out.fairOddsB = (1 - push) / pbWin;
   var sides = [
     { side: "a", p: pa, dec: odds.a, fair: fair ? fair.pa : null },
-    { side: "b", p: 1 - pa, dec: odds.b, fair: fair ? fair.pb : null }
+    { side: "b", p: pbWin, dec: odds.b, fair: fair ? fair.pb : null }
   ];
-  sides.forEach(function (s) { s.ev = s.dec ? s.p * s.dec - 1 : null; s.be = s.dec ? 1 / s.dec : null; });
-  var lean = pa >= 0.5 ? sides[0] : sides[1];
+  /* EV = P(win)*odds + P(push) - 1; breakeven win probability = (1 - P(push)) / odds */
+  sides.forEach(function (s) { s.ev = s.dec ? s.p * s.dec + push - 1 : null; s.be = s.dec ? (1 - push) / s.dec : null; });
+  var lean = pa >= pbWin ? sides[0] : sides[1];
   var best = lean;
   if (sides[0].ev != null && sides[1].ev != null) best = sides[0].ev >= sides[1].ev ? sides[0] : sides[1];
   else if (sides[0].ev != null && sides[0].ev > 0) best = sides[0];
   else if (sides[1].ev != null && sides[1].ev > 0) best = sides[1];
   if (best.ev != null && best.ev < 0 && lean.ev != null) best = lean; /* nothing positive: report the model's own side */
   out.side = best.side; out.p = best.p; out.odds = best.dec; out.oddsTyped = !!best.dec; out.fair = best.fair;
-  out.ev = best.ev; out.breakeven = best.be; out.stake = best.dec ? bbKelly(best.p, best.dec) : 0;
+  out.ev = best.ev; out.breakeven = best.be; out.stake = best.dec ? bbKelly(push > 0 ? best.p / (1 - push) : best.p, best.dec) : 0; /* Kelly with push = Kelly on P(win | no push) */
   out.overround = fair ? fair.overround : null;
   out.american = best.dec ? (best.dec >= 2 ? Math.round((best.dec - 1) * 100) : Math.round(-100 / (best.dec - 1))) : null;
   var sideTxt = function (s) { return (/^handicap|winner/.test(String(mk)) ? (s === "a" ? "Home" : "Away") : (s === "a" ? "Over" : "Under")); };
   var fl = out.fairLine != null ? ", fair line " + out.fairLine.toFixed(1) : "";
-  var pTxt = "P(" + sideTxt(lean.side) + ")=" + (lean.p * 100).toFixed(1) + "%" + fl + ", fair odds " + (1 / lean.p).toFixed(2);
+  var pTxt = "P(" + sideTxt(lean.side) + ")=" + (lean.p * 100).toFixed(1) + "%" + (push > 0 ? ", push " + (push * 100).toFixed(1) + "%" : "") + fl + ", fair odds " + ((1 - push) / lean.p).toFixed(2);
   var block = bbIsNoPlayCompetition();
   if (block) { out.reason = block + " (" + pTxt + ")"; return out; }
   if (!best.dec) { out.reason = "NO PLAY - enter odds (" + pTxt + ")"; return out; }
   out.grade = (best.ev >= BB_EV_CONFIG.grade.A && best.p - best.be >= BB_EV_CONFIG.grade.Ape) ? "A" : best.ev >= BB_EV_CONFIG.grade.B ? "B" : best.ev >= BB_EV_CONFIG.grade.C ? "C" : "D";
   var minEV = bbMinEV();
-  var head = sideTxt(best.side) + " P=" + (best.p * 100).toFixed(1) + "% vs breakeven " + (best.be * 100).toFixed(1) + "% @ " + best.dec.toFixed(2) + ", EV " + (best.ev >= 0 ? "+" : "") + (best.ev * 100).toFixed(1) + "%";
+  var head = sideTxt(best.side) + " P=" + (best.p * 100).toFixed(1) + "%" + (push > 0 ? " (push " + (push * 100).toFixed(1) + "%)" : "") + " vs breakeven " + (best.be * 100).toFixed(1) + "% @ " + best.dec.toFixed(2) + ", EV " + (best.ev >= 0 ? "+" : "") + (best.ev * 100).toFixed(1) + "%";
   if (best.p - best.be < BB_EV_CONFIG.minEdgeVsBreakeven) { out.reason = head + ": P - breakeven < " + (BB_EV_CONFIG.minEdgeVsBreakeven * 100) + "pp" + fl; return out; }
   if (best.ev < minEV) { out.reason = head + " < +" + (minEV * 100) + "%" + (minEV > BB_EV_CONFIG.minEV ? " (early season)" : "") + fl; return out; }
   out.ok = true; out.reason = head;
@@ -360,10 +367,24 @@ function bbApplyBetLimits(picks, league) {
       if (drop) {
         p.blockedPick = p.pick; p.pick = "NO PLAY"; p.noPlayReason = "dropped: " + drop + " [" + ((p.bbEv && p.bbEv.reason) || "") + "]";
         p.isLock = false; p.stakePct = 0;
-      } else kept.push(p);
+      } else { kept.push(p); p.playReason = bbPlayReasonText(p, p.bbEv); p.whyPick = p.playReason; p.noPlayReason = null; }
     });
   } catch (_e) {}
   return picks;
+}
+/* full reason for a PLAY: P, breakeven, odds, EV, fair line/odds, grade, stake */
+function bbPlayReasonText(p, e) {
+  if (!e) return "";
+  var mk = String(p.marketKey || ""), side = /^handicap|winner/.test(mk) ? (e.side === "a" ? "Home" : "Away") : (e.side === "a" ? "Over" : "Under");
+  var t = String(p.pick || side).toUpperCase() + " PLAY: P(" + side + ") " + (e.p * 100).toFixed(1) + "% vs breakeven " + (e.breakeven * 100).toFixed(1) + "% @ " + Number(e.odds).toFixed(2);
+  t += ", EV " + (e.ev >= 0 ? "+" : "") + (e.ev * 100).toFixed(1) + "%";
+  if (e.fair != null) t += ", market fair " + (e.fair * 100).toFixed(1) + "%";
+  if (e.fairLine != null) t += ", fair line " + e.fairLine.toFixed(1);
+  t += ", fair odds " + ((1 - (e.pPush || 0)) / e.p).toFixed(2) + (e.pPush ? ", push " + (e.pPush * 100).toFixed(1) + "%" : "");
+  if (mk === "winner" && Number.isFinite(e.marketMargin)) t += ", model margin " + (Number(p.proj) >= 0 ? "+" : "") + Number(p.proj).toFixed(1) + " vs market " + (e.marketMargin >= 0 ? "+" : "") + e.marketMargin.toFixed(1);
+  t += ", grade " + (p.gradeLabel || e.grade || "?");
+  t += ", stake " + ((p.stakePct || e.stake || 0) * 100).toFixed(2) + "% of bankroll (quarter-Kelly, cap 2%)";
+  return t;
 }
 /* ---- EV panel under the results ---- */
 function bbRenderEvPanel(picks) {
@@ -511,10 +532,11 @@ function bbStoreIndex() {
   Object.keys(idx.games).forEach(function (id) { var r = idx.games[id]; if (r.fr) return; var k = bbSeasonKeyOf(r); (idx.bySeason[k] = idx.bySeason[k] || []).push(r); });
   return idx;
 }
-function bbTeamSeasonAvg(idx, seasonKey, teamId, period, beforeTs) {
+function bbTeamSeasonAvg(idx, seasonKey, teamId, period, beforeTs, excludeRec) {
   var list = idx.bySeason[seasonKey] || [], sc = 0, al = 0, n = 0;
   list.forEach(function (r) {
     if (beforeTs && r.t >= beforeTs) return;
+    if (excludeRec && r === excludeRec) return; /* CALC-AUDIT B2 */
     var home = r.h === String(teamId), away = r.a === String(teamId); if (!home && !away) return;
     var v = bbPerVal(r, home, period), o = bbPerVal(r, !home, period); if (!Number.isFinite(v) || !Number.isFinite(o)) return;
     sc += v; al += o; n++;
@@ -582,7 +604,7 @@ function bbAdjustTeamStats(stats, events, teamId, label) {
       rows.forEach(function (row, i) {
         var rec = recOf(row.eventId), v = Number(list[i]); if (!rec || !Number.isFinite(v)) return;
         var oppId = rec.h === String(teamId) ? rec.a : rec.h, sk = bbSeasonKeyOf(rec);
-        var opp = bbTeamSeasonAvg(idx, sk, oppId, period), lg = leagueAvg(sk, period);
+        var opp = bbTeamSeasonAvg(idx, sk, oppId, period, null, rec), lg = leagueAvg(sk, period);
         if (opp.n < C.minOppGames || lg.n < C.minLeagueTeamGames || !Number.isFinite(lg.perTeam)) return;
         if (m[0] === "scoredList") info.oppKnown++;
         var ftLg = leagueAvg(sk, "ft"), cap = C.cap * (period === "ft" || !Number.isFinite(ftLg.perTeam) ? 1 : Math.max(0.1, lg.perTeam / ftLg.perTeam));
@@ -662,11 +684,21 @@ function bbApplyInputsJson(o) {
   return { applied: n, missing: missing };
 }
 /* ===================== SPORTYBET ODDS (via the user's worker) ===================== */
-var BB_SPORTY_ALIASES = { "se": "south east", "utd": "united", "st": "saint", "intl": "international" };
+var BB_SPORTY_ALIASES = { "se": "south east", "utd": "united", "st": "saint", "intl": "international", "munich": "munchen", "muenchen": "munchen", "cologne": "koln", "koeln": "koln", "belgrade": "beograd", "nuremberg": "nurnberg", "turin": "torino", "milan": "milano", "athens": "athina", "moscow": "moskva" };
+/* whole-phrase aliases (applied after accent stripping + word aliases); both sides map to the same canonical text */
+var BB_SPORTY_PHRASES = [
+  ["niners chemnitz", "chemnitz"], ["bv chemnitz 99", "chemnitz"], ["chemnitz 99", "chemnitz"],
+  ["south east melbourne phoenix", "semelbourne phoenix"], ["s e melbourne phoenix", "semelbourne phoenix"], ["melbourne phoenix", "semelbourne phoenix"],
+  ["new zealand breakers", "nz breakers"], ["ratiopharm ulm", "ulm"], ["mhp riesen ludwigsburg", "ludwigsburg"], ["telekom baskets bonn", "bonn"],
+  ["alba berlin", "alba"], ["real madrid baloncesto", "real madrid"], ["olympiacos piraeus", "olympiacos"], ["panathinaikos athina", "panathinaikos"],
+  ["crvena zvezda", "zvezda"], ["red star", "zvezda"], ["partizan mozzart bet", "partizan"], ["maccabi playtika tel aviv", "maccabi tel aviv"]
+];
 function bbNormTeam(s) {
-  s = String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9 ]+/g, " ");
-  var stop = { bc: 1, fc: 1, kk: 1, bk: 1, cb: 1, sk: 1, ac: 1, basket: 1, basketball: 1, club: 1, the: 1, de: 1, team: 1 };
-  return s.split(/\s+/).filter(Boolean).map(function (w) { return BB_SPORTY_ALIASES[w] || w; }).join(" ").split(" ").filter(function (w) { return w && !stop[w]; });
+  s = String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/ß/g, "ss").replace(/[^a-z0-9 ]+/g, " ");
+  var stop = { bc: 1, fc: 1, kk: 1, bk: 1, cb: 1, sk: 1, ac: 1, bv: 1, sc: 1, sv: 1, tsv: 1, cd: 1, bbc: 1, pbc: 1, ud: 1, basket: 1, baskets: 1, basketball: 1, club: 1, the: 1, de: 1, team: 1 };
+  s = " " + s.split(/\s+/).filter(Boolean).map(function (w) { return BB_SPORTY_ALIASES[w] || w; }).join(" ") + " ";
+  BB_SPORTY_PHRASES.forEach(function (ph) { s = s.split(" " + ph[0] + " ").join(" " + ph[1] + " "); });
+  return s.split(" ").filter(function (w) { return w && !stop[w]; });
 }
 function bbNameScore(a, b) {
   var A = bbNormTeam(a), B = bbNormTeam(b); if (!A.length || !B.length) return 0;
@@ -676,16 +708,22 @@ function bbNameScore(a, b) {
 function bbSportyMatchEvent(events, home, away, startMs) {
   var mem = {}; try { mem = JSON.parse(localStorage.getItem("BB_SPORTY_MATCHES") || "{}"); } catch (_e) {}
   var memKey = bbNormTeam(home).join(" ") + "|" + bbNormTeam(away).join(" ");
-  var best = null, bestScore = 0;
+  var scored = [];
   (events || []).forEach(function (e) {
     var tOk = !startMs || !e.estimateStartTime || Math.abs(Number(e.estimateStartTime) - startMs) <= 15 * 60000;
     if (!tOk) return;
-    var sc = Math.min(bbNameScore(home, e.homeTeamName), bbNameScore(away, e.awayTeamName));
-    if (mem[memKey] && mem[memKey].home === e.homeTeamId && mem[memKey].away === e.awayTeamId) sc = 1;
-    if (sc > bestScore) { bestScore = sc; best = e; }
+    var sh = bbNameScore(home, e.homeTeamName), sa = bbNameScore(away, e.awayTeamName);
+    var sc = Math.min(sh, sa) * 0.8 + (sh + sa) / 2 * 0.2; /* token-overlap: weakest side dominates */
+    if (mem[memKey] && mem[memKey].home === e.homeTeamId && mem[memKey].away === e.awayTeamId) sc = 1.01;
+    if (sc > 0) scored.push({ event: e, score: sc });
   });
+  scored.sort(function (x, y) { return y.score - x.score; });
   var need = startMs ? 0.34 : 0.5;
-  return best && bestScore >= need ? { event: best, score: bestScore, memKey: memKey } : null;
+  var ok = scored.filter(function (x) { return x.score >= need; });
+  if (!ok.length) return null;
+  var r = { event: ok[0].event, score: ok[0].score, memKey: memKey, top: ok.slice(0, 3) };
+  if (ok.length > 1 && ok[0].score < 1.01 && ok[0].score - ok[1].score < 0.1) r.ambiguous = true;
+  return r;
 }
 function bbSportyPickLine(markets, id, quarter, wantLine) {
   var list = (markets || []).filter(function (m) { return String(m.id) === String(id) && (quarter == null || new RegExp("quarternr=" + quarter + "(\\||$)").test(String(m.specifier || ""))) && (m.status == null || Number(m.status) === 0 || Number(m.status) === 1); });
@@ -782,14 +820,43 @@ async function bbFetchSportyOdds() {
 /* ---------- v2.1 UI pass (10 Oct 2026): auto SportyBet with stats, hidden odds for auto leagues, full Clear ---------- */
 function bbIsAutoLeague(lk) { try { return typeof isAutoFetchLeague === "function" && isAutoFetchLeague(String(lk || "")); } catch (_e) { return false; } }
 function bbCurLeague() { return String((document.getElementById("leagueSelect") || {}).value || ""); }
-function bbSetOddsVisible(show) { var s = document.getElementById("oddsSection"); if (s) s.style.display = show ? "" : "none"; }
+/* show = odds boxes visible. Manual leagues always keep the section (and the Fetch button); the boxes collapse once SportyBet filled them. */
+function bbSetOddsVisible(show) {
+  var s = document.getElementById("oddsSection"), b = document.getElementById("oddsBoxes"), lk = bbCurLeague();
+  var manual = !!lk && !bbIsAutoLeague(lk);
+  if (s) s.style.display = (show || manual) ? "" : "none";
+  if (b) b.style.display = show ? "" : "none";
+}
 function bbSyncOddsVisibility() { var lk = bbCurLeague(); bbSetOddsVisible(!!lk && !bbIsAutoLeague(lk) && !(window.__bbSportyLast && window.__bbSportyLast.ok)); }
+function bbSportyChooser(list, memKey, opts) {
+  var sel = document.getElementById("sportyPick"); if (!sel) return;
+  if (!list || !list.length) { sel.style.display = "none"; sel.innerHTML = ""; return; }
+  sel.innerHTML = '<option value="">Pick the SportyBet game…</option>' + list.map(function (e, i) { var t = e.estimateStartTime ? new Date(Number(e.estimateStartTime)).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : ""; return '<option value="' + i + '">' + String(e.homeTeamName || "").replace(/</g, "") + " v " + String(e.awayTeamName || "").replace(/</g, "") + (t ? " (" + t + ")" : "") + "</option>"; }).join("");
+  sel.style.display = "";
+  sel.onchange = function () {
+    var ev = list[Number(sel.value)]; if (!ev) return;
+    var token = (window.__bbSportyToken = (window.__bbSportyToken || 0) + 1);
+    bbSportyStatus("Fetching " + ev.homeTeamName + " v " + ev.awayTeamName + "…");
+    bbSportyFetchEvent(ev, memKey).catch(function (e) { return { ok: false, reason: "fetch failed (" + String(e && e.message || e) + ")" }; })
+      .then(function (r) { bbSportyApply(r, { token: token, keepLines: !!(opts && opts.keepLines) }); });
+  };
+}
+/* names for the SportyBet lookup: Team A/B boxes, then the Player Lookup boxes */
+function bbSportyNamePairs() {
+  var g = function (id) { return String((document.getElementById(id) || {}).value || "").trim(); };
+  var pairs = [];
+  if (g("teamAName") && g("teamBName")) pairs.push([g("teamAName"), g("teamBName")]);
+  if (g("ssTeamAName") && g("ssTeamBName")) pairs.push([g("ssTeamAName"), g("ssTeamBName")]);
+  if (!pairs.length) { var a = g("teamAName") || g("ssTeamAName"), b = g("teamBName") || g("ssTeamBName"); if (a && b) pairs.push([a, b]); }
+  return pairs;
+}
 function bbMarketStatus(msg, bad) { var el = document.getElementById("marketAutoStatus"); if (el) { el.textContent = msg || ""; el.style.color = bad ? "#d92d2a" : ""; } }
 function bbOddsReset() {
   document.querySelectorAll("#oddsSection input").forEach(function (i) { i.value = ""; });
   bbSportyStatus(""); bbMarketStatus("");
   var t = document.getElementById("mAutoTag"); if (t) t.style.display = "none";
   window.__bbSportyLast = null;
+  try { bbSportyChooser(null); } catch (_e) {}
 }
 function bbFixtureStartMs() {
   try {
@@ -809,18 +876,26 @@ function bbTodayTomorrow(e) {
 }
 async function bbSportyLookup(home, away, startMs) {
   var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
-  var match = null, total = 0;
-  for (var page = 1; page <= 5 && !match; page++) {
+  var all = [], total = 0, pairs = Array.isArray(home) ? home : [[home, away]], match = null;
+  for (var page = 1; page <= 8; page++) { /* all pages (today + tomorrow) */
     var res = await fetch(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
     var js = await res.json().catch(function () { return null; });
     if (!res.ok || !js || js.bizCode !== 10000) throw new Error((js && (js.error || js.message)) || ("HTTP " + res.status));
     var evs = (js.data && js.data.tournaments || []).reduce(function (a, t) { return a.concat(t.events || []); }, []);
     if (!startMs) evs = evs.filter(bbTodayTomorrow);
+    all = all.concat(evs);
     total = js.data && js.data.totalNum || total;
-    match = bbSportyMatchEvent(evs, home, away, startMs);
-    if (page * 100 >= total) break;
+    if (!total || page * 100 >= total) break;
   }
+  pairs.forEach(function (pr) { var m = bbSportyMatchEvent(all, pr[0], pr[1], startMs); if (m && (!match || m.score > match.score)) match = m; });
+  home = pairs[0][0]; away = pairs[0][1];
   if (!match) return { ok: false, reason: "no SportyBet game matched " + home + " v " + away + (startMs ? " (±15 min)" : " (today/tomorrow)") };
+  if (match.ambiguous) return { ok: false, ambiguous: match.top.map(function (x) { return x.event; }), memKey: match.memKey, reason: "several SportyBet games look alike - pick one" };
+  return bbSportyFetchEvent(match.event, match.memKey);
+}
+async function bbSportyFetchEvent(ev, memKey) {
+  var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
+  var match = { event: ev, memKey: memKey };
   var r2 = await fetch(base + "/sporty/event?id=" + encodeURIComponent(match.event.eventId), { headers: { Accept: "application/json" } });
   var j2 = await r2.json().catch(function () { return null; });
   if (!r2.ok || !j2 || j2.bizCode !== 10000 || !j2.data) throw new Error((j2 && (j2.error || j2.message)) || ("HTTP " + r2.status));
@@ -832,6 +907,15 @@ function bbSportyApply(result, opts) {
   opts = opts || {};
   var token = opts.token;
   if (token != null && token !== window.__bbSportyToken) return null; /* a newer fetch or Clear happened */
+  bbSportyChooser(null);
+  if (result && result.ambiguous && result.ambiguous.length) {
+    window.__bbSportyLast = { ok: false };
+    bbSetOddsVisible(true);
+    bbSportyChooser(result.ambiguous, result.memKey, opts);
+    bbSportyStatus("SportyBet: several games look alike - pick the right one below.", true);
+    bbMarketStatus("⚠ SportyBet: choose the game in the Odds section.", true);
+    return null;
+  }
   if (!result || !result.ok) {
     window.__bbSportyLast = { ok: false };
     bbSetOddsVisible(!!bbCurLeague());
@@ -857,12 +941,13 @@ function bbSportyApply(result, opts) {
 }
 async function bbSportyRun(opts) {
   opts = opts || {};
-  var home = String((document.getElementById("teamAName") || {}).value || "").trim(), away = String((document.getElementById("teamBName") || {}).value || "").trim();
+  var pairs = bbSportyNamePairs();
   var token = (window.__bbSportyToken = (window.__bbSportyToken || 0) + 1);
-  if (!home || !away) return bbSportyApply({ ok: false, reason: "team names missing" }, { token: token });
-  bbMarketStatus("SportyBet: looking up " + home + " v " + away + "…");
+  if (!pairs.length && !opts.pending) return bbSportyApply({ ok: false, reason: "team names missing (fill Player A / Player B Name)" }, { token: token });
+  if (pairs.length) bbMarketStatus("SportyBet: looking up " + pairs[0][0] + " v " + pairs[0][1] + "…");
   var res;
-  try { res = await (opts.pending || bbSportyLookup(home, away, opts.startMs != null ? opts.startMs : bbFixtureStartMs())); }
+  var sMs = opts.startMs != null ? opts.startMs : (bbIsAutoLeague(bbCurLeague()) ? bbFixtureStartMs() : 0);
+  try { res = await (opts.pending || bbSportyLookup(pairs, null, sMs)); }
   catch (e) { res = { ok: false, reason: "fetch failed (" + String(e && e.message || e) + ")" }; }
   return bbSportyApply(res, { token: token, keepLines: !!opts.keepLines });
 }
@@ -900,7 +985,7 @@ function bbAfterInputsJson() {
       bbSyncOddsVisibility();
     });
     var sb = document.getElementById("sportyFetchBtn");
-    if (sb) sb.addEventListener("click", function () { bbSportyRun({ keepLines: true }); });
+    if (sb) sb.addEventListener("click", function () { window.__bbSportyLast = null; bbSportyRun({ keepLines: false }); });
     bbSyncOddsVisibility();
   });
 })();
@@ -920,7 +1005,7 @@ function bbPriceText(p, league) {
     var play = /^(OVER|UNDER|HOME|AWAY)/i.test(String(p.pick || ""));
     if (play && p.stakePct) bits.push("stake " + (p.stakePct * 100).toFixed(2) + "% of bankroll");
     if (play && p.gradeLabel) bits.push("grade " + p.gradeLabel);
-    var why = play ? (e.reason || "") : (p.noPlayReason || e.reason || "");
+    var why = play ? (p.playReason || e.reason || "") : (p.noPlayReason || e.reason || "");
     return bits.join(" · ") + (why ? " | " + why : "");
   } catch (_e) { return ""; }
 }
@@ -4732,10 +4817,11 @@ body.dark-mode .tracker-analytics-section-head {
   <div class="section" id="oddsSection" style="display:none">
     <h3>Odds (required for a PLAY) - Team A = HOME, Team B = AWAY</h3>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-      <button id="sportyFetchBtn" type="button">↻ Retry SportyBet</button>
-      <span id="sportyStatus" style="font-size:12px;opacity:.85">Type the odds, or tap Retry to look the game up on SportyBet again.</span>
+      <button id="sportyFetchBtn" type="button">Fetch SportyBet odds</button>
+      <span id="sportyStatus" style="font-size:12px;opacity:.85">Uses Team A/B or Player A/B names. Or type the odds.</span>
+      <select id="sportyPick" style="display:none;max-width:100%;font-size:12px" aria-label="Choose the SportyBet game"></select>
     </div>
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px">
+    <div id="oddsBoxes" style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px">
       <input id="ftOverOdds" placeholder="FT Over odds" /><input id="ftUnderOdds" placeholder="FT Under odds" />
       <input id="handicapHomeOdds" placeholder="Handicap Home odds" /><input id="handicapAwayOdds" placeholder="Handicap Away odds" />
       <input id="winnerHomeOdds" placeholder="Winner Home odds" /><input id="winnerAwayOdds" placeholder="Winner Away odds" />
@@ -4849,7 +4935,6 @@ body.dark-mode .tracker-analytics-section-head {
 <div class="actions">
   <button id="runBtn" type="button">Run</button>
   <button id="clearBtn" type="button">Clear</button>
-  <input id="inputsPasteBox" placeholder="Paste inputs JSON" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="bbHandleInputsPaste(this)" style="width:130px;font-size:16px;padding:5px 8px;margin:0" aria-label="Paste inputs JSON" />
   <button
     id="inputsCopyBtn"
     type="button"
@@ -7641,7 +7726,7 @@ const TUNABLE_PARAM_REGISTRY = {
     lastVerifiedAt: null,
   },
   venueMinGames: {
-    value: 6,
+    value: 5,
     min: 3,
     max: 10,
     type: "scalar",
@@ -7674,7 +7759,7 @@ const TUNABLE_PARAM_REGISTRY = {
     lastVerifiedAt: null,
   },
   venueStrongWeight: {
-    value: 0.7,
+    value: 0.5,
     min: 0.4,
     max: 0.85,
     type: "scalar",
@@ -11456,13 +11541,13 @@ function evaluatePickWithParams(pick, paramOverrides) {
       let calcM = null;
       if (marketKey === "handicap_h1" && typeof compute1HProjection === "function") {
         calcM = compute1HProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx });
-        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projA1H, calcM.projB1H, { roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
+        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projA1H, calcM.projB1H, { hcaPeriod: "h1", roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
       } else if (marketKey === "handicap_h2" && typeof compute2HProjection === "function") {
         calcM = compute2HProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx });
-        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projA2H, calcM.projB2H, { roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
+        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projA2H, calcM.projB2H, { hcaPeriod: "h2", roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
       } else if (typeof computeFTProjection === "function") {
         calcM = computeFTProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx });
-        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projAFT, calcM.projBFT, { roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
+        proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcM.projAFT, calcM.projBFT, { hcaPeriod: "ft", roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
       } else {
         return null;
       }
@@ -11473,7 +11558,7 @@ function evaluatePickWithParams(pick, paramOverrides) {
         ? computeFTProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx })
         : null;
       if (!calcW) return null;
-      proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcW.projAFT, calcW.projBFT, { roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
+      proj = typeof computeMarginProjection === "function" ? computeMarginProjection(calcW.projAFT, calcW.projBFT, { hcaPeriod: "ft", roleA: pick.snapshot?.roleA || pick.roleA || "" }) : NaN;
       lineVal = 0;
       edge = Number.isFinite(proj) ? proj : NaN;
     } else {
@@ -27331,8 +27416,31 @@ function selectLock(markets) {
    Role: Normalised home-minus-away margin; positive values favour the home team.
    Chunks below are numbered one statement at a time. Nothing in this section is grouped past a single statement.
    ============================================================ */
+/* v2.3 explicit home-court advantage (points, full game). Venue splits already carry some of it,
+   so only the part not covered by the venue blend is added: HCA * (1 - venue weight). */
+var BB_LEAGUE_HCA = { nba: 2.3, wnba: 2.0, ncaa: 3.2, ncaaw: 3.0, euroleague: 3.0, eurocup: 3.0 };
+function bbLeagueHCA(league) {
+  var k = String(league || "").toLowerCase();
+  if (BB_LEAGUE_HCA[k] != null) return BB_LEAGUE_HCA[k];
+  if (/ncaa/.test(k)) return 3.2;
+  return 2.5;
+}
+function bbSeriesCount(id) { var el = typeof document !== "undefined" ? document.getElementById(id) : null; return el ? String(el.value || "").split(/[,\s]+/).filter(function (x) { return x !== "" && Number.isFinite(Number(x)); }).length : 0; }
+function bbMarginHCA(period, league) {
+  var scale = period === "h1" || period === "h2" ? 0.5 : /^q[1-4]$/.test(String(period)) ? 0.25 : 1;
+  var w = function (n) { try { return getVenueBlendWeights(n).wVenue; } catch (_e) { return 0; } };
+  var wv = (w(bbSeriesCount("aFTScoredHome")) + w(bbSeriesCount("bFTScoredAway"))) / 2;
+  var lg = league || (typeof document !== "undefined" ? String((document.getElementById("leagueSelect") || {}).value || "") : "");
+  var h = bbLeagueHCA(lg) * scale * (1 - wv);
+  window.__bbHCAInfo = { league: lg, hcaFull: bbLeagueHCA(lg), venueWeight: wv, applied: h, period: period };
+  return h;
+}
 function computeMarginProjection(teamAProj, teamBProj, options = null) {
   if (!isFinite(teamAProj) || !isFinite(teamBProj)) return NaN;
+  if (options && options.hcaPeriod) {
+    const _m = computeMarginProjection(teamAProj, teamBProj, Object.assign({}, options, { hcaPeriod: null }));
+    return Number.isFinite(_m) ? _m + bbMarginHCA(options.hcaPeriod) : _m; /* Team A is always home */
+  }
   let roleA = "";
   try {
     roleA = typeof getFixtureSideRole === "function" ? getFixtureSideRole("A", options?.contextData || null) : "";
@@ -34309,7 +34417,7 @@ function getFetchedSeries(side, scope, marketKey, metric, contextData = null) {
 }
 const VENUE_BLEND_CONFIG = {
   get minGames() {
-    return getParam("venueMinGames") ?? 6;
+    return getParam("venueMinGames") ?? 5;
   },
   get strongGames() {
     return getParam("venueStrongGames") ?? 10;
@@ -34318,7 +34426,7 @@ const VENUE_BLEND_CONFIG = {
     return getParam("venueModerateWeight") ?? 0.5;
   },
   get strongVenueWeight() {
-    return getParam("venueStrongWeight") ?? 0.7;
+    return getParam("venueStrongWeight") ?? 0.5;
   },
 };
 /* CALCULATION SECTION */
@@ -34850,11 +34958,10 @@ function buildPickExplanationDetails(p, isLock) {
   const _advAlias = _advMk === "team_a" || _advMk === "team_b" ? "ft" : _advMk === "h1_team_a" || _advMk === "h1_team_b" ? "h1" : _advMk;
   const _advByMk = typeof window !== "undefined" ? window.__bbAdvDiagByMarket : null; /* BB-FIX #20 */
   const _adv = p?.advancedStatsDiagnostic || (_advByMk && (_advByMk[_advMk] || _advByMk[_advAlias])) || null;
-  if (_adv) {
-    _extra.push("ADVANCED MODEL: DIAGNOSTIC ONLY (projection is points-based) | Status: " + (_adv.enabled ? "AVAILABLE" : "UNAVAILABLE") + " | Reason: " + String(_adv.reason || "not available") + " | Fallback: " + String(_adv.fallback || "STANDARD PROJECTION"));
-  } else {
-    _extra.push("ADVANCED MODEL: DIAGNOSTIC ONLY (projection is points-based) | Status: UNAVAILABLE | Reason: no advanced diagnostic recorded for " + (_advMk || "this market") + " | Fallback: STANDARD PROJECTION");
+  if (_adv && _adv.enabled) { /* v2.3: UNAVAILABLE lines are no longer shown */
+    _extra.push("ADVANCED MODEL: DIAGNOSTIC ONLY (projection is points-based) | Status: AVAILABLE | Reason: " + String(_adv.reason || "") + " | Fallback: " + String(_adv.fallback || "STANDARD PROJECTION"));
   }
+  try { var _pt = p && (p.playReason || (typeof bbPriceText === "function" ? bbPriceText(p) : "")); if (_pt) _extra.unshift("PRICE: " + _pt); } catch (_ptE) {}
   const _integrity = p?.marketIntegrity;
   if (_integrity) {
     _extra.push("MARKET INTEGRITY: " + String(_integrity.status || "CLEAR") + (_integrity.signals?.length ? " | " + _integrity.signals.map((s) => s.id + "=" + s.level).join(", ") : ""));
@@ -39554,7 +39661,7 @@ async function runEngine() {
       blowoutGap: ftCalc.blowoutGap,
       _edgeAlreadyScaled: true,
     });
-    const marginProjectionFT = computeMarginProjection(ftCalc.projAFT, ftCalc.projBFT, { contextData: finalLines?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
+    const marginProjectionFT = computeMarginProjection(ftCalc.projAFT, ftCalc.projBFT, { hcaPeriod: "ft", contextData: finalLines?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
     const combinedMarginVolFT = computeCombinedMarginVolatility(ftCalc.aVol, ftCalc.bVol);
     const winnerEdge = marginProjectionFT;
     g_currentLiveComputeMarket = "winner";
@@ -39565,7 +39672,7 @@ async function runEngine() {
         : NaN;
     g_currentLiveComputeMarket = "handicap";
     let handicapPick = rangeBlocks("handicap") ? "NO PLAY" : getMarginPickForLeague(handicapEdge, "handicap");
-    const marginProjectionH1 = computeMarginProjection(h1Calc.projA1H, h1Calc.projB1H, { contextData: h1Calc?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
+    const marginProjectionH1 = computeMarginProjection(h1Calc.projA1H, h1Calc.projB1H, { hcaPeriod: "h1", contextData: h1Calc?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
     const _h1VolLimitForMargin = getMarketVolLimit(league, "h1");
     const combinedMarginVolH1 = marketAllowedForLeague("handicap_h1")
       ? computeCombinedMarginVolatility(
@@ -39579,7 +39686,7 @@ async function runEngine() {
         : NaN;
     g_currentLiveComputeMarket = "handicap_h1";
     let handicapH1Pick = rangeBlocks("handicap_h1") ? "NO PLAY" : getMarginPickForLeague(handicapH1Edge, "handicap_h1");
-    const marginProjectionH2 = computeMarginProjection(h2Calc.projA2H, h2Calc.projB2H, { contextData: h2Calc?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
+    const marginProjectionH2 = computeMarginProjection(h2Calc.projA2H, h2Calc.projB2H, { hcaPeriod: "h2", contextData: h2Calc?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
     const _h2VolLimitForMargin = getMarketVolLimit(league, "h2");
     const combinedMarginVolH2 = computeCombinedMarginVolatility(
       (h2Calc.aVol2 || 0) * _h2VolLimitForMargin,
@@ -39722,7 +39829,7 @@ async function runEngine() {
       [q4, "q4", h2Calc && isFinite(h2Calc.h2Edge) ? h2Calc.h2Edge : ftCalc.ftEdge],
     ].forEach(([q, key, siblingEdge]) => {
       if (!q || !isFinite(q.proj)) return;
-      q.marginProjection = computeMarginProjection(q.projA, q.projB);
+      q.marginProjection = computeMarginProjection(q.projA, q.projB, { hcaPeriod: key });
       q.quarterFormAgreement = getQuarterFormAgreement(
         ctxAQOuter.quarterSpreads, ctxBQOuter.quarterSpreads, key, q.marginProjection, league,
       );
@@ -42067,7 +42174,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
             return {
               market: pk.marketKey || pk.name,
               pick: pk.pick,
-              reason: pk.noPlayReason || pk.whyPick || null,
+              reason: pk.noPlayReason || pk.playReason || pk.whyPick || (typeof bbPriceText === "function" ? bbPriceText(pk) : "") || null,
               copyLog: pk.copyLog || null,
             };
           });
