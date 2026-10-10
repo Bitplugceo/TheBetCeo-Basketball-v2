@@ -873,7 +873,7 @@ function bbOddsReset() {
   document.querySelectorAll("#oddsSection input").forEach(function (i) { i.value = ""; });
   bbSportyStatus(""); bbMarketStatus("");
   var t = document.getElementById("mAutoTag"); if (t) t.style.display = "none";
-  window.__bbSportyLast = null;
+  window.__bbSportyLast = null; window.__bbLinesNow = null; window.__bbPlayCells = []; /* v2.7 */
   try { bbSportyChooser(null); } catch (_e) {}
 }
 function bbFixtureStartMs() {
@@ -958,7 +958,7 @@ function bbSportyApply(result, opts) {
     if (r) parsed[f[5]] = { field: f, r: r };
   });
   var filled = bbSportyFill(parsed);
-  window.__bbSportyLast = { ok: true, eventId: result.event.eventId, filled: filled, at: Date.now() };
+  window.__bbSportyLast = { ok: true, eventId: result.event.eventId, filled: filled, at: Date.now(), home: result.event.homeTeamName || (result.data && result.data.homeTeamName) || "", away: result.event.awayTeamName || (result.data && result.data.awayTeamName) || "", ko: Number(result.event.estimateStartTime || (result.data && result.data.estimateStartTime)) || null }; /* v2.7: names + kickoff for CLV */
   var tag = document.getElementById("mAutoTag"); if (tag) tag.style.display = filled.length ? "inline" : "none";
   bbSetOddsVisible(false);
   bbSportyStatus("SportyBet " + result.data.homeTeamName + " v " + result.data.awayTeamName + ": " + filled.length + " market(s) filled.");
@@ -1048,6 +1048,224 @@ function bbHandleInputsPaste(el) {
   bbMarketStatus("Inputs JSON applied (" + r.applied + " fields). Looking up SportyBet odds…");
   bbAfterInputsJson();
 }
+
+/* ===================== v2.7 CLV: SportyBet opening / closing lines from the worker cron =====================
+   The worker (thebetceo-engine, cron every 10 min) snapshots SportyBet's main lines. Here we:
+   (1) at prediction time: compare SportyBet OPENING vs LATEST for the matched event, [WARN] only (picks unchanged);
+   (2) in the tracker: after kickoff, fetch the frozen CLOSING line and compute CLV per pick.
+   Phone storage: no line history is kept in localStorage. Per pick only a ~150-byte clvData object is stored;
+   the retry log BB_CLV_TRIES_V1 is capped at 200 entries. All requests here are GET-only. */
+var BB_CLV_TRY_KEY = "BB_CLV_TRIES_V1", BB_CLV_TRY_MAX = 200;
+var BB_CLV_MKS = { ft: 1, handicap: 1, winner: 1, h1: 1, h2: 1, team_a: 1, team_b: 1, h1_team_a: 1, h1_team_b: 1 };
+function bbLinesBase() { return (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev"; }
+async function bbLinesGet(path) {
+  var res = await bbFetchT(bbLinesBase() + path, { method: "GET", headers: { Accept: "application/json" } }, 12000);
+  var js = await res.json().catch(function () { return null; });
+  if (!js) throw new Error("lines HTTP " + res.status);
+  return js;
+}
+function bbClvNum(v) { if (v === null || v === undefined || v === "") return null; var n = Number(v); return Number.isFinite(n) ? n : null; }
+/* side of a pick: over / under / home / away */
+function bbClvSide(p) {
+  var s = String(p && p.side || "").toLowerCase();
+  if (s === "over" || s === "under" || s === "home" || s === "away") return s;
+  var d = bbPickDir({ pick: String(p && (p.originalPredictionText || p.predictionText || p.pick) || "") });
+  if (d) return d.toLowerCase();
+  try { var f = typeof formatPickLine === "function" ? String(formatPickLine(p) || "") : ""; if (f === "HOME" || f === "AWAY") return f.toLowerCase(); } catch (_e) {}
+  return "";
+}
+/* "own" value: higher = better for the bettor. Handicap lines are in the HOME frame (SportyBet hcp = home handicap). */
+function bbClvOwn(mk, side, homeLine) { if (homeLine == null) return null; if (/^handicap/.test(mk)) return side === "home" ? homeLine : -homeLine; return side === "over" ? -homeLine : homeLine; }
+function bbClvPickHomeLine(p) {
+  var L = bbClvNum(p.lineAtPick != null ? p.lineAtPick : p.line); if (L == null) return null;
+  return /^handicap/.test(String(p.marketKey || "")) && String(p.lineSide || "home").toLowerCase() === "away" ? -L : L;
+}
+function bbClvToPickFrame(p, homeLine) { if (homeLine == null) return null; return /^handicap/.test(String(p.marketKey || "")) && String(p.lineSide || "home").toLowerCase() === "away" ? -homeLine : homeLine; }
+function bbClvSnap(snap, side) { /* worker triple -> our side */
+  if (!snap) return null; var isA = side === "over" || side === "home";
+  var o = bbClvNum(isA ? snap.oddsA : snap.oddsB), x = bbClvNum(isA ? snap.oddsB : snap.oddsA);
+  var fair = o && x && o > 1 && x > 1 ? (1 / o) / (1 / o + 1 / x) : null;
+  return { line: bbClvNum(snap.line), odds: o, other: x, fair: fair, at: bbClvNum(snap.at) };
+}
+/* Line movement OPENING -> LATEST against the pick? (used at prediction time, warning only) */
+function bbLineMoveAgainst(mk, side, open, now) {
+  if (!open || !now) return null;
+  if (mk !== "winner" && open.line != null && now.line != null && open.line !== now.line) {
+    var d = bbClvOwn(mk, side, now.line) - bbClvOwn(mk, side, open.line); /* > 0: market now gives our side MORE = money went the other way */
+    if (d >= 0.5) return { pts: d, text: "line " + open.line + " -> " + now.line };
+    return null;
+  }
+  if (open.fair != null && now.fair != null && open.fair - now.fair >= 0.02) return { pp: (open.fair - now.fair) * 100, text: "price " + open.odds + " -> " + now.odds + " (fair " + (open.fair * 100).toFixed(1) + "% -> " + (now.fair * 100).toFixed(1) + "%)" };
+  return null;
+}
+/* CLV for one tracked pick from a worker record. pts: line points beaten (+ = better than close).
+   pp: closing no-vig probability of our side, re-priced at OUR line with the league sigma, minus the break-even
+   of our odds (1/odds). + = we beat the close. beat: yes / no / flat. */
+function bbClvCompute(p, rec) {
+  var mk = String(p.marketKey || ""), side = bbClvSide(p);
+  if (!rec || !rec.closing || !BB_CLV_MKS[mk] || !side) return null;
+  var c = bbClvSnap(rec.closing[mk], side), o = bbClvSnap(rec.opening && rec.opening[mk], side);
+  if (!c) return null;
+  var tHome = mk === "winner" ? null : bbClvPickHomeLine(p), tOdds = bbClvNum(p.oddsDecimal);
+  var pts = null;
+  if (mk !== "winner" && tHome != null && c.line != null) pts = Math.round((bbClvOwn(mk, side, tHome) - bbClvOwn(mk, side, c.line)) * 100) / 100;
+  var pp = null;
+  if (c.fair != null && tOdds && tOdds > 1) {
+    var pAt = c.fair;
+    if (pts) { try { var sd = bbEvSigma(p.league || "", mk); if (Number.isFinite(sd) && sd > 0) pAt = bbNormCdf(bbProbit(Math.min(0.999, Math.max(0.001, c.fair))) + pts / sd); } catch (_e) {} }
+    pp = Math.round((pAt - 1 / tOdds) * 1000) / 10;
+  }
+  var mv = null;
+  if (o && o.line != null && c.line != null) mv = Math.round((c.line - o.line) * 100) / 100;
+  var beat = pp != null ? (pp > 0.05 ? "yes" : pp < -0.05 ? "no" : "flat") : pts != null ? (pts > 0 ? "yes" : pts < 0 ? "no" : "flat") : null;
+  return {
+    done: 1, ev: rec.eventId, at: Date.now(),
+    o: o ? [bbClvToPickFrame(p, o.line), o.odds] : null,
+    c: [bbClvToPickFrame(p, c.line), c.odds],
+    t: [mk === "winner" ? null : bbClvNum(p.lineAtPick != null ? p.lineAtPick : p.line), tOdds],
+    mv: mv == null ? null : bbClvToPickFrame(p, mv) /* sign follows the pick's line frame */, pts: pts, pp: pp, beat: beat
+  };
+}
+function bbClvKickoff(p) {
+  var k = bbClvNum(p.sportyKickoff); if (k) return k;
+  var d = Date.parse(String(p.eventDate || "")); if (Number.isFinite(d) && /T\d\d:\d\d/.test(String(p.eventDate || ""))) return d;
+  return null;
+}
+function bbClvTries() { try { var o = JSON.parse(localStorage.getItem(BB_CLV_TRY_KEY) || "{}"); return o && typeof o === "object" ? o : {}; } catch (_e) { return {}; } }
+function bbClvSaveTries(o) {
+  try { var ks = Object.keys(o); if (ks.length > BB_CLV_TRY_MAX) { ks.sort(function (a, b) { return (o[a][1] || 0) - (o[b][1] || 0); }); ks.slice(0, ks.length - BB_CLV_TRY_MAX).forEach(function (k) { delete o[k]; }); } localStorage.setItem(BB_CLV_TRY_KEY, JSON.stringify(o)); } catch (_e) {}
+}
+async function bbClvSweep(opts) {
+  opts = opts || {};
+  if (bbClvSweep._busy) return { busy: true };
+  bbClvSweep._busy = true;
+  var out = { checked: 0, filled: 0, none: 0, errors: 0 };
+  try {
+    var st = AppState && AppState.tracker && AppState.tracker.state; if (!st) return out;
+    var all = [].concat(Array.isArray(st.activePicks) ? st.activePicks : [], Array.isArray(st.archivedPicks) ? st.archivedPicks : []);
+    var now = Date.now(), tries = bbClvTries(), todo = [];
+    all.forEach(function (p) {
+      if (!p || (p.clvData && p.clvData.done) || !BB_CLV_MKS[String(p.marketKey || "")]) return;
+      var key = String(p.pickId || p.signature || ""); if (!key) return;
+      var ko = bbClvKickoff(p), created = Date.parse(String(p.createdAt || "")) || null;
+      var ref = ko || created; if (!ref) return;
+      if (ko && now < ko + 5 * 60000) return;           /* closing freezes at kickoff; worker marks it within 10 min */
+      if (!ko && now < created + 3 * 3600000) return;     /* unknown kickoff: wait a while after the pick was made */
+      if (now - ref > 4 * 86400000) return;               /* worker keeps 3 days */
+      var tr = tries[key]; if (!opts.force && tr && now - tr[1] < 20 * 60000) return;
+      todo.push({ p: p, key: key, ko: ko, created: created });
+    });
+    todo = todo.slice(0, 40);
+    if (!todo.length) return out;
+    var searches = 0;
+    for (var i = 0; i < todo.length; i++) {
+      var t = todo[i];
+      if (t.p.sportyEventId || searches >= 5) continue;
+      searches++;
+      try {
+        var q = "/sporty/lines/search?home=" + encodeURIComponent(t.p.homeTeam || "") + "&away=" + encodeURIComponent(t.p.awayTeam || "") + (t.ko ? "&ts=" + t.ko : "&date=" + new Date(t.created).toISOString().slice(0, 10));
+        var sj = await bbLinesGet(q);
+        var m = sj && sj.ok ? bbSportyMatchEvent(sj.events || [], t.p.homeTeam, t.p.awayTeam, t.ko || 0) : null;
+        if (m && !m.ambiguous) t.ev = m.event.eventId;
+      } catch (_e) { out.errors++; }
+    }
+    var ids = todo.map(function (t) { return t.p.sportyEventId || t.ev; }).filter(Boolean);
+    var recs = {};
+    if (ids.length) {
+      try { var lj = await bbLinesGet("/sporty/lines?ids=" + encodeURIComponent(Array.from(new Set(ids)).join(","))); recs = (lj && lj.events) || {}; } catch (_e) { out.errors++; }
+    }
+    var changed = false;
+    todo.forEach(function (t) {
+      out.checked++;
+      var id = t.p.sportyEventId || t.ev, rec = id ? recs[id] : null;
+      var cd = rec && rec.closed ? bbClvCompute(t.p, rec) : null;
+      if (cd) {
+        t.p.clvData = cd; t.p.sportyEventId = id;
+        if (cd.c[0] != null) t.p.closingLine = cd.c[0];
+        if (cd.c[1] != null) t.p.closingOdds = cd.c[1];
+        t.p.clv = cd.pts;
+        out.filled++; changed = true; delete tries[t.key];
+      } else {
+        var tr = tries[t.key] || [0, 0]; tr[0]++; tr[1] = Date.now(); tries[t.key] = tr;
+        var ref = t.ko || t.created;
+        if (tr[0] >= 12 || (ref && Date.now() - ref > 3.5 * 86400000)) { t.p.clvData = { done: 1, none: 1, at: Date.now() }; out.none++; changed = true; delete tries[t.key]; }
+      }
+    });
+    bbClvSaveTries(tries);
+    if (changed) {
+      try { await saveTrackedPicks(loadTrackedPicks()); } catch (_e) {}
+      try { if (typeof renderTrackedPicks === "function") renderTrackedPicks(); } catch (_e) {}
+    }
+    return out;
+  } finally { bbClvSweep._busy = false; }
+}
+window.bbClvSweep = bbClvSweep;
+function bbClvFmtLine(v) { return v == null ? "-" : (v > 0 ? "+" : "") + v; }
+function bbClvRowHtml(p) {
+  var d = p && p.clvData; if (!d || !d.done) return "";
+  if (d.none) return '<div class="bb-clv" style="font-size:9px;opacity:.6;margin-top:2px" title="No SportyBet closing line was recorded for this game">CLV -</div>';
+  var mkw = String(p.marketKey || "") === "winner", L = function (x) { return x && x[0] != null ? String(x[0]) : "-"; }, O = function (x) { return x && x[1] != null ? "@" + Number(x[1]).toFixed(2) : ""; };
+  var full = "Opening: " + (d.o ? (mkw ? "" : L(d.o) + " ") + O(d.o) : "-") + "\nTaken: " + (mkw ? "" : L(d.t) + " ") + O(d.t) + "\nClosing: " + (mkw ? "" : L(d.c) + " ") + O(d.c) +
+    "\nLine move (open->close): " + (d.mv == null ? "-" : bbClvFmtLine(d.mv)) + "\nCLV: " + (d.pts == null ? "-" : bbClvFmtLine(d.pts) + " pts") + " / " + (d.pp == null ? "-" : bbClvFmtLine(d.pp) + "% prob") + "\nBeat close: " + (d.beat || "-");
+  var col = d.beat === "yes" ? "#1a9e4a" : d.beat === "no" ? "#d92d2a" : "inherit";
+  var head = "CLV " + (d.pts != null ? bbClvFmtLine(d.pts) : "") + (d.pp != null ? (d.pts != null ? " / " : "") + bbClvFmtLine(d.pp) + "%" : "") + (d.beat === "yes" ? " ✓" : d.beat === "no" ? " ✗" : "");
+  var sub = mkw ? "O " + O(d.o).slice(1) + " C " + O(d.c).slice(1) : "O " + L(d.o) + " C " + L(d.c);
+  return '<div class="bb-clv" style="font-size:9px;font-weight:800;margin-top:2px;color:' + col + '" title="' + safeText(full) + '">' + safeText(head) + '</div><div style="font-size:8px;opacity:.7">' + safeText(sub) + "</div>";
+}
+function bbClvSummary(picks) {
+  var w = (picks || []).filter(function (p) { return p && p.clvData && p.clvData.done && !p.clvData.none; });
+  var pts = w.filter(function (p) { return p.clvData.pts != null; }), pp = w.filter(function (p) { return p.clvData.pp != null; });
+  var beat = w.filter(function (p) { return p.clvData.beat === "yes"; }).length, decided = w.filter(function (p) { return p.clvData.beat === "yes" || p.clvData.beat === "no" || p.clvData.beat === "flat"; }).length;
+  var avg = function (a, f) { return a.length ? a.reduce(function (s, p) { return s + f(p); }, 0) / a.length : null; };
+  return { n: w.length, avgPts: avg(pts, function (p) { return p.clvData.pts; }), nPts: pts.length, avgPp: avg(pp, function (p) { return p.clvData.pp; }), nPp: pp.length, beatPct: decided ? beat / decided * 100 : null, beat: beat, decided: decided };
+}
+function bbClvSummaryHtml(picks) {
+  var s = bbClvSummary(picks); if (!s.n) return "";
+  var f = function (v, d, u) { return v == null ? "-" : (v > 0 ? "+" : "") + v.toFixed(d) + (u || ""); };
+  return '<div class="tracker-report-subtitle" style="font-weight:800">Auto CLV (SportyBet close, ' + s.n + " picks): avg " + f(s.avgPts, 2, " pts") + " (n=" + s.nPts + ") · avg " + f(s.avgPp, 1, "% prob") + " (n=" + s.nPp + ") · beat close " + (s.beatPct == null ? "-" : s.beatPct.toFixed(0) + "%") + " (" + s.beat + "/" + s.decided + ")</div>";
+}
+/* prediction time: WARN when SportyBet's line moved against a PLAY since it opened */
+function bbApplyMoveWarn(c, txt) {
+  if (!c || !txt || !c.td || c.td.__bbMoveWarn === txt) return;
+  c.td.__bbMoveWarn = txt;
+  try { if (c.details) { var d = document.createElement("div"); d.className = "bb-move-warn"; d.style.cssText = "font-size:11px;margin-top:4px;white-space:normal;color:#d98200;font-weight:800"; d.textContent = txt; c.details.appendChild(d); } } catch (_e) {}
+  try { c.td.title = (c.td.title ? c.td.title + "\n" : "") + txt; var s = document.createElement("span"); s.className = "bb-move-flag"; s.textContent = " ⚠"; s.title = txt; s.style.color = "#d98200"; (c.span || c.td).appendChild(s); } catch (_e) {}
+}
+window.__bbPlayCells = [];
+async function bbLinesAfterRun(cellsIn) {
+  var last = window.__bbSportyLast; if (!last || !last.ok || !last.eventId) return null;
+  var cells = (cellsIn || window.__bbPlayCells || []).slice(); if (!cells.length) return null;
+  var tok = last.at;
+  var rec = null;
+  try { var j = await bbLinesGet("/sporty/lines?id=" + encodeURIComponent(last.eventId)); if (j && j.ok) rec = j; } catch (_e) { return null; }
+  if (!rec || !window.__bbSportyLast || window.__bbSportyLast.at !== tok) return null;
+  window.__bbLinesNow = { eventId: last.eventId, rec: rec, at: Date.now() };
+  var warned = 0;
+  cells.forEach(function (c) {
+    var p = c.p, mk = String(p.marketKey || ""), side = bbClvSide(p); if (!BB_CLV_MKS[mk] || !side) return;
+    var o = bbClvSnap(rec.opening && rec.opening[mk], side), n = bbClvSnap(rec.latest && rec.latest[mk], side);
+    var mvA = bbLineMoveAgainst(mk, side, o, n); if (!mvA) return;
+    var hrs = o && o.at ? Math.max(0, Math.round((Date.now() - o.at) / 3600000)) : null;
+    var txt = "[WARN] SportyBet moved against this pick since opening" + (hrs != null ? " (" + hrs + "h ago)" : "") + ": " + mvA.text + ". Pick NOT changed - stats decide; check team news.";
+    p.lineMoveWarn = txt; warned++;
+    try { if (Array.isArray(p.copyLog) && p.copyLog.indexOf(txt) < 0) p.copyLog.push(txt); } catch (_e) {}
+    [c].concat(window.__bbPlayCells || []).forEach(function (cc) { if (cc && cc.p && cc.p.marketKey === p.marketKey) { cc.p.lineMoveWarn = txt; bbApplyMoveWarn(cc, txt); } });
+    try { /* the results table can be re-rendered after the run: also decorate whatever PLAY cell is on screen now */
+      document.querySelectorAll('#results td[data-bb-mk="' + String(p.marketKey).replace(/[^a-z0-9_]/gi, "") + '"]').forEach(function (td) {
+        bbApplyMoveWarn({ td: td, details: td.querySelector("details"), span: td.querySelector("span") }, txt);
+      });
+    } catch (_e) {}
+  });
+  return { warned: warned };
+}
+window.bbLinesAfterRun = bbLinesAfterRun;
+(function () {
+  try {
+    setTimeout(function () { bbClvSweep().catch(function () {}); }, 25000);
+    setInterval(function () { if (!document.hidden) bbClvSweep().catch(function () {}); }, 10 * 60000);
+  } catch (_e) {}
+})();
+/* =================== END v2.7 CLV =================== */
 
 /* =================== END BB-EV MODULE v2 =================== */</script><title>Basketball Prediction Engine</title>
 
@@ -1208,7 +1426,7 @@ body {
 }
 
 html {
-  background: #e41827;
+  background: #f4f4f5; /* v2.7: was #e41827 - painted a red block below short pages and in the bottom overscroll/safe area. Header + theme-color stay red. */
 }
 body {
   background: #f4f4f5;
@@ -2279,7 +2497,7 @@ body.dark-mode .debug-error {
 }
 
 body.engine-alert {
-  background: #2a0608 !important;
+  background: #f4f4f5 !important; /* v2.7: was #2a0608 (dark red block under the buttons); the alert still shows via the pulsing red header and red borders */
 }
 
 body.engine-alert .app-header {
@@ -20067,6 +20285,7 @@ function makeTrackedMatchupKey(pick) {
   return [home, away].sort().join(" vs ");
 }
 function computeClv(side, lineAtPick, closingLine) {
+  if (lineAtPick === null || lineAtPick === undefined || lineAtPick === "" || closingLine === null || closingLine === undefined || closingLine === "") return null; /* v2.7: Number(null) = 0 gave CLV = -line on every pick without a closing line */
   const lp = Number(lineAtPick);
   const cl = Number(closingLine);
   if (!Number.isFinite(lp) || !Number.isFinite(cl)) return null;
@@ -20121,7 +20340,12 @@ function ensureTrackedPickKeys(pick = {}) {
       ? Number(next.closingLine)
       : null;
   next.clv = (typeof computeClv === "function")
-    ? computeClv(next.side, next.lineAtPick ?? next.line, next.closingLine)
+    ? computeClv(
+        /* v2.7: computeClv assumes a HOME-frame handicap line; an away-frame line (lineSide "away") flips the formula */
+        /^handicap/.test(String(next.marketKey || "").toLowerCase()) && String(next.lineSide || "home").toLowerCase() === "away"
+          ? ({ home: "away", away: "home" })[String(next.side || "").toLowerCase()] || next.side
+          : next.side,
+        next.lineAtPick ?? next.line, next.closingLine)
     : null;
   next.edge = isFinite(Number(next.edge)) ? Number(next.edge) : null;
   next.edgePct =
@@ -23024,7 +23248,7 @@ function renderTrackedPicks() {
             .split("<")[0]
             .trim(),
         )}</td>
-        <td>${safeText(formatPickLine(p))}</td>
+        <td>${safeText(formatPickLine(p))}${typeof bbClvRowHtml === "function" ? bbClvRowHtml(p) : ""}</td>
         <td style="white-space: nowrap; font-size: 11px;"><span class="tracker-delete-pick-btn" data-sig="${encSig}" style="cursor:pointer;" title="Click to permanently delete this pick">${safeText(p.predictionText || "—")}</span>${p.isLock ? ' <span class="lock">🔒</span>' : ""}</td>
         <td class="conf-none">${safeText(grade)}</td>
         <td class="${statusClass}"><div class="tracker-status-stack">${statusHtml}</div></td>
@@ -23518,7 +23742,8 @@ function renderTrackerAnalytics() {
   const clvPositiveRecord = buildRecord(clvPositive);
   const clvNeutralRecord = buildRecord(clvNeutral);
   const clvNegativeRecord = buildRecord(clvNegative);
-  const hasCLVData = clvPicks.length > 0;
+  const _bbAutoClvHtml = typeof bbClvSummaryHtml === "function" ? bbClvSummaryHtml(allReportPicks) : ""; /* v2.7 */
+  const hasCLVData = clvPicks.length > 0 || !!_bbAutoClvHtml;
   const bestPickShadow = buildBestPickOnlyShadowExperiment(learningPicks);
   const selectedLeagueKey = normalizeLeagueKey(
     document.getElementById("leagueSelect")?.value || "unknown",
@@ -23994,7 +24219,8 @@ function renderTrackerAnalytics() {
           <div class="tracker-analytics-card-meta">${clvPicks.length} picks with closing line data</div>
         </div>
         <div class="tracker-analytics-card-body">
-          <div class="tracker-report-subtitle">CLV = how your pick line compares to where the market closed. Positive CLV = you beat the closing line. This is the single strongest long-term edge signal. Enter closing lines via the CUSTOM settle button.</div>
+          <div class="tracker-report-subtitle">CLV = how your pick line compares to where the market closed. Positive CLV = you beat the closing line. This is the single strongest long-term edge signal. Closing lines now fill automatically from SportyBet (worker snapshots every 10 min); the CUSTOM settle button still works.</div>
+          ${_bbAutoClvHtml}
           <div class="table-wrap tracker-report-table-wrap">
             <table class="tracker-analytics-table">
               <thead><tr><th>CLV Direction</th><th class="num">Picks</th><th class="num">Wins</th><th class="num">Losses</th><th class="num">Pushes</th><th class="rate">Win rate</th></tr></thead>
@@ -24010,7 +24236,7 @@ function renderTrackerAnalytics() {
           : `
       <div class="tracker-analytics-card">
         <div class="tracker-analytics-card-head"><div class="tracker-analytics-card-title">CLV (Closing Line Value)</div><div class="tracker-analytics-card-meta">No data yet</div></div>
-        <div class="tracker-analytics-card-body"><div class="tracker-report-subtitle">Use the CUSTOM settle button on any pick and enter the closing line to start CLV tracking. Even 20 CLV data points gives stronger signal than 100 W/L results alone.</div></div>
+        <div class="tracker-analytics-card-body"><div class="tracker-report-subtitle">Closing lines fill automatically from SportyBet shortly after kickoff (picks priced on a SportyBet event, or matched by team names + date). You can still enter one with the CUSTOM settle button. Even 20 CLV data points gives stronger signal than 100 W/L results alone.</div></div>
       </div>`
       }
       <div class="tracker-analytics-grid two">
@@ -38411,6 +38637,16 @@ function buildTrackedPickPayload({
     snapshot: snapshot,
     eventId: fixtureMeta.eventId || "",
     eventDate: fixtureMeta.eventDate || "",
+    ...(function () { /* v2.7 CLV: remember the SportyBet event this pick was priced on (only if the names agree) */
+      try {
+        const _sl = window.__bbSportyLast;
+        if (!_sl || !_sl.ok || !_sl.eventId) return {};
+        const _h = fixtureMeta.homeTeam, _a = fixtureMeta.awayTeam;
+        if (_sl.home && _h && _h !== "—" && bbNameScore(_h, _sl.home) < 0.34) return {};
+        if (_sl.away && _a && _a !== "—" && bbNameScore(_a, _sl.away) < 0.34) return {};
+        return { sportyEventId: String(_sl.eventId), sportyKickoff: _sl.ko || null };
+      } catch (_e) { return {}; }
+    })(),
     league,
     homeTeam: fixtureMeta.homeTeam && fixtureMeta.homeTeam !== "—" ? fixtureMeta.homeTeam : "A",
     awayTeam: fixtureMeta.awayTeam && fixtureMeta.awayTeam !== "—" ? fixtureMeta.awayTeam : "B",
@@ -38838,6 +39074,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       const details = buildPickExplanationDetails(p, isLock);
       details.open = false;
       try { bbAppendPriceInfo(details, p, league, tdPred); } catch (_bbPi) {}
+      try { tdPred.setAttribute("data-bb-mk", String(p.marketKey || "")); const _bbCell = { p: p, td: tdPred, details: details, span: predSpan }; (window.__bbPlayCells = window.__bbPlayCells || []).push(_bbCell); if (p.lineMoveWarn) bbApplyMoveWarn(_bbCell, p.lineMoveWarn); } catch (_bbPc) {} /* v2.7 line-move WARN */
       predSpan.addEventListener("click", function (e) {
         e.stopPropagation();
         details.open = !details.open;
@@ -41355,6 +41592,7 @@ async function runEngine() {
         intelligencePackSummary: intelligencePack,
       },
     });
+    try { const _bbCells = window.__bbPlayCells || []; window.__bbPlayCells = []; if (_bbCells.length && typeof bbLinesAfterRun === "function") setTimeout(function () { bbLinesAfterRun(_bbCells).catch(function () {}); }, 400); } catch (_bbLa) {} /* v2.7: line-move WARN for this run's PLAY cells */
     scrollResultsIntoViewNow(table);
     engineDebug(
       "final picks for display",
