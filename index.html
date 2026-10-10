@@ -1,4 +1,15 @@
-S
+<!--
+BB ENGINE PATCH RECORD
+Changes made in this version:
+1. EV sanity and minimum-edge checks compare conditional win probability against conditional market probability/breakeven when push probability is nonzero.
+2. Confidence grading retains its calibrated/blended probability; the separate EV-model probability is recorded diagnostically instead of overwriting it.
+3. Confidence edge feature normalization handles legacy fractional and percentage-point values continuously around 1.00% / 1.01%, and supports explicit edgePctUnit metadata.
+4. Candidate configuration selection rejects missing candidate Brier metrics when a baseline Brier metric exists, reports empty calibration samples as null/count=0, and ranks by total improvement before efficiency.
+5. Tracker snapshot promotion threshold increased from z=0.5 to z=1.96; this is a conservative threshold change, not a substitute for a fully specified statistical validation design.
+6. Removed UNDER_EDGE_FACTOR candidate scoring from calibrateEngineConstants because the active price-aware getPick path does not consume that threshold override; the tuner must not promote a parameter that cannot affect active decisions.
+Validation: all 15 embedded JavaScript blocks pass Node.js syntax checks.
+Limitations: no historical results/odds dataset was supplied, so real-world calibration/profitability cannot be verified. The entire source has not been exhaustively revalidated against all runtime flows; remaining audit items should not be considered proven fixed by syntax checks alone.
+-->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -321,8 +332,8 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   var isInt = Number.isFinite(extra.line) && Math.abs(extra.line - Math.round(extra.line)) < 1e-9;
   var cap = function (x) { return Math.min(BB_EV_CONFIG.maxProb, Math.max(1 - BB_EV_CONFIG.maxProb, x)); };
   var pa, pbWin, push = 0;
-  if (isInt) { var _ra = bbNormCdf((mu - 0.5) / sd), _rb = bbNormCdf((-mu - 0.5) / sd); push = Math.max(0, 1 - _ra - _rb); pa = Math.min(BB_EV_CONFIG.maxProb, _ra); pbWin = Math.min(BB_EV_CONFIG.maxProb, _rb); } /* push from the raw CDFs so the 80% cap never inflates it */
-  else { var _rawPa = bbNormCdf(mu / sd); pa = Math.min(BB_EV_CONFIG.maxProb, _rawPa); pbWin = Math.min(BB_EV_CONFIG.maxProb, 1 - _rawPa); } /* AUDIT-FIX F1: cap each side on its own; the old 1-cap(pa) floored the underdog at 20% */
+  if (isInt) { var _ra = bbNormCdf((mu - 0.5) / sd), _rb = bbNormCdf((-mu - 0.5) / sd); push = Math.max(0, 1 - _ra - _rb); pa = Math.min(BB_EV_CONFIG.maxProb, _ra); pbWin = Math.min(BB_EV_CONFIG.maxProb, _rb); } /* push from raw CDFs; caps apply to win probabilities only */
+  else { var _rawPa = bbNormCdf(mu / sd); pa = Math.min(BB_EV_CONFIG.maxProb, _rawPa); pbWin = Math.min(BB_EV_CONFIG.maxProb, 1 - _rawPa); } /* each side is capped independently */
   var odds = bbReadOdds(mk), fair = bbDevig(odds.a, odds.b);
   out.k = k; out.sd = sd; out.mu = mu; out.pA = pa; out.pPush = push;
   out.fairLine = Number.isFinite(extra.line) ? (extra.margin ? extra.line - mu : extra.line + mu) : null; /* line at which the model is 50/50 */
@@ -349,13 +360,17 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   var block = bbIsNoPlayCompetition();
   if (block) { out.reason = block + " (" + pTxt + ")"; return out; }
   if (!best.dec) { out.reason = "NO PLAY - enter odds (" + pTxt + ")"; return out; }
-  out.grade = (best.ev >= BB_EV_CONFIG.grade.A && best.p - best.be >= BB_EV_CONFIG.grade.Ape) ? "A" : best.ev >= BB_EV_CONFIG.grade.B ? "B" : best.ev >= BB_EV_CONFIG.grade.C ? "C" : "D";
+  /* Compare conditional win probability to conditional market breakeven; raw P(win) includes pushes. */
+  var conditionalWinProb = push > 0 ? best.p / Math.max(1e-12, 1 - push) : best.p;
+  var conditionalBreakeven = 1 / best.dec;
+  out.conditionalWinProbability = conditionalWinProb;
+  out.grade = (best.ev >= BB_EV_CONFIG.grade.A && conditionalWinProb - conditionalBreakeven >= BB_EV_CONFIG.grade.Ape) ? "A" : best.ev >= BB_EV_CONFIG.grade.B ? "B" : best.ev >= BB_EV_CONFIG.grade.C ? "C" : "D";
   var minEV = bbMinEV();
   var head = sideTxt(best.side) + " P=" + (best.p * 100).toFixed(1) + "%" + (push > 0 ? " (push " + (push * 100).toFixed(1) + "%)" : "") + " vs breakeven " + (best.be * 100).toFixed(1) + "% @ " + best.dec.toFixed(2) + ", EV " + (best.ev >= 0 ? "+" : "") + (best.ev * 100).toFixed(1) + "%";
   if (!fair) { out.reason = "NO PLAY - NEED BOTH ODDS (" + head + "; enter the " + sideTxt(best.side === "a" ? "b" : "a") + " price too so the bookmaker margin can be removed and checked" + fl + ")"; out.needBothOdds = true; return out; } /* v2.5: a PLAY requires both sides */
-  if (best.p - best.be < BB_EV_CONFIG.minEdgeVsBreakeven) { out.reason = head + ": P - breakeven < " + (BB_EV_CONFIG.minEdgeVsBreakeven * 100) + "pp" + fl; return out; }
+  if (conditionalWinProb - conditionalBreakeven < BB_EV_CONFIG.minEdgeVsBreakeven) { out.reason = head + ": conditional P - conditional breakeven < " + (BB_EV_CONFIG.minEdgeVsBreakeven * 100) + "pp" + fl; return out; }
   if (best.ev < minEV) { out.reason = head + " < +" + (minEV * 100) + "%" + (minEV > BB_EV_CONFIG.minEV ? " (early season)" : "") + fl; return out; }
-  if (best.ev > BB_EV_CONFIG.sanity.maxEV || (best.fair != null && Math.abs(best.p - best.fair) > BB_EV_CONFIG.sanity.maxGapVsFair)) {
+  if (best.ev > BB_EV_CONFIG.sanity.maxEV || (best.fair != null && Math.abs(conditionalWinProb - best.fair) > BB_EV_CONFIG.sanity.maxGapVsFair)) {
     out.reason = "CHECK ODDS/LINE - " + head + (best.fair != null ? ", market fair " + (best.fair * 100).toFixed(1) + "%" : "") + ": too far from the model to trust (likely a typo, stale or wrong line)" + fl; out.sanityBlock = true; return out;
   }
   out.ok = true; out.reason = head;
@@ -10932,29 +10947,10 @@ function calibrateEngineConstants() {
       }
     });
   });
-  settled.forEach((pick) => {
-    if (
-      pick.side !== "under" ||
-      !isFinite(pick.rawEdge ?? pick.edge) ||
-      !isFinite(pick.lineAtPick ?? pick.line)
-    )
-      return;
-    const numericActual = typeof actualForMarket === "function" ? actualForMarket(pick) : (typeof parseFinalScore === "function" ? parseFinalScore(pick.actualScore).total : parseFloat(pick.actualScore));
-    if (!isFinite(numericActual)) return;
-    const edge = Number(pick.rawEdge ?? pick.edge);
-    const lineVal = Number(pick.lineAtPick ?? pick.line);
-    TUNABLE_CONSTANTS_GRID.UNDER_EDGE_FACTOR.forEach((candidate) => {
-      const decision = getPick(edge, lineVal, pick.league, pick.marketKey, {
-        underEdgeFactorOverride: candidate,
-      });
-      if (decision === "NO PLAY") return;
-      const wouldWin = numericActual < lineVal;
-      const isWin = pick.resultStatus === "win";
-      const delta = wouldWin ? (isWin ? 0 : 1) : isWin ? -1 : 0;
-      if (delta !== 0) updateConstantCandidateScore("UNDER_EDGE_FACTOR", candidate, delta);
-    });
-  });
-  ["INJURY_OPPONENT_BOOST_FACTOR", "UNDER_EDGE_FACTOR"].forEach((constantName) => {
+  /* UNDER_EDGE_FACTOR is not tunable through the active price-aware getPick path:
+     getPick intentionally no longer uses point-threshold gates. Do not score/promote
+     candidates that cannot affect the active decision. */
+  ["INJURY_OPPONENT_BOOST_FACTOR"].forEach((constantName) => {
     const best = selectBestConstantValue(constantName, 60);
     const _gridSizeForConstant = (TUNABLE_CONSTANTS_GRID[constantName] || []).length || 1;
     const _correctedConstantMultiplier =
@@ -11457,8 +11453,9 @@ function selectBestConfig(league, marketKey) {
       brier: (d.brierCount || 0) > 0 ? d.brierSum / d.brierCount : null,
       deltas: Array.isArray(d.deltas) ? d.deltas : [],
     }))
-    .filter((c) => baselineBrier === null || c.brier === null || c.brier <= baselineBrier + 0.002)
-    .sort((a, b) => b.efficiency - a.efficiency);
+    .filter((c) => baselineBrier === null || (c.brier !== null && c.brier <= baselineBrier + 0.002))
+    /* Prefer total measured improvement; use efficiency only as a tie-breaker. */
+    .sort((a, b) => b.netDelta - a.netDelta || b.efficiency - a.efficiency);
   if (!qualified.length) return null;
   const best = qualified[0];
   return {
@@ -11545,7 +11542,7 @@ function calculateCalibrationMetrics(evaluationResults) {
       bbStrictFinite(r.winProbability) &&
       (r.win || r.loss),
   );
-  if (!valid.length) return { brier: 1.0, ece: 1.0 };
+  if (!valid.length) return { brier: null, ece: null, count: 0 };
   let brierSum = 0;
   const bins = Array.from({ length: 10 }, () => ({ sp: 0, so: 0, n: 0 }));
   valid.forEach((r) => {
@@ -25572,7 +25569,7 @@ const TRACKER_SIGNAL_SNAPSHOT_KEY = "BB_TRACKER_SIGNAL_SNAPSHOT_V1";
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 const TRACKER_SIGNAL_MIN_ELIGIBLE = 40;
 const TRACKER_SIGNAL_MIN_VALIDATION = 15;
-const TRACKER_SIGNAL_VALIDATION_Z = 0.5;
+const TRACKER_SIGNAL_VALIDATION_Z = 1.96; /* nominal 5% two-sided threshold; still require adequate validation N */
 // ========== CALC-AUDIT-195: CONSTANTS AND MODEL CONFIGURATION — END ==========
 function loadTrackerSignalSnapshot() {
   try {
@@ -29207,7 +29204,16 @@ function buildConfidenceFeatures(pickOrArgs) {
         ? Number(p.godsEyeMemory.edgePct)
         : NaN;
   let edgeFrac = edgePctRaw;
-  if (Number.isFinite(edgeFrac) && Math.abs(edgeFrac) > 1) edgeFrac = edgeFrac / 100;
+  /* Legacy records mix fractional edges (0.08 = 8%) and percentage-point edges (8 = 8%).
+     Treat magnitudes above 0.15 as percentage points so 1.00 and 1.01 both normalize
+     continuously to 1.00% and 1.01%; callers with unusual >15% fractional edges should
+     set edgePctUnit explicitly. */
+  const edgeUnit = String(p.edgePctUnit || p.godsEyeMemory?.edgePctUnit || "").toLowerCase();
+  if (Number.isFinite(edgeFrac)) {
+    if (edgeUnit === "percent" || edgeUnit === "percentage_points") edgeFrac /= 100;
+    else if (edgeUnit === "fraction") edgeFrac = edgeFrac;
+    else if (Math.abs(edgeFrac) > 0.15) edgeFrac /= 100;
+  }
   /* Missing edge stays NaN; unknown edge is not a valid zero-edge training feature. */
   const league = p.league || "";
   const marketKey = String(p.marketKey || p.marketName || "ft").toLowerCase();
@@ -29745,7 +29751,9 @@ function getConfidenceGrade(params) {
     };
   }
   // CALC-AUDIT-243.W08 waypoint: try-block (calls bbEvaluateTotal)
-  try { const _bbE = bbEvaluateTotal(Number(line) + Number(edge), Number(line), league, params?.marketKey || "ft"); if (_bbE && Number.isFinite(_bbE.p)) winProb = _bbE.p; } catch (_bbErr) {} /* FIX_GUIDE step 2 */
+  /* Keep the calibrated/blended confidence probability as the grading value. The EV helper
+     is a separate betting-decision model and must not overwrite confidence grading. */
+  try { const _bbE = bbEvaluateTotal(Number(line) + Number(edge), Number(line), league, params?.marketKey || "ft"); if (_bbE && Number.isFinite(_bbE.p) && params && typeof params === "object") params._evModelWinProbability = _bbE.p; } catch (_bbErr) {}
   // CALC-AUDIT-243.W09 waypoint: if-block (Math.* x1)
   if ((injuryFetchFailed || realInjuryCap) && Number.isFinite(winProb)) {
     winProb = Math.min(winProb, 0.62);
@@ -29942,7 +29950,8 @@ function getMarginConfidenceGrade(params) {
       finalWinProbability: Number.isFinite(winProb) ? Number(winProb) : null,
     };
   }
-  try { if (bbStrictFinite(marginEdgePts)) { const _bbE = bbEvaluateMargin(Number(marginEdgePts), league, params?.marketKey || "winner"); if (_bbE && Number.isFinite(_bbE.p)) winProb = _bbE.p; } } catch (_bbErr) {} /* FIX_GUIDE step 2 */
+  /* Keep calibrated/blended confidence separate from the EV helper's model probability. */
+  try { if (bbStrictFinite(marginEdgePts)) { const _bbE = bbEvaluateMargin(Number(marginEdgePts), league, params?.marketKey || "winner"); if (_bbE && Number.isFinite(_bbE.p) && params && typeof params === "object") params._evModelWinProbability = _bbE.p; } } catch (_bbErr) {}
   if (injuryFetchFailed && Number.isFinite(winProb)) {
     winProb = Math.min(winProb, 0.62);
     if (params && typeof params === "object") {
