@@ -30,6 +30,7 @@
   href="A7358954-0D25-46A3-BF5E-EE0894AA056F.JPG?v=v25_audit10_20260913"
 />
 <script>/* BB fixed build v2.6 (10 Oct 2026): pass 4 whole-engine audit, see CHANGELOG v2.6 */
+/* AUDIT-FIX v2.6.1 (10 Oct 2026): F1 winner/half-line probability cap per side; F2 postponed/cancelled games never final; F3 no grading without both scores; F4 Team A orientation in winner fallback, HT/FT, margin; F5 handicap lineSide=away + non-home/away sides; F6 empty-pick label */
 /* BB-FIX #25: early definition so blocks that load before the main engine can call it; the engine redefines it identically */
 /* allowlisted: this is the definition of the strict check */
 function bbStrictFinite(v) { if (typeof v === "number") return Number.isFinite(v); if (typeof v === "string") return v.trim() !== "" && Number.isFinite(Number(v)); return false; }
@@ -256,7 +257,7 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   var cap = function (x) { return Math.min(BB_EV_CONFIG.maxProb, Math.max(1 - BB_EV_CONFIG.maxProb, x)); };
   var pa, pbWin, push = 0;
   if (isInt) { var _ra = bbNormCdf((mu - 0.5) / sd), _rb = bbNormCdf((-mu - 0.5) / sd); push = Math.max(0, 1 - _ra - _rb); pa = Math.min(BB_EV_CONFIG.maxProb, _ra); pbWin = Math.min(BB_EV_CONFIG.maxProb, _rb); } /* push from the raw CDFs so the 80% cap never inflates it */
-  else { pa = cap(bbNormCdf(mu / sd)); pbWin = 1 - pa; }
+  else { var _rawPa = bbNormCdf(mu / sd); pa = Math.min(BB_EV_CONFIG.maxProb, _rawPa); pbWin = Math.min(BB_EV_CONFIG.maxProb, 1 - _rawPa); } /* AUDIT-FIX F1: cap each side on its own; the old 1-cap(pa) floored the underdog at 20% */
   var odds = bbReadOdds(mk), fair = bbDevig(odds.a, odds.b);
   out.k = k; out.sd = sd; out.mu = mu; out.pA = pa; out.pPush = push;
   out.fairLine = Number.isFinite(extra.line) ? (extra.margin ? extra.line - mu : extra.line + mu) : null; /* line at which the model is 50/50 */
@@ -11873,7 +11874,7 @@ function evaluatePickWithParams(pick, paramOverrides) {
       } else {
         const lineSide = String(pick.lineSide || pick.snapshot?.lineSide || "home").toLowerCase();
         const margin = numericActual;                  
-        const netCover = lineSide === "home" ? margin + lineVal : (-margin) + lineVal;
+        const netCover = lineSide === "away" ? margin - lineVal : margin + lineVal; /* AUDIT-FIX F5: > 0 means HOME covers */
         if (netCover === 0) push = true;
         else if (netCover > 0) { if (pickSide === "home") win = true; else loss = true; }
         else { if (pickSide === "away") win = true; else loss = true; }
@@ -19606,6 +19607,7 @@ function bbShadowSettle(eventId, marketKey, actual) {
 function bbShadowSettleFromCompetition(eventId, competition, final) {
   try {
     if (!final || !eventId || !competition) return;
+    if (typeof bbEspnNotPlayed === "function" && bbEspnNotPlayed(competition.status)) return; /* AUDIT-FIX F2 */
     const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
     const open = arr.filter((e) => !e.result && String(e.eventId) === String(eventId));
     if (!open.length) return;
@@ -25054,14 +25056,16 @@ async function settleTrackedPickManualFull(signature) {
       const _side = String(pick.side || "").toLowerCase();
       const _line = Number(pick.line);
       let autoGrade = null;
-      if (_mk === "winner" && Number.isFinite(sHome) && Number.isFinite(sAway)) {
+      if ((_side !== "home" && _side !== "away")) {
+        autoGrade = null; /* AUDIT-FIX F5: only home/away picks can be auto-graded from a typed score */
+      } else if (_mk === "winner" && Number.isFinite(sHome) && Number.isFinite(sAway)) {
         if (sHome === sAway) autoGrade = "push";
         else if (sHome > sAway) autoGrade = _side === "home" ? "win" : "loss";
         else autoGrade = _side === "away" ? "win" : "loss";
       } else if (Number.isFinite(sHome) && Number.isFinite(sAway) && Number.isFinite(_line)) {
         const marginActual = sHome - sAway;
         const lineSide = String(pick.lineSide || "home").toLowerCase();
-        const netCover = lineSide === "away" ? (-marginActual) + _line : marginActual + _line;
+        const netCover = lineSide === "away" ? marginActual - _line : marginActual + _line; /* AUDIT-FIX F5 */
         if (netCover > 0) autoGrade = _side === "home" ? "win" : "loss";
         else if (netCover < 0) autoGrade = _side === "away" ? "win" : "loss";
         else autoGrade = "push";
@@ -25460,6 +25464,15 @@ function handleTrackedPicksActionClick(event) {
       btn.disabled = false;
     });
 }
+/* AUDIT-FIX F2: ESPN reports postponed/cancelled/suspended games with state "post"; they must never be graded or used as results */
+function bbEspnNotPlayed(status) {
+  try {
+    var t = (status && status.type) || status || {};
+    var name = String(t.name || "").toUpperCase();
+    var desc = String(t.description || "").toUpperCase();
+    return /POSTPONED|CANCEL|SUSPEND|ABANDON|FORFEIT|DELAY/.test(name) || /POSTPONED|CANCEL|SUSPEND|ABANDON|FORFEIT/.test(desc);
+  } catch (_e) { return false; }
+}
 function isPickPeriodComplete(
   marketKey,
   currentPeriod,
@@ -25558,7 +25571,7 @@ function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
   const isHalf = !!_liveMetaHalf.half ||
     String(statusName).toUpperCase().includes("HALFTIME") ||
     String(competition?.status?.type?.description || "").toUpperCase().includes("HALFTIME");
-  const completed = !!(
+  const completed = !bbEspnNotPlayed(competition?.status) && !!(
     gameFinal ||
     competition?.status?.type?.completed ||
     competition?.status?.type?.state === "post" ||
@@ -25677,6 +25690,7 @@ function bbPeriodScorelineForPick(pick, competition) {
 function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSettlement = false) {
   if (!pick || !competition) return "pending";
   const oldStatus = pick.resultStatus;
+  if (bbEspnNotPlayed(competition?.status)) return "pending"; /* AUDIT-FIX F2 */
   const completed = !!(
     competition?.status?.type?.completed ||
     competition?.status?.type?.state === "post" ||
@@ -25708,6 +25722,7 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
   };
   const sHome = getVal(home.score);
   const sAway = getVal(away.score);
+  if (completed && (!Number.isFinite(sHome) || !Number.isFinite(sAway))) return "pending"; /* AUDIT-FIX F3: NaN > NaN is false, so a missing score graded as an AWAY win */
   let lsHome = home.linescores || [];
   let lsAway = away.linescores || [];
   if (
@@ -25768,6 +25783,11 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
     String(pick.homeId || "") !== "" &&
     String(home && home.id != null ? home.id : "") !== "" &&
     String(pick.homeId) === String(home.id);
+  /* AUDIT-FIX F4: true when Team A (pick.homeId) is the feed's AWAY team */
+  const bbTeamAIsAway =
+    !isTeamAHome &&
+    String(pick.homeId || "") !== "" &&
+    String(away && away.id != null ? away.id : "") === String(pick.homeId);
   /* TEAM MEMORY: store the final score oriented to Team A (only when orientation is certain) */
   try {
     if (completed && Number.isFinite(sHome) && Number.isFinite(sAway)) {
@@ -25838,8 +25858,8 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
         .toUpperCase();
       if (predUp && homeNameUp && predUp === homeNameUp) predictedWinnerSide = "home";
       else if (predUp && awayNameUp && predUp === awayNameUp) predictedWinnerSide = "away";
-      else if (String(pick.side || "").toLowerCase() === "away") predictedWinnerSide = "away";
-      else if (String(pick.side || "").toLowerCase() === "home") predictedWinnerSide = "home";
+      else if (String(pick.side || "").toLowerCase() === "away") predictedWinnerSide = bbTeamAIsAway ? "home" : "away"; /* AUDIT-FIX F4: side is in Team A/B frame */
+      else if (String(pick.side || "").toLowerCase() === "home") predictedWinnerSide = bbTeamAIsAway ? "away" : "home";
       else {
         pick.actualScore = actualWinnerSide === "home" ? "Home" : "Away";
         pick.engineResultStatus = "pending";
@@ -25889,8 +25909,10 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
     if (!isFinite(marginActual) || !isFinite(marketLine)) return "pending";
     actual = marginActual;
     const pickSide = String(pick.side || "").toLowerCase();
+    if (pickSide === "no_play") { pick.engineResultStatus = "no_play_settled"; return "no_play_settled"; } /* AUDIT-FIX F5: a NO PLAY pick was graded as a loss */
+    if (pickSide !== "home" && pickSide !== "away") return "pending";
     const lineSide = String(pick.lineSide || "home").toLowerCase();
-    const netCover = lineSide === "away" ? (-marginActual) + marketLine : marginActual + marketLine;
+    const netCover = lineSide === "away" ? marginActual - marketLine : marginActual + marketLine; /* AUDIT-FIX F5: > 0 means HOME covers in both frames */
     let engineGrade = "push";
     if (netCover > 0) engineGrade = pickSide === "home" ? "win" : "loss";
     else if (netCover < 0) engineGrade = pickSide === "away" ? "win" : "loss";
@@ -25945,8 +25967,10 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
     actual = isTeamAHome ? h1Away : h1Home;
   } else if (market === "htft") {
     if ((!isFinite(h1Home) || !isFinite(h1Away) || (h1Home === 0 && h1Away === 0))) return "pending";
-    const h1Lead = h1Home > h1Away ? "Home" : h1Home < h1Away ? "Away" : "Tie";
-    const ftLead = sHome > sAway ? "Home" : sHome < sAway ? "Away" : "Tie";
+    const _hf = bbTeamAIsAway; /* AUDIT-FIX F4: HT/FT text is in Team A (= "Home") frame */
+    const _h1H = _hf ? h1Away : h1Home, _h1A = _hf ? h1Home : h1Away, _fH = _hf ? sAway : sHome, _fA = _hf ? sHome : sAway;
+    const h1Lead = _h1H > _h1A ? "Home" : _h1H < _h1A ? "Away" : "Tie";
+    const ftLead = _fH > _fA ? "Home" : _fH < _fA ? "Away" : "Tie";
     const actualStr = (h1Lead + "/" + ftLead).toUpperCase();
     pick.actualScore = actualStr;
     const isWin = actualStr === String(pick.predictionText).toUpperCase();
@@ -25954,7 +25978,7 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
     return isWin ? "win" : "loss";
   } else if (market === "margin_any" || market === "margin_team") {
     const diff = Math.abs(sHome - sAway);
-    const winner = sHome > sAway ? "Home" : sHome < sAway ? "Away" : "Tie";
+    const winner = (bbTeamAIsAway ? sAway > sHome : sHome > sAway) ? "Home" : (bbTeamAIsAway ? sAway < sHome : sHome < sAway) ? "Away" : "Tie"; /* AUDIT-FIX F4 */
     pick.actualScore = winner + " by " + diff;
     const pt = String(pick.predictionText).toUpperCase();
     if (market === "margin_team" && !pt.startsWith(winner.toUpperCase())) {
@@ -26186,10 +26210,10 @@ async function refreshTrackedPickResults() {
           });
           return;
         }
-        const apiFinal =
+        const apiFinal = !bbEspnNotPlayed(competition?.status) && !!(
           competition?.status?.type?.completed ||
           competition?.status?.type?.state === "post" ||
-          competition?.status?.type?.name === "STATUS_FINAL";
+          competition?.status?.type?.name === "STATUS_FINAL");
         const clock = competition?.status?.displayClock;
         const period = competition?.status?.period;
         const stateName = competition?.status?.type?.state;
@@ -30093,10 +30117,7 @@ async function fetchNbaSummerGameRefsViaScoreboard(base, teamId) {
       if (!ev?.id) continue;
       const comp = ev?.competitions?.[0];
       if (!comp) continue;
-      const done =
-        comp?.status?.type?.completed ||
-        comp?.status?.type?.name === "STATUS_FINAL" ||
-        comp?.status?.type?.state === "post";
+      const done = !bbEspnNotPlayed(comp?.status) && !!(comp?.status?.type?.completed || comp?.status?.type?.name === "STATUS_FINAL" || comp?.status?.type?.state === "post"); /* AUDIT-FIX F2 */
       if (!done || (comp?.competitors || []).length < 2) continue;
       const competitors = comp.competitors;
       const mine = competitors.find((x) => matchesTeam(x, tId));
@@ -30192,10 +30213,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         if (!ev?.id) continue;
         const comp = ev?.competitions?.[0];
         if (!comp) continue;
-        const done =
-          comp?.status?.type?.completed ||
-          comp?.status?.type?.name === "STATUS_FINAL" ||
-          comp?.status?.type?.state === "post";
+        const done = !bbEspnNotPlayed(comp?.status) && !!(comp?.status?.type?.completed || comp?.status?.type?.name === "STATUS_FINAL" || comp?.status?.type?.state === "post"); /* AUDIT-FIX F2 */
         if (!done || (comp?.competitors || []).length < 2) continue;
         const competitors = comp.competitors;
         const mine = competitors.find((x) => matchesTeam(x, tId));
@@ -30641,10 +30659,7 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
     events.forEach((ev) => {
       const comp = ev?.competitions?.[0];
       if (!ev?.id || !comp) return;
-      const done =
-        comp?.status?.type?.completed ||
-        comp?.status?.type?.name === "STATUS_FINAL" ||
-        comp?.status?.type?.state === "post";
+      const done = !bbEspnNotPlayed(comp?.status) && !!(comp?.status?.type?.completed || comp?.status?.type?.name === "STATUS_FINAL" || comp?.status?.type?.state === "post"); /* AUDIT-FIX F2 */
       if (!done) return;
       /* STRICT COMPETITION: tag every game with its season type (the event's own, else the season type that was queried).
          Preseason is no longer dropped here: a preseason fixture uses preseason games only, a regular-season fixture
@@ -30699,10 +30714,7 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
             })());
         const hc = data?.header?.competitions?.[0];
         if (!hc) return null;
-        const done =
-          hc?.status?.type?.completed ||
-          hc?.status?.type?.name === "STATUS_FINAL" ||
-          hc?.status?.type?.state === "post";
+        const done = !bbEspnNotPlayed(hc?.status) && !!(hc?.status?.type?.completed || hc?.status?.type?.name === "STATUS_FINAL" || hc?.status?.type?.state === "post"); /* AUDIT-FIX F2 */
         if (!done) return null;
         const gameDate = hc?.date || ref.date || "";
         const gameTs = gameDate ? Date.parse(gameDate) : NaN;
@@ -35914,7 +35926,7 @@ let g_bbTmBackfillBusy = false;
 function bbTmScoreFromCompetition(competition, homeId) {
   const comps = (competition && competition.competitors) || [];
   const st = (competition && competition.status && competition.status.type) || {};
-  if (!(st.completed || st.state === "post" || st.name === "STATUS_FINAL")) return null;
+  if (!(st.completed || st.state === "post" || st.name === "STATUS_FINAL") || bbEspnNotPlayed(competition && competition.status)) return null; /* AUDIT-FIX F2 */
   const home = comps.find((c) => c && c.homeAway === "home") || comps[0];
   const away = comps.find((c) => c && c.homeAway === "away") || comps[1];
   if (!home || !away) return null;
@@ -39006,8 +39018,8 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
         const _home = String(fixtureMeta?.homeTeam || "").trim().toLowerCase();
         const _away = String(fixtureMeta?.awayTeam || "").trim().toLowerCase();
         const _pred = String(displayPickText || p.pick || "").trim().toLowerCase();
-        if (_home && (_pred === _home || _pred.includes(_home) || _home.includes(_pred))) _sideLabel = "HOME";
-        else if (_away && (_pred === _away || _pred.includes(_away) || _away.includes(_pred))) _sideLabel = "AWAY";
+        if (_home && _pred && (_pred === _home || _pred.includes(_home) || _home.includes(_pred))) _sideLabel = "HOME"; /* AUDIT-FIX F6 */
+        else if (_away && _pred && (_pred === _away || _pred.includes(_away) || _away.includes(_pred))) _sideLabel = "AWAY";
       }
       tdProj.textContent = _sideLabel;
     } else if (_isMarginMarket) {
