@@ -1,3 +1,4 @@
+S
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -96,7 +97,7 @@ var BB_EV_CONFIG = {
   minEV: 0.03, minEVEarly: 0.05, minEdgeVsBreakeven: 0.02,
   maxProb: 0.80, kellyFraction: 0.25, kellyCap: 0.02, maxBetsPerGame: 2,
   minNforLearned: 200,
-  k: { ft: 0.15, period: 0.15, quarter: 0.15, team: 0.15, h1team: 0.15, handicap: 0.35, handicap_h: 0.15, winner: 0.35 },
+  k: { ft: 0.25, period: 0.25, quarter: 0.25, team: 0.25, h1team: 0.25, handicap: 0.35, handicap_h: 0.15, winner: 0.35 }, /* v2.1: totals k comes from the league tier (bbEvKInfo); these are fallbacks */
   sigma: { ft: 16.5, period: 11.0, quarter: 7.6, team: 11.0, h1team: 7.5, handicap: 11.3, handicap_h: 8.0, winner: 11.3 },
   otAllowance: { ft: 1.0, team: 0.5 }, /* SportyBet totals include OT; form uses regulation scores */
   grade: { A: 0.08, Ape: 0.05, B: 0.05, C: 0.03 },
@@ -118,16 +119,52 @@ function bbEvBucket(mk) {
   return "ft";
 }
 function bbEvLearned() { try { return JSON.parse(localStorage.getItem("BB_EV_LEARNED") || "{}") || {}; } catch (_e) { return {}; } }
-function bbEvK(league, mk) {
-  var b = bbEvBucket(mk), L = bbEvLearned()[b];
-  if (L && L.n >= BB_EV_CONFIG.minNforLearned && isFinite(L.k)) return Math.max(0, Math.min(1, L.k));
-  return BB_EV_CONFIG.k[b] != null ? BB_EV_CONFIG.k[b] : 0.15;
+var BB_LEAGUE_SIGMA = {"pooledGameTotalSD": 19.22, "tierRatio": {"nba": 1.076, "women": 0.991, "top": 0.981, "other": 0.936}, "league": {"nba": 1.076, "euroleague": 0.958, "wnba": 0.991, "eurocup": 0.988, "ausnbl": 1.008, "mexico_lnbp": 0.954, "bbl": 0.98, "serbia_kls": 0.977, "italy_a2": 0.925, "prob": 0.863, "england_slb": 1.047, "proa": 1.027, "acb": 1.058, "intl_friendly": 0.975, "lkl": 0.945, "germany_proa": 0.935, "nbl_cz": 0.808, "korea_kbl": 0.928, "puerto_rico_bsn": 0.942}};
+/* League sigma = market sigma x league ratio. Ratio = league SD of game totals / pooled within-league SD (19.2),
+   shrunk toward the league tier with weight n/(n+50); unknown leagues use the tier ratio. Source: ESPN/EuroLeague
+   season data + last-10 inputs from the settled-picks and real-match sets (build2/sig_calc.py, 10 Oct 2026). */
+function bbLeagueTier(lk) {
+  var k = String(lk || "").toLowerCase();
+  if (/^(nba|nba_gl|nba_summer|nba_pre|ncaa)$/.test(k)) return "nba";
+  if (/wnba|_w$|_w_|women|wcba|wnbl|kbsl|dbbl|ncaaw|japan_w|korea_w|lnbf|bsnf/.test(k)) return "women";
+  if (/^(euroleague|eurocup|acb|lba|bbl|turkey_bsl|ausnbl|aba|aba_pre|champions_league|proa|lkl|greece_a1|france_pro_a|bleague|korea_kbl|cba|nznbl|serbia_kls|united_league)$/.test(k)) return "top";
+  return "other";
 }
-function bbEvSigma(league, mk) {
-  var b = bbEvBucket(mk), L = bbEvLearned()[b];
-  if (L && L.n >= BB_EV_CONFIG.minNforLearned && isFinite(L.sd) && L.sd > 0) return L.sd;
-  return BB_EV_CONFIG.sigma[b] || 12;
+function bbLeagueSigmaRatio(lk) {
+  var k = String(lk || "").toLowerCase(), L = BB_LEAGUE_SIGMA.league[k];
+  if (Number.isFinite(L)) return { ratio: L, src: "league data" };
+  var t = bbLeagueTier(k), r = BB_LEAGUE_SIGMA.tierRatio[t];
+  return { ratio: Number.isFinite(r) ? r : 1, src: "tier " + t };
 }
+function bbEvLearnedFor(league, b) {
+  var all = bbEvLearned(), lk = String(league || "").toLowerCase();
+  var LL = lk ? all[lk + "|" + b] : null;
+  if (LL && LL.n >= BB_EV_CONFIG.minNforLearned) return { L: LL, scope: "league" };
+  var G = all[b];
+  if (G && G.n >= BB_EV_CONFIG.minNforLearned) return { L: G, scope: "global" };
+  return null;
+}
+/* Totals shrink k by league tier (user decision 10 Oct 2026): tier 1 = 0.20 (NBA, WNBA), tier 2 = 0.25 (EuroLeague/EuroCup/BCL,
+   top European leagues, NBL, KBL, B.League, CBA, FIBA senior national-team events), tier 3 = 0.30 (everything else; unmapped = 3).
+   Handicap/winner k stays 0.35 (1H/2H handicap 0.15). A league's own fitted k replaces this at 200+ settled picks with real odds. */
+var BB_LEAGUE_K_TIER = {"aba":2,"aba_pre":2,"acb":2,"albania_w":3,"albania_superliga":3,"angola_league":3,"argentina_liga_femenina":3,"argentina_lnb":3,"armenia_a_league":3,"aus_big_v":3,"aus_big_v_w":3,"ausnbl":2,"aus_nbl1_central_w":3,"aus_nbl1_east_w":3,"aus_nbl1_north_w":3,"aus_nbl1_south_w":3,"aus_nbl1_west_w":3,"aus_nbl1_central":3,"aus_nbl1_east":3,"aus_nbl1_north":3,"aus_nbl1_south":3,"aus_nbl1_west":3,"aus_wnbl":3,"austria_superliga":3,"austria_zweite":3,"azerbaijan_abl":3,"bahrain_premier":3,"bal":3,"belarus_premier":3,"belarus_premier_w":3,"belgium_top":3,"belgium_w":3,"bnxt":3,"bolivia_libobasquet":3,"bih_1st":3,"bih_w":3,"brazil_lbf_w":3,"brazil_nbb":3,"bulgaria_nbl":3,"bulgaria_w":3,"cba":2,"cebl":3,"chile_lnb":3,"chile_lnb2":3,"china_nbl":3,"china_wcba":3,"club_friendly":3,"colombia_wplay":3,"costarica_lsb":3,"croatia_premier":3,"cuba_lsb":3,"cyprus_div_a":3,"nbl_cz":3,"czech_w":3,"denmark_bliga":3,"denmark_w":3,"dr_lnb":3,"champions_league":2,"ecuador_basquetpro":3,"egypt_premier":3,"el_salvador_lmb":3,"england_slb":3,"england_slb_w":3,"estonia_kml":3,"estonia_w":3,"eurocup":2,"euroleague":2,"fiba_ac":2,"fiba_ac_w":3,"fiba_asia_preq":2,"fiba_eb":2,"fiba_eb_q":2,"fiba_eb_w":3,"fiba_intercontinental_cup":3,"fiba_u20eb_a":3,"fiba_u20eb_b":3,"finland_koris":3,"france_lfb_w":3,"proa":2,"prob":3,"georgia_super":3,"georgia_w":3,"bbl":2,"germany_dbbl":3,"germany_proa":3,"gb_super_league_w":3,"greece_a1_w":3,"bcl":2,"guatemala_national":3,"hongkong_a1":3,"hungary_nb1":3,"iceland_1st":3,"iceland_urvalsdeild":3,"iceland_urvalsdeild_w":3,"india_inbl":3,"indonesia_ibl":3,"intl_friendly":3,"iran_super_league":3,"ireland_super_league":3,"isl":2,"israel_w":3,"italy_a1_w":3,"lba":2,"italy_a2":3,"italy_a2_w":3,"italy_serb":3,"bleague":2,"japan_w":3,"jordan_premier":3,"kazakhstan_champ":3,"korea_kbl":2,"kosovo_superleague":3,"kuwait_div1":3,"latvia_lbl":3,"latvia_w":3,"lebanon_1st":3,"lkl":3,"lithuania_w":3,"luxembourg_total":3,"malta_div1":3,"mexico_cibacopa":3,"mexico_lnbp":3,"moldova_div1":3,"moldova_w":3,"mongolia_league":3,"montenegro_liga":3,"morocco_n1":3,"nznbl":3,"nicaragua_lsb":3,"nigeria_premier":3,"macedonia_w":3,"macedonia_superleague":3,"norway_blno":3,"norway_blno_w":3,"panama_lpb":3,"paraguay_lnb":3,"paraguay_lnbf":3,"peru_lnb":3,"phil_mpbl":3,"pba":3,"poland_1liga":3,"poland_blk":3,"plk":3,"portugal_lfb_w":3,"portugal_lpb":3,"portugal_proliga":3,"portugal_taca":3,"puerto_rico_bsn":3,"puerto_rico_bsnf":3,"qatar_league":3,"romania_ln":3,"romania_w":3,"russia_premier_w":3,"russia_super":3,"rwanda":3,"saudi_league":3,"saudi_league_w":3,"senegal_n1":3,"serbia_kls":3,"serbia_w":3,"singapore_nbl":3,"slovakia_sbl":3,"slovenia_1a":3,"slovenia_w":3,"safrica_bnl":3,"korea_w":3,"spain_liga_femenina":3,"spain_primera":3,"spain_segunda":3,"sweden_w":3,"sweden_sbl":3,"swiss_sbl":3,"swiss_w":3,"taipei_tpbl":3,"thailand_tbl":3,"tunisia_champ":3,"turkey_bsl":2,"turkey_tb2l":3,"turkey_tbl":3,"turkey_kbsl":3,"uae_national_league":3,"ukraine_superleague":3,"united_league":3,"uruguay_lfb_w":3,"uruguay_lub":3,"nba":1,"nba_gl":3,"nba_summer":3,"ncaa":3,"ncaaw":3,"wnba":1,"wnba_pre":1,"uzbekistan_super":3,"venezuela_sl":3,"vietnam_vba":3,"fiba_wc":2,"fiba_wc_q_africa":2,"fiba_wc_q_americas":2,"fiba_wc_q_asia":2,"fiba_wc_q_europe":2,"fiba_wc_w":3,"unknown":3};
+var BB_TIER_TOTALS_K = { 1: 0.20, 2: 0.25, 3: 0.30 };
+function bbLeagueKTier(league) { var t = BB_LEAGUE_K_TIER[String(league || "").toLowerCase()]; return t === 1 || t === 2 ? t : 3; }
+function bbIsTotalsBucket(b) { return b === "ft" || b === "period" || b === "quarter" || b === "team" || b === "h1team"; }
+function bbEvKInfo(league, mk) {
+  var b = bbEvBucket(mk), lk = String(league || "").toLowerCase(), all = bbEvLearned(), LL = lk ? all[lk + "|" + b] : null, tier = bbLeagueKTier(lk);
+  if (LL && LL.n >= BB_EV_CONFIG.minNforLearned && isFinite(LL.k)) return { k: Math.max(0, Math.min(1, LL.k)), tier: tier, src: "fitted on " + LL.n + " " + lk + " picks" };
+  if (bbIsTotalsBucket(b)) return { k: BB_TIER_TOTALS_K[tier], tier: tier, src: "tier " + tier };
+  return { k: BB_EV_CONFIG.k[b] != null ? BB_EV_CONFIG.k[b] : 0.35, tier: tier, src: "margin default" };
+}
+function bbEvK(league, mk) { return bbEvKInfo(league, mk).k; }
+function bbEvSigmaInfo(league, mk) {
+  var b = bbEvBucket(mk), f = bbEvLearnedFor(league, b), lr = bbLeagueSigmaRatio(league);
+  if (f && f.scope === "league" && isFinite(f.L.sd) && f.L.sd > 0) return { sd: f.L.sd, src: "fitted on " + f.L.n + " " + league + " picks" };
+  var base = f && isFinite(f.L.sd) && f.L.sd > 0 ? f.L.sd : (BB_EV_CONFIG.sigma[b] || 12);
+  return { sd: base * lr.ratio, src: (f ? "global fit" : "default") + " x " + lr.ratio.toFixed(3) + " (" + lr.src + ")" };
+}
+function bbEvSigma(league, mk) { return bbEvSigmaInfo(league, mk).sd; }
 function bbNormCdf(z) {
   var t = 1 / (1 + 0.3275911 * Math.abs(z) / Math.SQRT2);
   var y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-z * z / 2);
@@ -374,6 +411,7 @@ function bbFitShrinkFromTracker() {
     var x, t;
     if (/^handicap/.test(p.marketKey)) { var hl = p.lineSide === "away" ? -L : L; x = proj + hl; t = y + hl; } else { x = proj - L; t = y - L; }
     var b = bbEvBucket(p.marketKey); (by[b] = by[b] || []).push([x, t]);
+    if (p.oddsTyped && p.league) { var lb = String(p.league).toLowerCase() + "|" + b; (by[lb] = by[lb] || []).push([x, t]); }
   });
   var out = {};
   Object.keys(by).forEach(function (b) {
@@ -633,7 +671,7 @@ function bbNormTeam(s) {
 function bbNameScore(a, b) {
   var A = bbNormTeam(a), B = bbNormTeam(b); if (!A.length || !B.length) return 0;
   var hit = 0; A.forEach(function (w) { if (B.some(function (x) { return x === w || (w.length >= 4 && x.length >= 4 && (x.indexOf(w) === 0 || w.indexOf(x) === 0)); })) hit++; });
-  return hit / Math.max(A.length, B.length);
+  return hit >= 2 ? hit / Math.min(A.length, B.length) : hit / Math.max(A.length, B.length);
 }
 function bbSportyMatchEvent(events, home, away, startMs) {
   var mem = {}; try { mem = JSON.parse(localStorage.getItem("BB_SPORTY_MATCHES") || "{}"); } catch (_e) {}
@@ -649,9 +687,10 @@ function bbSportyMatchEvent(events, home, away, startMs) {
   var need = startMs ? 0.34 : 0.5;
   return best && bestScore >= need ? { event: best, score: bestScore, memKey: memKey } : null;
 }
-function bbSportyPickLine(markets, id, quarter) {
+function bbSportyPickLine(markets, id, quarter, wantLine) {
   var list = (markets || []).filter(function (m) { return String(m.id) === String(id) && (quarter == null || new RegExp("quarternr=" + quarter + "(\\||$)").test(String(m.specifier || ""))) && (m.status == null || Number(m.status) === 0 || Number(m.status) === 1); });
   if (!list.length) return null;
+  if (Number.isFinite(wantLine)) { list = list.filter(function (m) { var mm = /(total|hcp)=(-?[\d.]+)/.exec(String(m.specifier || "")); return mm && Number(mm[2]) === wantLine; }); if (!list.length) return null; }
   var fav = list.find(function (m) { return Number(m.favourite) === 1; });
   if (!fav) { /* no flag: take the line with odds closest to even */
     var bestD = Infinity; list.forEach(function (m) { var o = (m.outcomes || []).map(function (x) { return Number(x.odds); }); if (o.length === 2 && o.every(Number.isFinite)) { var d = Math.abs(o[0] - o[1]); if (d < bestD) { bestD = d; fav = m; } } });
@@ -737,12 +776,168 @@ async function bbFetchSportyOdds() {
   document.addEventListener("input", function (e) { if (e && e.target && (e.target.id === "teamAName" || e.target.id === "teamBName")) relabel(); });
   document.addEventListener("DOMContentLoaded", function () {
     relabel();
-    var c = document.getElementById("clearBtn");
-    if (c) c.addEventListener("click", function () { document.querySelectorAll("#oddsSection input").forEach(function (i) { i.value = ""; }); bbSportyStatus(""); });
-    var sb = document.getElementById("sportyFetchBtn"); if (sb) sb.addEventListener("click", function () { bbFetchSportyOdds(); });
     setTimeout(function () { try { bbFitShrinkFromTracker(); } catch (_e) {} }, 8000);
   });
 })();
+/* ---------- v2.1 UI pass (10 Oct 2026): auto SportyBet with stats, hidden odds for auto leagues, full Clear ---------- */
+function bbIsAutoLeague(lk) { try { return typeof isAutoFetchLeague === "function" && isAutoFetchLeague(String(lk || "")); } catch (_e) { return false; } }
+function bbCurLeague() { return String((document.getElementById("leagueSelect") || {}).value || ""); }
+function bbSetOddsVisible(show) { var s = document.getElementById("oddsSection"); if (s) s.style.display = show ? "" : "none"; }
+function bbSyncOddsVisibility() { var lk = bbCurLeague(); bbSetOddsVisible(!!lk && !bbIsAutoLeague(lk) && !(window.__bbSportyLast && window.__bbSportyLast.ok)); }
+function bbMarketStatus(msg, bad) { var el = document.getElementById("marketAutoStatus"); if (el) { el.textContent = msg || ""; el.style.color = bad ? "#d92d2a" : ""; } }
+function bbOddsReset() {
+  document.querySelectorAll("#oddsSection input").forEach(function (i) { i.value = ""; });
+  bbSportyStatus(""); bbMarketStatus("");
+  var t = document.getElementById("mAutoTag"); if (t) t.style.display = "none";
+  window.__bbSportyLast = null;
+}
+function bbFixtureStartMs() {
+  try {
+    var sel = document.getElementById("fixtureSelect"), opt = sel && sel.options[sel.selectedIndex];
+    var ed = opt && opt.dataset && opt.dataset.eventDate;
+    if (!ed) { var fm = typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null; ed = fm && (fm.eventDate || fm.startTimestamp); }
+    if (!ed) return 0;
+    var ms = typeof ed === "number" ? (ed < 1e12 ? ed * 1000 : ed) : Date.parse(ed);
+    return Number.isFinite(ms) ? ms : 0;
+  } catch (_e) { return 0; }
+}
+/* today + tomorrow window (local time), with a 3 h look-back for games about to start */
+function bbTodayTomorrow(e) {
+  var t = Number(e && e.estimateStartTime); if (!t) return true;
+  var now = new Date(), end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2).getTime();
+  return t >= now.getTime() - 3 * 3600000 && t < end;
+}
+async function bbSportyLookup(home, away, startMs) {
+  var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
+  var match = null, total = 0;
+  for (var page = 1; page <= 5 && !match; page++) {
+    var res = await fetch(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
+    var js = await res.json().catch(function () { return null; });
+    if (!res.ok || !js || js.bizCode !== 10000) throw new Error((js && (js.error || js.message)) || ("HTTP " + res.status));
+    var evs = (js.data && js.data.tournaments || []).reduce(function (a, t) { return a.concat(t.events || []); }, []);
+    if (!startMs) evs = evs.filter(bbTodayTomorrow);
+    total = js.data && js.data.totalNum || total;
+    match = bbSportyMatchEvent(evs, home, away, startMs);
+    if (page * 100 >= total) break;
+  }
+  if (!match) return { ok: false, reason: "no SportyBet game matched " + home + " v " + away + (startMs ? " (±15 min)" : " (today/tomorrow)") };
+  var r2 = await fetch(base + "/sporty/event?id=" + encodeURIComponent(match.event.eventId), { headers: { Accept: "application/json" } });
+  var j2 = await r2.json().catch(function () { return null; });
+  if (!r2.ok || !j2 || j2.bizCode !== 10000 || !j2.data) throw new Error((j2 && (j2.error || j2.message)) || ("HTTP " + r2.status));
+  try { var mem = JSON.parse(localStorage.getItem("BB_SPORTY_MATCHES") || "{}"); mem[match.memKey] = { home: match.event.homeTeamId, away: match.event.awayTeamId, eventId: match.event.eventId, at: Date.now() }; localStorage.setItem("BB_SPORTY_MATCHES", JSON.stringify(mem)); } catch (_e) {}
+  return { ok: true, event: match.event, data: j2.data };
+}
+/* keepLines: use the SportyBet price for the line already typed when that exact line is offered; otherwise the main line */
+function bbSportyApply(result, opts) {
+  opts = opts || {};
+  var token = opts.token;
+  if (token != null && token !== window.__bbSportyToken) return null; /* a newer fetch or Clear happened */
+  if (!result || !result.ok) {
+    window.__bbSportyLast = { ok: false };
+    bbSetOddsVisible(!!bbCurLeague());
+    var msg = "SportyBet: " + ((result && result.reason) || "fetch failed") + ". Type the odds below (and check the lines).";
+    bbSportyStatus(msg, true); bbMarketStatus("⚠ SportyBet odds not found - enter odds in the Odds section.", true);
+    return null;
+  }
+  var markets = result.data.markets || [], parsed = {};
+  BB_SPORTY_FIELDS.forEach(function (f) {
+    var want = NaN;
+    if (opts.keepLines && f[2]) { var el = document.getElementById(f[2]); var v = el ? String(el.value || "").trim() : ""; if (v !== "" && Number.isFinite(Number(v))) want = Number(v); }
+    var r = Number.isFinite(want) ? (bbSportyPickLine(markets, f[0], f[1], want) || null) : null;
+    if (!r) r = bbSportyPickLine(markets, f[0], f[1]);
+    if (r) parsed[f[5]] = { field: f, r: r };
+  });
+  var filled = bbSportyFill(parsed);
+  window.__bbSportyLast = { ok: true, eventId: result.event.eventId, filled: filled, at: Date.now() };
+  var tag = document.getElementById("mAutoTag"); if (tag) tag.style.display = filled.length ? "inline" : "none";
+  bbSetOddsVisible(false);
+  bbSportyStatus("SportyBet " + result.data.homeTeamName + " v " + result.data.awayTeamName + ": " + filled.length + " market(s) filled.");
+  bbMarketStatus("SportyBet: " + result.data.homeTeamName + " v " + result.data.awayTeamName + " - " + filled.length + " markets, odds stored.");
+  return filled;
+}
+async function bbSportyRun(opts) {
+  opts = opts || {};
+  var home = String((document.getElementById("teamAName") || {}).value || "").trim(), away = String((document.getElementById("teamBName") || {}).value || "").trim();
+  var token = (window.__bbSportyToken = (window.__bbSportyToken || 0) + 1);
+  if (!home || !away) return bbSportyApply({ ok: false, reason: "team names missing" }, { token: token });
+  bbMarketStatus("SportyBet: looking up " + home + " v " + away + "…");
+  var res;
+  try { res = await (opts.pending || bbSportyLookup(home, away, opts.startMs != null ? opts.startMs : bbFixtureStartMs())); }
+  catch (e) { res = { ok: false, reason: "fetch failed (" + String(e && e.message || e) + ")" }; }
+  return bbSportyApply(res, { token: token, keepLines: !!opts.keepLines });
+}
+/* wraps the Fetch Stats pipeline: SportyBet lookup runs in parallel, lines/odds are applied after the stats land */
+async function bbFetchWithSporty(core, self, args) {
+  var lk = bbCurLeague();
+  if (!bbIsAutoLeague(lk)) return core.apply(self, args);
+  bbOddsReset(); bbSetOddsVisible(false);
+  var home = String((document.getElementById("teamAName") || {}).value || "").trim(), away = String((document.getElementById("teamBName") || {}).value || "").trim();
+  var pending = home && away ? bbSportyLookup(home, away, bbFixtureStartMs()).catch(function (e) { return { ok: false, reason: "fetch failed (" + String(e && e.message || e) + ")" }; }) : null;
+  var out;
+  try { out = await core.apply(self, args); }
+  finally { if (pending) { try { await bbSportyRun({ pending: pending }); } catch (_e) {} } }
+  return out;
+}
+/* manual inputs-JSON paste: match SportyBet by names (today/tomorrow), keep the typed lines when SportyBet offers them */
+function bbAfterInputsJson() {
+  window.__bbSportyLast = null;
+  return bbSportyRun({ startMs: 0, keepLines: true }).catch(function () {});
+}
+(function () {
+  if (typeof document === "undefined") return;
+  document.addEventListener("DOMContentLoaded", function () {
+    var ls = document.getElementById("leagueSelect");
+    if (ls) ls.addEventListener("change", function () { bbOddsReset(); bbSyncOddsVisibility(); });
+    var c = document.getElementById("clearBtn");
+    if (c) c.addEventListener("click", function () {
+      window.__bbSportyToken = (window.__bbSportyToken || 0) + 1;
+      bbOddsReset();
+      document.querySelectorAll("textarea").forEach(function (t) { t.value = ""; });
+      ["teamAName", "teamBName"].forEach(function (id) { var el = document.getElementById(id); if (el) el.value = ""; });
+      var p = document.getElementById("bbEvPanel"); if (p) p.remove();
+      window.__bbSeasonInfo = {}; window.__bbH2HInfo = {};
+      ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag", "aIntegrityTag", "bIntegrityTag"].forEach(function (id) { var el = document.getElementById(id); if (el) el.style.display = "none"; });
+      bbSyncOddsVisibility();
+    });
+    var sb = document.getElementById("sportyFetchBtn");
+    if (sb) sb.addEventListener("click", function () { bbSportyRun({ keepLines: true }); });
+    bbSyncOddsVisibility();
+  });
+})();
+/* price info for the existing results table (ⓘ details + title); no separate table */
+function bbPriceText(p, league) {
+  try {
+    if (!p || !p.marketKey || typeof bbEvalForPick !== "function") return "";
+    var e = bbEvalForPick(p, league || bbCurLeague()); if (!e) return "";
+    var bits = [];
+    var sideName = /^handicap|winner/.test(String(p.marketKey)) ? (e.side === "a" ? "Home" : "Away") : (e.side === "a" ? "Over" : "Under");
+    if (Number.isFinite(e.p)) bits.push("P(" + sideName + ") " + (e.p * 100).toFixed(1) + "%");
+    if (e.fair != null) bits.push("market fair " + (e.fair * 100).toFixed(1) + "%");
+    if (e.odds) bits.push("odds " + e.odds.toFixed(2));
+    if (e.ev != null) bits.push("EV " + (e.ev >= 0 ? "+" : "") + (e.ev * 100).toFixed(1) + "%");
+    if (e.fairLine != null) bits.push("fair line " + e.fairLine.toFixed(1));
+    try { var si = bbEvSigmaInfo(league || bbCurLeague(), p.marketKey); var ki = bbEvKInfo(league || bbCurLeague(), p.marketKey); bits.push("tier " + ki.tier + ", k " + ki.k.toFixed(2) + " [" + ki.src + "], σ " + si.sd.toFixed(1) + " [" + si.src + "]"); } catch (_s) {}
+    var play = /^(OVER|UNDER|HOME|AWAY)/i.test(String(p.pick || ""));
+    if (play && p.stakePct) bits.push("stake " + (p.stakePct * 100).toFixed(2) + "% of bankroll");
+    if (play && p.gradeLabel) bits.push("grade " + p.gradeLabel);
+    var why = play ? (e.reason || "") : (p.noPlayReason || e.reason || "");
+    return bits.join(" · ") + (why ? " | " + why : "");
+  } catch (_e) { return ""; }
+}
+function bbAppendPriceInfo(details, p, league, td) {
+  var txt = bbPriceText(p, league); if (!txt) return;
+  try { var d = document.createElement("div"); d.className = "bb-price-info"; d.style.cssText = "font-size:11px;margin-top:4px;white-space:normal;opacity:.9"; d.textContent = "💰 " + txt; details.appendChild(d); } catch (_e) {}
+  try { if (td) td.title = (td.title ? td.title + "\n" : "") + txt; } catch (_e) {}
+}
+function bbHandleInputsPaste(el) {
+  var raw = String(el && el.value || "").trim(); if (!raw) return;
+  var o = null; try { o = JSON.parse(raw); } catch (_e) { return; } /* wait until the paste is complete JSON */
+  if (!bbLooksLikeInputsJson(o)) { bbMarketStatus("Pasted JSON is not an inputs export (needs leagueSelect / teamAName / aFTScored).", true); return; }
+  var r = bbApplyInputsJson(o); el.value = "";
+  bbMarketStatus("Inputs JSON applied (" + r.applied + " fields). Looking up SportyBet odds…");
+  bbAfterInputsJson();
+}
+
 /* =================== END BB-EV MODULE v2 =================== */</script><title>Basketball Prediction Engine</title>
 
 <style id="bb-critical-lock">
@@ -3726,7 +3921,7 @@ body.dark-mode .tracker-analytics-section-head {
         location.reload();
       "
     >
-      🔒 LOCK
+      PREDICTIONS
     </button>
   </span>
 </header>
@@ -4337,7 +4532,8 @@ body.dark-mode .tracker-analytics-section-head {
     <div id="ssFetchStatus" style="font-size: 10px; min-height: 16px; margin-top: 6px"></div>
   </div>
   <div class="section" id="marketSection">
-    <h3>Market Lines</h3>
+    <h3>Market Lines <span class="autofill-indicator" id="mAutoTag">✅ Auto-filled</span></h3>
+    <div id="marketAutoStatus" style="font-size: 10px; min-height: 12px; margin: -4px 0 6px"></div>
 
     <div
       id="marketCoreGrid"
@@ -4533,11 +4729,11 @@ body.dark-mode .tracker-analytics-section-head {
     </div>
   </div>
 
-  <div class="section" id="oddsSection">
+  <div class="section" id="oddsSection" style="display:none">
     <h3>Odds (required for a PLAY) - Team A = HOME, Team B = AWAY</h3>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-      <button id="sportyFetchBtn" type="button">Fetch SportyBet odds</button>
-      <span id="sportyStatus" style="font-size:12px;opacity:.85">Fills the main (favourite) line and its odds per market. Manual entry always works.</span>
+      <button id="sportyFetchBtn" type="button">↻ Retry SportyBet</button>
+      <span id="sportyStatus" style="font-size:12px;opacity:.85">Type the odds, or tap Retry to look the game up on SportyBet again.</span>
     </div>
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px">
       <input id="ftOverOdds" placeholder="FT Over odds" /><input id="ftUnderOdds" placeholder="FT Under odds" />
@@ -4653,6 +4849,7 @@ body.dark-mode .tracker-analytics-section-head {
 <div class="actions">
   <button id="runBtn" type="button">Run</button>
   <button id="clearBtn" type="button">Clear</button>
+  <input id="inputsPasteBox" placeholder="Paste inputs JSON" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" oninput="bbHandleInputsPaste(this)" style="width:130px;font-size:16px;padding:5px 8px;margin:0" aria-label="Paste inputs JSON" />
   <button
     id="inputsCopyBtn"
     type="button"
@@ -6623,7 +6820,7 @@ async function parseSofascoreIndividual(side) {
         "SofaScore returned a 403 anti-bot challenge, not data. Open the link from the www.sofascore.com host (the buttons now do this), or try again from a desktop/other browser.",
       );
     }
-    if (typeof bbLooksLikeInputsJson === "function" && bbLooksLikeInputsJson(parsed)) { const _bbIn = bbApplyInputsJson(parsed); if (st) { st.style.color = ""; st.textContent = "Inputs JSON applied: " + _bbIn.applied + " field(s)" + (_bbIn.missing.length ? " (unknown: " + _bbIn.missing.slice(0, 5).join(", ") + ")" : ""); } if (pasteEl) pasteEl.value = ""; return; }
+    if (typeof bbLooksLikeInputsJson === "function" && bbLooksLikeInputsJson(parsed)) { const _bbIn = bbApplyInputsJson(parsed); if (st) { st.style.color = ""; st.textContent = "Inputs JSON applied: " + _bbIn.applied + " field(s)" + (_bbIn.missing.length ? " (unknown: " + _bbIn.missing.slice(0, 5).join(", ") + ")" : ""); } if (pasteEl) pasteEl.value = ""; try { bbAfterInputsJson(); } catch (_bbAj) {} return; }
     let events = ssExtractPastedEvents(parsed);
     try { bbStoreIngest(events, "paste " + side); } catch (_bbSI) {} /* DECISIONS 5: background team-results store */
     if (!events.length) {
@@ -28402,7 +28599,7 @@ const FIELD_GROUPS = {
     "aQ4H2H",
     "bQ4H2H",
   ],
-  autoTags: ["aAutoTag", "bAutoTag", "h2hAutoTag"],
+  autoTags: ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag"],
   periodInputs: [
     "a1HScored",
     "a1HAllowed",
@@ -33026,7 +33223,8 @@ function pickFixture(homeName, homeId, awayName, awayId, eventDate) {
   setStatusHTML('<span class="spinner"></span>Match selected. Fetching stats...', "loading");
   withErrorBoundary(fetchESPN, "fetchESPN_pickFixture")();
 }
-async function fetchESPN() {
+async function fetchESPN() { return bbFetchWithSporty(fetchESPN_CORE, this, arguments); }
+async function fetchESPN_CORE() {
   const league = document.getElementById("leagueSelect").value;
   const teamAName = document.getElementById("teamAName").value.trim();
   const teamBName = document.getElementById("teamBName").value.trim();
@@ -38292,9 +38490,9 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       p.line,
     );
     const confText = isNoPlay /* FIX #7: never print the string "NaN" as a grade */
-      ? "—"
+      ? "NaN"
       : p.confidence === "—" || p.confidence === "NaN" || !p.confidence
-        ? "—"
+        ? "NaN"
         : (p.confidenceDisplay && p.confidenceDisplay !== "NaN" ? p.confidenceDisplay : p.confidence);
     const shownLine = p.line;
     const shownEdge = p.edge;
@@ -38366,6 +38564,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       predSpan.style.cursor = "pointer";
       const details = buildPickExplanationDetails(p, false);
       details.open = false;
+      try { bbAppendPriceInfo(details, p, league, null); } catch (_bbPi) {}
       predSpan.addEventListener("click", function (e) {
         e.stopPropagation();
         details.open = !details.open;
@@ -38374,6 +38573,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       predContainer.appendChild(details);
       tdPred.appendChild(predContainer);
       tdPred.title = humanizeNoPlayReason(p);
+      try { const _bbPt = bbPriceText(p, league); if (_bbPt) tdPred.title += "\n" + _bbPt; } catch (_bbPt2) {}
     } else {
       tdPred.className = getPredictionClass(p.pick);
       tdPred.style.whiteSpace = "nowrap";
@@ -38392,6 +38592,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       }
       const details = buildPickExplanationDetails(p, isLock);
       details.open = false;
+      try { bbAppendPriceInfo(details, p, league, tdPred); } catch (_bbPi) {}
       predSpan.addEventListener("click", function (e) {
         e.stopPropagation();
         details.open = !details.open;
@@ -40919,7 +41120,7 @@ async function runEngine() {
     );
     window.__lastRunParsed = parsed;
     window.__lastRunFinalPicks = finalPicksForDisplay; /* BB-FIX #5: exposed so the meta.mid proof test can read the real pipeline output */
-    try { bbRenderEvPanel(finalPicksForDisplay); } catch (_bbP) {} /* FIX_GUIDE step 11 */
+    try { var _bbOld = document.getElementById("bbEvPanel"); if (_bbOld) _bbOld.remove(); } catch (_bbP) {} /* v2.1: price info lives in the results table ⓘ */
     window.__lastRunFinalLines = finalLines;
     window.__lastRunLeague = league;
     window.__lastRunFixtureMeta = fixtureMeta;
