@@ -1,3 +1,4 @@
+S
 <!--
 BB ENGINE PATCH RECORD
 Changes made in this version:
@@ -7,6 +8,13 @@ Changes made in this version:
 4. Candidate configuration selection rejects missing candidate Brier metrics when a baseline Brier metric exists, reports empty calibration samples as null/count=0, and ranks by total improvement before efficiency.
 5. Tracker snapshot promotion threshold increased from z=0.5 to z=1.96; this is a conservative threshold change, not a substitute for a fully specified statistical validation design.
 6. Removed UNDER_EDGE_FACTOR candidate scoring from calibrateEngineConstants because the active price-aware getPick path does not consume that threshold override; the tuner must not promote a parameter that cannot affect active decisions.
+v3 (pass 5) additions:
+7. bbFitShrinkFromTracker: slope now fitted through the origin on the SAME signal the live model uses (OT allowance included); sigma = residual SD around k*x. Pure core bbFitShrinkRows added.
+8. bbEvaluateSignal accepts optional extra.odds / noPlayBlock / minEV / sd so the maths is unit-testable without the DOM (live behaviour unchanged).
+9. Removed dead getPick_LEGACY. Unfitted confidence model is now neutral (p=0.5) instead of invented coefficients.
+10. New validation harness (CALC-AUDIT-325): bbBacktest, bbPromoteDecision, bbDriftCheck, bbRunSelfTests, bbBacktestFromTracker (console). Seeded bootstrap CIs, calibration, Brier vs de-vigged market, walk-forward recalibration.
+11. Kill switch: stakes forced to 0 when rolling-100 real-odds ROI has 95% upper bound < 0.
+Console: bbRunSelfTests() runs 23 maths tests; bbBacktestFromTracker() reports out-of-sample evidence once you have settled picks.
 Validation: all 15 embedded JavaScript blocks pass Node.js syntax checks.
 Limitations: no historical results/odds dataset was supplied, so real-world calibration/profitability cannot be verified. The entire source has not been exhaustively revalidated against all runtime flows; remaining audit items should not be considered proven fixed by syntax checks alone.
 -->
@@ -325,7 +333,7 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   extra = extra || {};
   var out = { ok: false, reason: "", mk: mk };
   if (!Number.isFinite(signedSignal)) { out.reason = "no projection (missing inputs)"; return out; }
-  var k = Number.isFinite(kOverride) ? kOverride : bbEvK(league, mk), sd = bbEvSigma(league, mk), mu = k * signedSignal;
+  var k = Number.isFinite(kOverride) ? kOverride : bbEvK(league, mk), sd = Number.isFinite(extra.sd) && extra.sd > 0 ? extra.sd : bbEvSigma(league, mk), mu = k * signedSignal; /* v3: extra.sd/odds/noPlayBlock/minEV are optional injections so the maths can be unit-tested without the DOM */
   /* CALC-AUDIT B1: whole-number lines can push (stake refunded). Scores are integers, so
      P(win a) = P(X >= line+1) ~ Phi((mu-0.5)/sd), P(win b) ~ Phi((-mu-0.5)/sd), push = the rest.
      Half-point lines keep Phi(mu/sd). Winner has no line (OT decides). */
@@ -334,7 +342,7 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   var pa, pbWin, push = 0;
   if (isInt) { var _ra = bbNormCdf((mu - 0.5) / sd), _rb = bbNormCdf((-mu - 0.5) / sd); push = Math.max(0, 1 - _ra - _rb); pa = Math.min(BB_EV_CONFIG.maxProb, _ra); pbWin = Math.min(BB_EV_CONFIG.maxProb, _rb); } /* push from raw CDFs; caps apply to win probabilities only */
   else { var _rawPa = bbNormCdf(mu / sd); pa = Math.min(BB_EV_CONFIG.maxProb, _rawPa); pbWin = Math.min(BB_EV_CONFIG.maxProb, 1 - _rawPa); } /* each side is capped independently */
-  var odds = bbReadOdds(mk), fair = bbDevig(odds.a, odds.b);
+  var odds = extra.odds || bbReadOdds(mk), fair = bbDevig(odds.a, odds.b);
   out.k = k; out.sd = sd; out.mu = mu; out.pA = pa; out.pPush = push;
   out.fairLine = Number.isFinite(extra.line) ? (extra.margin ? extra.line - mu : extra.line + mu) : null; /* line at which the model is 50/50 */
   out.fairOddsA = (1 - push) / pa; out.fairOddsB = (1 - push) / pbWin;
@@ -357,7 +365,7 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   var sideTxt = function (s) { return (/^handicap|winner/.test(String(mk)) ? (s === "a" ? "Home" : "Away") : (s === "a" ? "Over" : "Under")); };
   var fl = out.fairLine != null ? ", fair line " + out.fairLine.toFixed(1) : "";
   var pTxt = "P(" + sideTxt(lean.side) + ")=" + (lean.p * 100).toFixed(1) + "%" + (push > 0 ? ", push " + (push * 100).toFixed(1) + "%" : "") + fl + ", fair odds " + ((1 - push) / lean.p).toFixed(2);
-  var block = bbIsNoPlayCompetition();
+  var block = extra.noPlayBlock != null ? extra.noPlayBlock : bbIsNoPlayCompetition();
   if (block) { out.reason = block + " (" + pTxt + ")"; return out; }
   if (!best.dec) { out.reason = "NO PLAY - enter odds (" + pTxt + ")"; return out; }
   /* Compare conditional win probability to conditional market breakeven; raw P(win) includes pushes. */
@@ -365,7 +373,7 @@ function bbEvaluateSignal(signedSignal, league, mk, kOverride, extra) {
   var conditionalBreakeven = 1 / best.dec;
   out.conditionalWinProbability = conditionalWinProb;
   out.grade = (best.ev >= BB_EV_CONFIG.grade.A && conditionalWinProb - conditionalBreakeven >= BB_EV_CONFIG.grade.Ape) ? "A" : best.ev >= BB_EV_CONFIG.grade.B ? "B" : best.ev >= BB_EV_CONFIG.grade.C ? "C" : "D";
-  var minEV = bbMinEV();
+  var minEV = Number.isFinite(extra.minEV) ? extra.minEV : bbMinEV();
   var head = sideTxt(best.side) + " P=" + (best.p * 100).toFixed(1) + "%" + (push > 0 ? " (push " + (push * 100).toFixed(1) + "%)" : "") + " vs breakeven " + (best.be * 100).toFixed(1) + "% @ " + best.dec.toFixed(2) + ", EV " + (best.ev >= 0 ? "+" : "") + (best.ev * 100).toFixed(1) + "%";
   if (!fair) { out.reason = "NO PLAY - NEED BOTH ODDS (" + head + "; enter the " + sideTxt(best.side === "a" ? "b" : "a") + " price too so the bookmaker margin can be removed and checked" + fl + ")"; out.needBothOdds = true; return out; } /* v2.5: a PLAY requires both sides */
   if (conditionalWinProb - conditionalBreakeven < BB_EV_CONFIG.minEdgeVsBreakeven) { out.reason = head + ": conditional P - conditional breakeven < " + (BB_EV_CONFIG.minEdgeVsBreakeven * 100) + "pp" + fl; return out; }
@@ -480,6 +488,12 @@ function bbApplyBetLimits(picks, league) {
       if (e && Number.isFinite(e.p)) p.winProbability = e.p;
       p.stakePct = e ? e.stake : 0;
     });
+    /* v3 kill switch: if the last 100 settled real-odds picks have a ROI whose 95% upper bound is below 0, stake nothing until reviewed */
+    try {
+      var _dc = typeof bbDriftCheck === "function" && typeof getAllTrackedPicksForReport === "function" ? bbDriftCheck(getAllTrackedPicksForReport()) : null;
+      window.__bbDrift = _dc;
+      if (_dc && _dc.halt) bets.forEach(function (p) { p.stakePct = 0; p.killSwitch = _dc.reason; });
+    } catch (_k) {}
     bets.sort(function (x, y) { return ((y.bbEv && y.bbEv.ev) || -9) - ((x.bbEv && x.bbEv.ev) || -9); });
     var kept = [];
     bets.forEach(function (p) {
@@ -525,7 +539,8 @@ function bbRenderEvPanel(picks) {
       return "<tr><td>" + esc(p.name || p.marketKey) + "</td><td>" + esc(play ? p.pick : "NO PLAY") + "</td><td>" + Number(p.proj).toFixed(1) + "</td><td>" + (e.fairLine != null ? e.fairLine.toFixed(1) : "—") + "</td><td>" + (Number.isFinite(e.p) ? (e.p * 100).toFixed(1) + "%" : "—") + "</td><td>" + (e.fair != null ? (e.fair * 100).toFixed(1) + "%" : "—") + "</td><td>" + (e.odds ? e.odds.toFixed(2) : "—") + "</td><td>" + (e.ev != null ? (e.ev * 100).toFixed(1) + "%" : "—") + "</td><td>" + (play ? esc(p.gradeLabel || e.grade || "") : "") + "</td><td>" + (play ? ((p.stakePct || 0) * 100).toFixed(2) + "%" : "") + "</td><td style='opacity:.75'>" + esc(play ? (e.reason || "") : (p.noPlayReason || e.reason || "")) + "</td></tr>";
     });
     var roi = bbRoiReport();
-    box.innerHTML = "<div style='font-weight:bold'>Price check (odds required for a PLAY; P = model, Fair = de-vigged market)</div>" +
+    box.innerHTML = ((window.__bbDrift && window.__bbDrift.warn) ? "<div style='font-weight:bold;color:#c00'>" + (window.__bbDrift.halt ? "STAKING HALTED: " : "WARNING: ") + esc(window.__bbDrift.reason) + "</div>" : "") +
+      "<div style='font-weight:bold'>Price check (odds required for a PLAY; P = model, Fair = de-vigged market)</div>" +
       "<table style='width:100%'><tr><th>Market</th><th>Pick</th><th>Proj</th><th>Fair line</th><th>P</th><th>Fair</th><th>Odds</th><th>EV</th><th>Grade</th><th>Stake</th><th>Reason</th></tr>" + rows.join("") + "</table>" +
       "<div style='opacity:.75'>Grades are " + (n >= BB_EV_CONFIG.calibratedAfter ? "calibrated" : "UNCALIBRATED (" + n + "/" + BB_EV_CONFIG.calibratedAfter + " settled picks with real odds)") + ". Stake = quarter-Kelly, max 2% of bankroll, max " + BB_EV_CONFIG.maxBetsPerGame + " bets per game." +
       (roi && roi.settled ? " Tracker: " + roi.wins + "-" + roi.losses + ", real-odds ROI " + (roi.realOddsRoi != null ? (roi.realOddsRoi * 100).toFixed(1) + "% (n=" + roi.picksWithRealOdds + ")" : "n/a") + ", avg CLV " + (roi.avgCLVpoints != null ? roi.avgCLVpoints.toFixed(2) + " pts (n=" + roi.clvN + ")" : "n/a") : "") + "</div>";
@@ -544,6 +559,17 @@ function bbActualForPick(p) {
   } catch (_e) {}
   return null;
 }
+/* v3 (pass 5): pure fit. The live model applies mu = k * x with NO intercept, so k is fitted through the origin
+   (k = sum(x*t) / sum(x*x)) and sigma is the residual SD around k*x. The old code fitted a centred slope with an
+   intercept and then applied it without one. x must be built exactly as the live signal is built (proj + OT allowance - line,
+   or proj + home line for handicaps) so the fit and the application share one definition. */
+function bbFitShrinkRows(d) {
+  var n = d ? d.length : 0; if (n < 20) return null;
+  var sxx = 0, sxt = 0; d.forEach(function (r) { sxx += r[0] * r[0]; sxt += r[0] * r[1]; });
+  if (!(sxx > 0)) return null;
+  var kk = sxt / sxx, ss = 0; d.forEach(function (r) { var e = r[1] - kk * r[0]; ss += e * e; });
+  return { n: n, k: kk, sd: Math.sqrt(Math.max(1e-9, ss / Math.max(1, n - 1))) };
+}
 function bbFitShrinkFromTracker() {
   var picks = [];
   try { picks = typeof getAllTrackedPicksForReport === "function" ? getAllTrackedPicksForReport() : []; } catch (_e) {}
@@ -553,17 +579,14 @@ function bbFitShrinkFromTracker() {
     var y = bbActualForPick(p), proj = Number(p.projection), L = Number(p.lineAtPick != null ? p.lineAtPick : p.line);
     if (y == null || !Number.isFinite(proj) || !Number.isFinite(L) || p.marketKey === "winner") return;
     var x, t;
-    if (/^handicap/.test(p.marketKey)) { var hl = p.lineSide === "away" ? -L : L; x = proj + hl; t = y + hl; } else { x = proj - L; t = y - L; }
+    if (/^handicap/.test(p.marketKey)) { var hl = p.lineSide === "away" ? -L : L; x = proj + hl; t = y + hl; } else { x = proj + bbOtAllowance(p.marketKey) - L; t = y - L; }
     var b = bbEvBucket(p.marketKey); (by[b] = by[b] || []).push([x, t]);
     if (p.oddsTyped && p.league) { var lb = String(p.league).toLowerCase() + "|" + b; (by[lb] = by[lb] || []).push([x, t]); }
   });
   var out = {};
   Object.keys(by).forEach(function (b) {
-    var d = by[b], n = d.length; if (n < 20) return;
-    var mx = 0, my = 0; d.forEach(function (r) { mx += r[0]; my += r[1]; }); mx /= n; my /= n;
-    var sxx = 0, sxy = 0, syy = 0; d.forEach(function (r) { sxx += (r[0] - mx) * (r[0] - mx); sxy += (r[0] - mx) * (r[1] - my); syy += (r[1] - my) * (r[1] - my); });
-    var kk = sxx > 0 ? sxy / sxx : null; /* P2: sigma = residual SD around the fitted shrink, not the raw SD of (actual - line) */
-    out[b] = { n: n, k: kk, sd: Math.sqrt(Math.max(1e-9, (syy - (kk != null ? kk * sxy : 0)) / Math.max(1, n - 2))), fittedAt: new Date().toISOString() };
+    var f = bbFitShrinkRows(by[b]); if (!f) return;
+    out[b] = { n: f.n, k: f.k, sd: f.sd, fittedAt: new Date().toISOString() };
   });
   try { localStorage.setItem("BB_EV_LEARNED", JSON.stringify(out)); } catch (_e) {}
   return out;
@@ -28726,7 +28749,7 @@ function bbStrictFinite(v) {
 }
 // ========== CALC-AUDIT-223: CORE NUMERIC HELPERS — END ==========
 // ========== CALC-AUDIT-224: PICK AND SIGNAL EVALUATION — BEGIN ==========
-// AUDIT-NAV: members: applyEdgeMult, computeEffectivePointThreshold, getPick, getPick_LEGACY
+// AUDIT-NAV: members: applyEdgeMult, computeEffectivePointThreshold, getPick
 // AUDIT-NAV: calls other labeled calc code: applyEdgeMult, bbEvaluateTotal, bbOverEdgeBump, bbProtectedUnderFactorFloor, bbStrictFinite
 // AUDIT-NAV: (cont.) bbUnderEdgeFactor, computeEffectivePointThreshold, displayLine, getLeagueEdgePointThreshold, getParam
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
@@ -28793,32 +28816,6 @@ function getPick(edge, line, league, marketKey, context = {}) {
   if (context && typeof context === "object") context.bbEv = _ev;
   if (!_ev.ok) { if (context) context.noPlayReason = _ev.reason; return "NO PLAY"; }
   return _ev.side === "a" ? "OVER " + displayLine(line) : "UNDER " + displayLine(line);
-}
-function getPick_LEGACY(edge, line, league, marketKey, context = {}) {
-  if (!bbStrictFinite(edge) || !bbStrictFinite(line) || Number(line) <= 0) {
-    if (context) context.noPlayReason = "missing/invalid market line or edge";
-    return "NO PLAY";
-  }
-  if (edge === 0) {
-    if (context) context.noPlayReason = "zero edge";
-    return "NO PLAY";
-  }
-  if (!(context && context._edgeAlreadyScaled)) {
-    edge = applyEdgeMult(edge, league, context?.edgeMult);
-  }
-  if (context && typeof context === "object") context.scaledEdge = edge;
-  const absEdge = Math.abs(edge);
-  if (absEdge < 0.5) { if (context) context.noPlayReason = "absolute edge " + absEdge.toFixed(1) + " < 0.5-point floor"; return "NO PLAY"; }
-  /* BB-FIX (threshold display consistency): the base x Under-factor x blowout arithmetic now lives in
-     computeEffectivePointThreshold() (same operations, same order, same floors as before). getPick publishes the
-     final value on context.effectiveThreshold so the diagnostic text can show exactly what this gate compared against. */
-  const pointThreshold = computeEffectivePointThreshold(league, marketKey, edge, context).effective;
-  if (context && typeof context === "object") context.effectiveThreshold = pointThreshold;
-  if (absEdge < pointThreshold) {
-    if (context) context.noPlayReason = "edge " + absEdge.toFixed(1) + " < threshold " + Number(pointThreshold).toFixed(1);
-    return "NO PLAY";
-  }
-  return edge > 0 ? "OVER " + displayLine(line) : "UNDER " + displayLine(line);
 }
 // ========== CALC-AUDIT-224: PICK AND SIGNAL EVALUATION — END ==========
 // ========== CALC-AUDIT-225: CALCULATION-RELATED DEPENDENCIES (PARAMETER ACCESS, VALIDATION GATES, EXPORTS) — BEGIN ==========
@@ -29316,7 +29313,7 @@ function getConfidenceWinProbability(
       engineDebug("Confidence coefficient load failed", { error: e?.message || String(e), league });
   }
   const _requiredCoeffKeys = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
-  const DEFAULT_CONFIDENCE_COEFF = { intercept: -0.2, edgePct: 0.5, volRatio: -0.3, sampleFull: 0.2, h2h: 0.1, trap: -0.5 };
+  const DEFAULT_CONFIDENCE_COEFF = { intercept: 0, edgePct: 0, volRatio: 0, sampleFull: 0, h2h: 0, trap: 0 }; /* v3: unfitted = neutral (p=0.5), never invented weights */
   const _coeffFitted = !!(coeff && _requiredCoeffKeys.every((k) => Number.isFinite(coeff[k])));
   let _confidenceFallbackReason = null;
   if (!_coeffFitted) {
@@ -29362,7 +29359,7 @@ function getConfidenceWinProbability(
     trap: trap,
     league: league,
   });
-  const _unfitted = !(coeff && (coeff.edgePct != null || coeff._fitted === true));
+  const _unfitted = !(coeff && (coeff.edgePct != null || coeff._fitted === true)) || !!_confidenceFallbackReason;
   const _ALLOWED_CONF_KEYS = ["intercept", "edgePct", "volRatio", "sampleFull", "h2h", "trap"];
   const _cleanCoeff = {};
   _ALLOWED_CONF_KEYS.forEach((k) => { if (coeff && bbStrictFinite(coeff[k])) _cleanCoeff[k] = Number(coeff[k]); });
@@ -44595,5 +44592,145 @@ const fixtureSelect = document.getElementById("fixtureSelect");
   setTimeout(window.updateLeagueDropdownIndicators, 1000);
 });</script>
 
+<script>
+/* ========== CALC-AUDIT-325: VALIDATION HARNESS (pure maths, no DOM/storage) — BEGIN ==========
+   AUDIT-NAV: members: bbBacktest, bbPromoteDecision, bbDriftCheck, bbRunSelfTests, bbBacktestFromTracker [MIXED]
+   Purpose: out-of-sample evidence. Every statistic carries a 95% bootstrap CI from a SEEDED generator (reproducible).
+   Nothing here changes a pick by itself except the kill switch in bbApplyBetLimits (stake -> 0 when halted). */
+(function (root) {
+  "use strict";
+  function rng(seed) { var a = seed >>> 0; return function () { a = (a + 0x6D2B79F5) | 0; var t = Math.imul(a ^ (a >>> 15), 1 | a); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+  function mean(a) { var s = 0; for (var i = 0; i < a.length; i++) s += a[i]; return a.length ? s / a.length : null; }
+  function bootCI(vals, B, seed) {
+    var n = vals.length; if (n < 2) return { mean: mean(vals), lo: null, hi: null, n: n };
+    var r = rng(seed || 12345), ms = [];
+    for (var b = 0; b < (B || 1000); b++) { var s = 0; for (var i = 0; i < n; i++) s += vals[(r() * n) | 0]; ms.push(s / n); }
+    ms.sort(function (x, y) { return x - y; });
+    return { mean: mean(vals), lo: ms[Math.floor(0.025 * ms.length)], hi: ms[Math.min(ms.length - 1, Math.floor(0.975 * ms.length))], n: n };
+  }
+  function clean(rows) {
+    var out = [];
+    (rows || []).forEach(function (r, idx) {
+      if (!r) return;
+      var res = String(r.resultStatus || r.result || "").toLowerCase();
+      if (res !== "win" && res !== "loss") return; /* pushes carry no win/loss information for calibration */
+      var p = Number(r.modelProb != null ? r.modelProb : r.winProbability);
+      if (!(p > 0 && p < 1)) return;
+      var o = Number(r.oddsDecimal), f = r.fairProb != null ? Number(r.fairProb) : NaN, c = r.clv != null ? Number(r.clv) : NaN;
+      var ts = Date.parse(r.createdAt || r.timestamp || r.date || ""); if (!Number.isFinite(ts)) ts = Number(r.ts);
+      out.push({ p: p, y: res === "win" ? 1 : 0, odds: o > 1 && r.oddsTyped !== false ? o : NaN, fair: f > 0 && f < 1 ? f : NaN, clv: Number.isFinite(c) ? c : NaN, ts: Number.isFinite(ts) ? ts : NaN, idx: idx, bucket: r.marketKey || "", league: r.league || "" });
+    });
+    out.sort(function (a, b) { return (Number.isFinite(a.ts) && Number.isFinite(b.ts) && a.ts !== b.ts) ? a.ts - b.ts : a.idx - b.idx; });
+    return out;
+  }
+  function brier(rs, key) { return mean(rs.map(function (r) { var q = key ? r[key] : r.p; return (q - r.y) * (q - r.y); })); }
+  function logLoss(rs) { return mean(rs.map(function (r) { var q = Math.min(1 - 1e-6, Math.max(1e-6, r.p)); return -(r.y * Math.log(q) + (1 - r.y) * Math.log(1 - q)); })); }
+  function calibration(rs) {
+    var n = rs.length, nb = n >= 200 ? 10 : n >= 60 ? 5 : n >= 20 ? 2 : 1, s = rs.slice().sort(function (a, b) { return a.p - b.p; }), bins = [], ece = 0;
+    for (var i = 0; i < nb; i++) { var seg = s.slice(Math.floor(i * n / nb), Math.floor((i + 1) * n / nb)); if (!seg.length) continue; var mp = mean(seg.map(function (r) { return r.p; })), my = mean(seg.map(function (r) { return r.y; })); bins.push({ n: seg.length, meanP: mp, winRate: my }); ece += seg.length / n * Math.abs(mp - my); }
+    return { bins: bins, ece: n ? ece : null };
+  }
+  function fitPlatt(rs) { /* logistic recalibration y ~ sigmoid(a*logit(p)+b) by Newton; returns {a,b} */
+    var a = 1, b = 0;
+    for (var it = 0; it < 50; it++) {
+      var g0 = 0, g1 = 0, h00 = 0, h01 = 0, h11 = 0;
+      rs.forEach(function (r) { var x = Math.log(r.p / (1 - r.p)), q = 1 / (1 + Math.exp(-(a * x + b))), w = q * (1 - q) + 1e-9; g0 += (q - r.y) * x; g1 += (q - r.y); h00 += w * x * x; h01 += w * x; h11 += w; });
+      var det = h00 * h11 - h01 * h01; if (!(Math.abs(det) > 1e-12)) break;
+      var da = (h11 * g0 - h01 * g1) / det, db = (-h01 * g0 + h00 * g1) / det; a -= da; b -= db;
+      if (Math.abs(da) + Math.abs(db) < 1e-8) break;
+    }
+    return { a: a, b: b };
+  }
+  function applyPlatt(m, p) { var x = Math.log(p / (1 - p)); return 1 / (1 + Math.exp(-(m.a * x + m.b))); }
+  function walkForward(rs, K) {
+    K = K || 5; var out = [], sz = Math.floor(rs.length / K); if (sz < 10) return out;
+    for (var i = 1; i < K; i++) {
+      var train = rs.slice(0, i * sz), test = rs.slice(i * sz, i === K - 1 ? rs.length : (i + 1) * sz), m = fitPlatt(train);
+      var tc = test.map(function (r) { return { p: Math.min(0.999, Math.max(0.001, applyPlatt(m, r.p))), y: r.y }; });
+      out.push({ fold: i, nTrain: train.length, nTest: test.length, brierRaw: brier(test), brierRecalibrated: brier(tc), calib: m });
+    }
+    return out;
+  }
+  function bbBacktest(rows, opts) {
+    opts = opts || {}; var rs = clean(rows), n = rs.length, res = { n: n };
+    if (n < 2) { res.verdict = "INSUFFICIENT DATA (need hundreds of settled picks)"; return res; }
+    res.brier = brier(rs); res.logLoss = logLoss(rs); res.calibration = calibration(rs);
+    res.hitRate = bootCI(rs.map(function (r) { return r.y; }), opts.B, 7);
+    res.meanModelP = mean(rs.map(function (r) { return r.p; }));
+    var rr = rs.filter(function (r) { return Number.isFinite(r.odds); });
+    res.roi = bootCI(rr.map(function (r) { return r.y ? r.odds - 1 : -1; }), opts.B, 11);
+    var cl = rs.filter(function (r) { return Number.isFinite(r.clv); });
+    res.clv = bootCI(cl.map(function (r) { return r.clv; }), opts.B, 13);
+    var mk = rs.filter(function (r) { return Number.isFinite(r.fair); });
+    if (mk.length >= 2) { /* paired Brier difference engine - de-vigged market; negative = engine better */
+      var d = mk.map(function (r) { return (r.p - r.y) * (r.p - r.y) - (r.fair - r.y) * (r.fair - r.y); });
+      res.vsMarket = bootCI(d, opts.B, 17); res.vsMarket.marketBrier = brier(mk, "fair"); res.vsMarket.engineBrier = brier(mk);
+      res.beatsMarket = res.vsMarket.hi != null && res.vsMarket.hi < 0;
+    }
+    res.walkForward = walkForward(rs, opts.folds);
+    var notes = [];
+    if (n < 300) notes.push("n<300: intervals are wide, treat as indicative only");
+    if (res.calibration.ece > 0.05) notes.push("ECE>5pp: probabilities are mis-calibrated");
+    if (res.vsMarket && !res.beatsMarket) notes.push("engine NOT shown to beat the de-vigged market");
+    if (res.roi && res.roi.hi != null && res.roi.hi < 0) notes.push("real-odds ROI significantly negative");
+    res.verdict = notes.length ? notes.join("; ") : "calibrated, beats market, ROI not negative at 95%";
+    return res;
+  }
+  function bbPromoteDecision(baselineRows, candidateRows, opts) {
+    /* Promote a candidate only if its Brier is lower than the baseline's on the SAME held-out picks, 95% CI entirely below 0. */
+    var A = clean(baselineRows), B = clean(candidateRows);
+    if (A.length !== B.length || A.length < 100) return { promote: false, reason: "need >=100 paired held-out picks, got " + Math.min(A.length, B.length) };
+    var d = A.map(function (r, i) { return (B[i].p - B[i].y) * (B[i].p - B[i].y) - (r.p - r.y) * (r.p - r.y); }), ci = bootCI(d, (opts && opts.B) || 2000, 19);
+    return { promote: ci.hi != null && ci.hi < 0, brierDiff: ci, reason: ci.hi != null && ci.hi < 0 ? "candidate better at 95%" : "improvement not significant at 95%" };
+  }
+  function bbDriftCheck(rows, opts) {
+    opts = opts || {}; var N = opts.window || 100, rs = clean(rows).filter(function (r) { return Number.isFinite(r.odds); }).slice(-N);
+    if (rs.length < N) return { halt: false, warn: false, n: rs.length, reason: "monitoring needs " + N + " settled real-odds picks (have " + rs.length + ")" };
+    var roi = bootCI(rs.map(function (r) { return r.y ? r.odds - 1 : -1; }), 1000, 23), cal = calibration(rs), reasons = [];
+    var halt = roi.hi != null && roi.hi < 0; if (halt) reasons.push("rolling " + N + " ROI " + (roi.mean * 100).toFixed(1) + "% with 95% upper bound below 0");
+    var warn = cal.ece > 0.10; if (warn) reasons.push("rolling ECE " + (cal.ece * 100).toFixed(1) + "pp");
+    return { halt: halt, warn: warn || halt, n: rs.length, roi: roi, ece: cal.ece, reason: reasons.join("; ") };
+  }
+  root.bbBacktest = bbBacktest; root.bbPromoteDecision = bbPromoteDecision; root.bbDriftCheck = bbDriftCheck;
+  root.__bbHarness = { clean: clean, bootCI: bootCI, calibration: calibration, fitPlatt: fitPlatt, rng: rng };
+  root.bbBacktestFromTracker = function () { /* [MIXED] reads the tracker; run in the console: bbBacktestFromTracker() */
+    var rows = []; try { rows = typeof getAllTrackedPicksForReport === "function" ? getAllTrackedPicksForReport() : []; } catch (_e) {}
+    var r = bbBacktest(rows); try { console.log("BB BACKTEST", r); } catch (_e) {} return r;
+  };
+  root.bbRunSelfTests = function () {
+    var res = [], ok = 0, bad = 0;
+    function t(name, cond, info) { if (cond) ok++; else bad++; res.push({ name: name, pass: !!cond, info: info || "" }); }
+    function near(a, b, e) { return Math.abs(a - b) <= e; }
+    var inj = function (o) { return { odds: o || { a: 1.9, b: 1.9 }, noPlayBlock: "", minEV: 0.03, sd: 16 }; };
+    try {
+      t("normCdf(0)=0.5", near(bbNormCdf(0), 0.5, 1e-7)); t("normCdf(1.96)~0.975", near(bbNormCdf(1.96), 0.975, 1e-4));
+      t("probit inverts cdf", near(bbNormCdf(bbProbit(0.7)), 0.7, 1e-6));
+      var dv = bbDevig(1.5, 2.6); t("de-vig sums to 1", near(dv.pa + dv.pb, 1, 1e-12)); t("de-vig equal odds = 50/50", near(bbDevig(1.91, 1.91).pa, 0.5, 1e-12));
+      t("kelly 0 without edge", bbKelly(0.5, 1.9) === 0); t("kelly capped at kellyCap", bbKelly(0.9, 2.5) === BB_EV_CONFIG.kellyCap);
+      t("kelly = quarter of full when under cap", near(bbKelly(0.53, 1.95), 0.25 * (0.53 * 1.95 - 1) / 0.95, 1e-12));
+      var e0 = bbEvaluateSignal(0, "euroleague", "ft", 0.25, Object.assign({ line: 155.5 }, inj()));
+      t("half line, zero signal: sides sum to 1", near(e0.fairOddsA > 0 ? 1 / e0.fairOddsA + 1 / e0.fairOddsB : 0, 1, 1e-9)); t("zero signal is not a PLAY", e0.ok === false);
+      var ei = bbEvaluateSignal(3, "euroleague", "ft", 0.25, Object.assign({ line: 156 }, inj()));
+      t("int line: push > 0", ei.pPush > 0); t("int line: pA+pB+push=1", near(ei.pA + (1 - ei.pA - ei.pPush) + ei.pPush, 1, 1e-12));
+      t("EV = p*odds + push - 1", near(ei.ev, ei.p * ei.odds + ei.pPush - 1, 1e-12));
+      var prev = -9, mono = true; [0, 4, 8, 12, 16, 24].forEach(function (s) { var q = bbEvaluateSignal(s, "euroleague", "ft", 0.25, Object.assign({ line: 155.5 }, inj())); if (q.side === "a" && q.ev < prev - 1e-12) mono = false; if (q.side === "a") prev = q.ev; }); t("EV non-decreasing in signal (Over side)", mono);
+      var big = bbEvaluateSignal(60, "euroleague", "ft", 0.25, Object.assign({ line: 155.5 }, inj())); t("absurd edge is sanity-blocked", big.sanityBlock === true && big.ok === false);
+      var nb = bbEvaluateSignal(10, "euroleague", "ft", 0.25, Object.assign({ line: 155.5 }, inj({ a: null, b: null }))); t("no odds => no play", nb.ok === false && nb.oddsTyped === false);
+      var one = bbEvaluateSignal(10, "euroleague", "ft", 0.25, Object.assign({ line: 155.5 }, inj({ a: 1.9, b: null }))); t("one-sided odds => needBothOdds", one.needBothOdds === true && one.ok === false);
+      var blk = bbEvaluateSignal(10, "euroleague", "ft", 0.25, Object.assign({ line: 155.5 }, inj(), { noPlayBlock: "friendly" })); t("friendly/preseason block honoured", blk.ok === false);
+      var fit = bbFitShrinkRows((function () { var r = rng(5), d = [], i, x; for (i = 0; i < 400; i++) { x = (r() - 0.5) * 30; d.push([x, 0.3 * x + (r() - 0.5) * 20]); } return d; })());
+      t("shrink fit recovers k~0.3 (no intercept)", fit && near(fit.k, 0.3, 0.06), fit ? "k=" + fit.k.toFixed(3) : "");
+      var rr = rng(9), syn = [], i; for (i = 0; i < 600; i++) { var p = 0.5 + rr() * 0.25; syn.push({ modelProb: p, resultStatus: rr() < p ? "win" : "loss", oddsDecimal: 1.95, oddsTyped: true, fairProb: 0.5, ts: i }); }
+      var bt = bbBacktest(syn); t("backtest: calibrated data has small ECE", bt.calibration.ece < 0.07, "ece=" + bt.calibration.ece.toFixed(3)); t("backtest is deterministic", JSON.stringify(bbBacktest(syn).roi) === JSON.stringify(bt.roi));
+      var over = syn.map(function (r) { return Object.assign({}, r, { modelProb: Math.min(0.97, r.modelProb + 0.2) }); }); t("backtest flags over-confidence", bbBacktest(over).calibration.ece > bt.calibration.ece + 0.1);
+      t("promotion refuses tiny samples", bbPromoteDecision(syn.slice(0, 20), syn.slice(0, 20)).promote === false);
+    } catch (e) { t("self-test threw", false, String(e && e.message || e)); }
+    var out = { passed: ok, failed: bad, results: res }; try { console.log("BB SELF-TESTS: " + ok + " passed, " + bad + " failed", bad ? res.filter(function (x) { return !x.pass; }) : ""); } catch (_e) {}
+    return out;
+  };
+})(typeof window !== "undefined" ? window : globalThis);
+/* ========== CALC-AUDIT-325: VALIDATION HARNESS — END ========== */
+
+</script>
 </body>
 </html>
