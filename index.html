@@ -1,4 +1,3 @@
-H
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30,12 +29,18 @@ H
   type="image/jpeg"
   href="A7358954-0D25-46A3-BF5E-EE0894AA056F.JPG?v=v25_audit10_20260913"
 />
-<script>/* BB-FIX #25: early definition so blocks that load before the main engine can call it; the engine redefines it identically */
+<script>/* BB fixed build v2.6 (10 Oct 2026): pass 4 whole-engine audit, see CHANGELOG v2.6 */
+/* BB-FIX #25: early definition so blocks that load before the main engine can call it; the engine redefines it identically */
 /* allowlisted: this is the definition of the strict check */
 function bbStrictFinite(v) { if (typeof v === "number") return Number.isFinite(v); if (typeof v === "string") return v.trim() !== "" && Number.isFinite(Number(v)); return false; }
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", function () {
+    /* P4-12: on a first-ever visit there is no controller yet; clients.claim() then fires controllerchange
+       even though nothing was updated, and the page used to reload ~2.5 s later, wiping the user's first
+       league/fixture choice. Only a controller REPLACING an existing one is an update. */
+    var _bbHadSwController = !!navigator.serviceWorker.controller;
     navigator.serviceWorker.addEventListener("controllerchange", function () {
+      if (!_bbHadSwController) { _bbHadSwController = true; return; }
       window.__bbSwUpdatePending = true;
       function _bbTrySwReload() {
         if (!window.__bbSwUpdatePending) return;
@@ -302,8 +307,11 @@ function bbEvaluateTotal(proj, line, league, mk) {
 }
 function bbHomeLineFor(mk) {
   var id = mk === "handicap_h1" ? "handicapH1Market" : mk === "handicap_h2" ? "handicapH2Market" : "handicapMarket";
-  var el = document.getElementById(id); var v = el ? Number(String(el.value || "").trim()) : NaN;
-  return el && String(el.value || "").trim() !== "" && Number.isFinite(v) ? v : NaN;
+  var el = document.getElementById(id); var raw = el ? String(el.value || "").trim() : "";
+  if (!raw) return NaN;
+  /* P4-4: same parser as the pick's own line (unicode minus, comma decimal); Number() alone made "−4.5" read as "no handicap line" */
+  var v = typeof parseHandicapLine === "function" ? parseHandicapLine(raw) : Number(raw);
+  return v != null && Number.isFinite(Number(v)) ? Number(v) : NaN;
 }
 /* signal: handicap = proj margin + home line; winner = proj margin (home - away) */
 function bbEvaluateMargin(signal, league, mk) {
@@ -790,7 +798,7 @@ async function bbFetchSportyOdds() {
   try {
     var match = null, total = 0;
     for (var page = 1; page <= 5 && !match; page++) {
-      var res = await fetch(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
+      var res = await bbFetchT(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
       var js = await res.json().catch(function () { return null; });
       if (!res.ok || !js || js.bizCode !== 10000) throw new Error((js && (js.error || js.message)) || ("HTTP " + res.status));
       var evs = (js.data && js.data.tournaments || []).reduce(function (a, t) { return a.concat(t.events || []); }, []);
@@ -800,7 +808,7 @@ async function bbFetchSportyOdds() {
     }
     if (!match) { bbSportyStatus("No SportyBet game matched " + home + " vs " + away + (startMs ? " (±15 min)" : "") + ". Type the odds by hand.", true); return null; }
     bbSportyStatus("Matched " + match.event.homeTeamName + " v " + match.event.awayTeamName + ". Fetching markets…");
-    var r2 = await fetch(base + "/sporty/event?id=" + encodeURIComponent(match.event.eventId), { headers: { Accept: "application/json" } });
+    var r2 = await bbFetchT(base + "/sporty/event?id=" + encodeURIComponent(match.event.eventId), { headers: { Accept: "application/json" } });
     var j2 = await r2.json().catch(function () { return null; });
     if (!r2.ok || !j2 || j2.bizCode !== 10000 || !j2.data) throw new Error((j2 && (j2.error || j2.message)) || ("HTTP " + r2.status));
     var parsed = bbSportyParseEvent(j2.data), filled = bbSportyFill(parsed);
@@ -879,6 +887,14 @@ function bbFixtureStartMs() {
   } catch (_e) { return 0; }
 }
 /* today + tomorrow window (local time), with a 3 h look-back for games about to start */
+/* P4-8: SportyBet worker calls had no timeout - on a dead connection the Fetch odds button waited forever */
+function bbFetchT(url, opts, ms) {
+  var ctrl = typeof AbortController !== "undefined" ? new AbortController() : null;
+  var t = ctrl ? setTimeout(function () { ctrl.abort(); }, ms || 15000) : null;
+  var o = Object.assign({}, opts || {}); if (ctrl) o.signal = ctrl.signal;
+  return fetch(url, o).catch(function (e) { if (e && e.name === "AbortError") throw new Error("SportyBet request timed out (" + Math.round((ms || 15000) / 1000) + "s) - check your connection"); throw e; })
+    .finally(function () { if (t) clearTimeout(t); });
+}
 function bbTodayTomorrow(e) {
   var t = Number(e && e.estimateStartTime); if (!t) return true;
   var now = new Date(), end = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 2).getTime();
@@ -888,7 +904,7 @@ async function bbSportyLookup(home, away, startMs) {
   var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
   var all = [], total = 0, pairs = Array.isArray(home) ? home : [[home, away]], match = null;
   for (var page = 1; page <= 8; page++) { /* all pages (today + tomorrow) */
-    var res = await fetch(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
+    var res = await bbFetchT(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
     var js = await res.json().catch(function () { return null; });
     if (!res.ok || !js || js.bizCode !== 10000) throw new Error((js && (js.error || js.message)) || ("HTTP " + res.status));
     var evs = (js.data && js.data.tournaments || []).reduce(function (a, t) { return a.concat(t.events || []); }, []);
@@ -906,7 +922,7 @@ async function bbSportyLookup(home, away, startMs) {
 async function bbSportyFetchEvent(ev, memKey) {
   var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
   var match = { event: ev, memKey: memKey };
-  var r2 = await fetch(base + "/sporty/event?id=" + encodeURIComponent(match.event.eventId), { headers: { Accept: "application/json" } });
+  var r2 = await bbFetchT(base + "/sporty/event?id=" + encodeURIComponent(match.event.eventId), { headers: { Accept: "application/json" } });
   var j2 = await r2.json().catch(function () { return null; });
   if (!r2.ok || !j2 || j2.bizCode !== 10000 || !j2.data) throw new Error((j2 && (j2.error || j2.message)) || ("HTTP " + r2.status));
   try { var mem = JSON.parse(localStorage.getItem("BB_SPORTY_MATCHES") || "{}"); mem[match.memKey] = { home: match.event.homeTeamId, away: match.event.awayTeamId, eventId: match.event.eventId, at: Date.now() }; localStorage.setItem("BB_SPORTY_MATCHES", JSON.stringify(mem)); } catch (_e) {}
@@ -5541,8 +5557,8 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
   const h2HomeScoredDates = [], h2HomeAllowedDates = [];
   const h2AwayScoredList = [], h2AwayAllowedList = [];
   const h2AwayScoredDates = [], h2AwayAllowedDates = [];
-  const h1ScoredList = [], h1AllowedList = [], h1ScoredDates = [];
-  const h2ScoredList = [], h2AllowedList = [], h2ScoredDates = [];
+  const h1ScoredList = [], h1AllowedList = [], h1ScoredDates = [], h1AllowedDates = [];
+  const h2ScoredList = [], h2AllowedList = [], h2ScoredDates = [], h2AllowedDates = [];
   const q1ScoredList = [], q1AllowedList = [], q1ScoredDates = [], q1AllowedDates = [];
   const q2ScoredList = [], q2AllowedList = [], q2ScoredDates = [], q2AllowedDates = [];
   const q3ScoredList = [], q3AllowedList = [], q3ScoredDates = [], q3AllowedDates = [];
@@ -5602,33 +5618,12 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
       ? String(fixtureTournamentId)
       : null;
   if (!_resolvedTournamentId && !_ssFriendly) {
-    const spec = (typeof SOFA_LEAGUE_MATCH === "object" && SOFA_LEAGUE_MATCH[_ssLeague]) || null;
-    const knownIds = Array.isArray(spec?.ids) ? spec.ids.map(String) : [];
-    const present = new Set(
-      basketballEvents
-        .map(ev => ev?.tournament?.uniqueTournament?.id)
-        .filter(x => x != null)
-        .map(String),
-    );
-    const intersection = knownIds.find(id => present.has(id));
-    _resolvedTournamentId =
-      intersection ||
-      (typeof detectPrimaryTournamentForEvents === "function"
-        ? detectPrimaryTournamentForEvents(basketballEvents)
-        : null);
+    const _rc = typeof ssResolveCompetition === "function" ? ssResolveCompetition(_ssLeague, basketballEvents, []) : null; /* v2.5.2 */
+    _resolvedTournamentId = _rc && _rc.id ? String(_rc.id) : (typeof detectPrimaryTournamentForEvents === "function" ? detectPrimaryTournamentForEvents(basketballEvents) : null);
   }
   if (_resolvedTournamentId && !_ssFriendly) {
     const tidStr = String(_resolvedTournamentId);
-    try {
-      const _specLock = SOFA_LEAGUE_MATCH[_ssLeague];
-      if (
-        _specLock &&
-        Array.isArray(_specLock.ids) &&
-        !_specLock.ids.map(String).includes(tidStr)
-      ) {
-        _specLock.ids.push(tidStr);
-      }
-    } catch (_eSpecLock) {}
+    /* v2.5.2: detected ids are no longer written back into SOFA_LEAGUE_MATCH (that made a wrong first-team guess permanent) */
     competitionEvents = basketballEvents.filter(ev => {
       const evTid = ev?.tournament?.uniqueTournament?.id;
       return evTid != null && String(evTid) === tidStr;
@@ -5727,8 +5722,8 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
       ftScoredDates.push(r.date);
       }
       if (part === "ft") return;
-      h1ScoredList.push(r.h1); h1AllowedList.push(r.oh1); h1ScoredDates.push(r.date);
-      h2ScoredList.push(r.h2); h2AllowedList.push(r.oh2); h2ScoredDates.push(r.date);
+      h1ScoredList.push(r.h1); h1AllowedList.push(r.oh1); h1ScoredDates.push(r.date); h1AllowedDates.push(r.date);
+      h2ScoredList.push(r.h2); h2AllowedList.push(r.oh2); h2ScoredDates.push(r.date); h2AllowedDates.push(r.date); /* v2.5.1: allowed series carry their own lineage */
       if (_regP > 2) {
         q1ScoredList.push(r.q1); q1AllowedList.push(r.oppQ1); q1ScoredDates.push(r.date); q1AllowedDates.push(r.date);
         q2ScoredList.push(r.q2); q2AllowedList.push(r.oppQ2); q2ScoredDates.push(r.date); q2AllowedDates.push(r.date);
@@ -5804,7 +5799,7 @@ function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, 
     awayScoredList, awayAllowedList, awayScoredDates, awayAllowedDates,
     h1HomeScoredList, h1HomeAllowedList, h1HomeScoredDates, h1HomeAllowedDates,
     h1AwayScoredList, h1AwayAllowedList, h1AwayScoredDates, h1AwayAllowedDates,
-    h1ScoredList, h1AllowedList, h1ScoredDates, h2ScoredList, h2AllowedList, h2ScoredDates,
+    h1ScoredList, h1AllowedList, h1ScoredDates, h1AllowedDates, h2ScoredList, h2AllowedList, h2ScoredDates, h2AllowedDates, ftAllowedDates: ftScoredDates.slice(),
     q1HomeScoredList, q1HomeAllowedList, q1AwayScoredList, q1AwayAllowedList,
     q2HomeScoredList, q2HomeAllowedList, q2AwayScoredList, q2AwayAllowedList,
     q3HomeScoredList, q3HomeAllowedList, q3AwayScoredList, q3AwayAllowedList,
@@ -5921,9 +5916,133 @@ window.__lastEventsB = null;
 window.__h2hEntryCache = [];
 window.__fixtureTournamentId = null;
 function getFixtureTournamentId() {
-  const manualVal = (document.getElementById("ssTournamentId")?.value || "").trim();
+  const _tidEl = document.getElementById("ssTournamentId");
+  const manualVal = (_tidEl?.value || "").trim();
+  if (manualVal && /^\d+$/.test(manualVal) && _tidEl && _tidEl.dataset.manual === "1") return manualVal; /* v2.5.2: only a typed id is a manual override */
+  if (window.__fixtureTournamentId != null && String(window.__fixtureTournamentId) !== "") return String(window.__fixtureTournamentId);
   if (manualVal && /^\d+$/.test(manualVal)) return manualVal;
-  return window.__fixtureTournamentId != null ? String(window.__fixtureTournamentId) : null;
+  return null;
+}
+/* v2.5.2: competition lock. Picks ONE uniqueTournament for both teams' last-10, in this order:
+   1) the selected league's verified SofaScore ids that appear in the pastes (prefer one both teams played in, then most games);
+   2) a competition whose name matches the selected league (tokens/country, same gender), preferring one both teams share;
+   3) the selected league's id even if absent (strict lock, so the wrong competition is never used silently);
+   4) for leagues without ids/tokens: the competition both teams share with the most games;
+   5) only one team pasted so far: that team's most-played competition, provisional (re-resolved when the other team is pasted).
+   It never writes detected ids back into SOFA_LEAGUE_MATCH. */
+function ssCompetitionCounts(events) {
+  const out = {};
+  (Array.isArray(events) ? events : []).forEach(function (ev) {
+    if (typeof ssIsBasketballEvent === "function" && !ssIsBasketballEvent(ev)) return;
+    const st = String(ev?.status?.type || "");
+    const done = st === "finished" || st === "afterExtraTime" || st === "afterPenalties" || ev?.status?.finished === true;
+    if (!done) return;
+    const tid = ev?.tournament?.uniqueTournament?.id;
+    if (tid == null) return;
+    const uName = String(ev?.tournament?.uniqueTournament?.name || ev?.tournament?.name || "");
+    if (/rapid/i.test(uName) || /rapid/i.test(String(ev?.tournament?.name || ""))) return;
+    const k = String(tid);
+    if (!out[k]) out[k] = { id: k, name: uName, blob: ssNormLeagueText(ssEventLeagueBlob(ev)), count: 0 };
+    out[k].count++;
+  });
+  return out;
+}
+function ssLeagueIsWomen(key, label) {
+  return /(^|_)w($|_)|wnba|wnbl|wcba|wkbl|lfb|lbf|lnbf|dbbl|kbsl|femenina|feminina|ncaaw|bsnf/.test(String(key || "")) || /\bwomen|\bfemen|\bfemin|\bwomen's/i.test(String(label || ""));
+}
+function ssBlobIsWomen(blob) {
+  return /\b(women|womens|woman|w|femenina|feminina|feminine|femminile|femenino|damen|ladies|zeni|zene|zenska|kobiet|kvinde\w*|kvindebasketligaen|wnba|wnbl|wcba|wkbl|dbbl|kbsl|lfb|lbf|lnbf|bsnf|damligan)\b/.test(String(blob || ""));
+}
+function ssResolveCompetition(leagueKey, eventsA, eventsB) {
+  const key = String(leagueKey || "").toLowerCase();
+  if (key === "intl_friendly" || key === "club_friendly") return { id: null, source: "friendly" };
+  const cA = ssCompetitionCounts(eventsA);
+  const cB = ssCompetitionCounts(eventsB);
+  const haveA = Object.keys(cA).length > 0;
+  const haveB = Object.keys(cB).length > 0;
+  const cands = {};
+  [cA, cB].forEach(function (c, idx) {
+    Object.keys(c).forEach(function (k) {
+      if (!cands[k]) cands[k] = { id: k, name: c[k].name, blob: c[k].blob, countA: 0, countB: 0 };
+      if (idx === 0) cands[k].countA = c[k].count; else cands[k].countB = c[k].count;
+    });
+  });
+  const list = Object.keys(cands).map(function (k) {
+    const x = cands[k];
+    x.combined = x.countA + x.countB;
+    x.shared = x.countA > 0 && x.countB > 0;
+    return x;
+  });
+  const rank = function (arr) {
+    return arr.slice().sort(function (a, b) { return (b.shared - a.shared) || (b.combined - a.combined) || (Number(a.id) - Number(b.id)); });
+  };
+  const pick = function (arr, source) { const b = rank(arr)[0]; return b ? { id: b.id, name: b.name, source: source, shared: b.shared, combined: b.combined, countA: b.countA, countB: b.countB, candidates: list.length } : null; };
+  const spec = (typeof SOFA_LEAGUE_MATCH === "object" && SOFA_LEAGUE_MATCH[key]) || null;
+  const ids = spec && Array.isArray(spec.ids) ? spec.ids.map(String).filter(Boolean) : [];
+  if (ids.length) {
+    const r1 = pick(list.filter(function (x) { return ids.indexOf(x.id) >= 0; }), "league-id");
+    if (r1) return r1;
+  }
+  if (key && key !== "unknown") {
+    const tokens = spec && Array.isArray(spec.tokens) && spec.tokens.length ? spec.tokens : (typeof ssLeagueDistinctiveTokens === "function" ? ssLeagueDistinctiveTokens(key) : []);
+    const country = (spec && spec.country) || [];
+    const reject = (spec && spec.reject) || [];
+    if (tokens && tokens.length) {
+      let label = "";
+      try { const o = document.querySelector('#leagueSelect option[value="' + key + '"]'); label = o ? o.textContent : ""; } catch (_eL) {}
+      const wantW = ssLeagueIsWomen(key, label);
+      const tok = list.filter(function (x) {
+        if (!x.blob) return false;
+        if (reject.some(function (r) { return ssTokenHitsNormalized(x.blob, r); })) return false;
+        if (!tokens.some(function (t) { return ssTokenHitsNormalized(x.blob, t); })) return false;
+        if (country.length && !country.some(function (c) { return ssTokenHitsNormalized(x.blob, c); })) return false;
+        return ssBlobIsWomen(x.blob) === wantW;
+      });
+      const r2 = pick(tok, "league-name");
+      if (r2) return r2;
+    }
+  }
+  if (ids.length) return { id: ids[0], name: "", source: "league-id-absent", shared: false, combined: 0, countA: 0, countB: 0, candidates: list.length };
+  if (haveA && haveB) {
+    const r4 = pick(list.filter(function (x) { return x.shared; }), "shared");
+    if (r4) return r4;
+    const r4b = pick(list, "no-shared");
+    if (r4b) return r4b;
+  }
+  const r5 = pick(list, "single-side");
+  return r5 || { id: null, source: "none" };
+}
+function ssApplyCompetitionLock() {
+  const el = document.getElementById("ssTournamentId");
+  const nameEl = document.getElementById("ssTournamentName");
+  const typed = (el?.value || "").trim();
+  if (el && el.dataset.manual === "1" && /^\d+$/.test(typed)) {
+    window.__fixtureTournamentId = typed;
+    return { id: typed, source: "manual" };
+  }
+  const key = String(document.getElementById("leagueSelect")?.value || "").toLowerCase();
+  const r = ssResolveCompetition(key, window.__lastEventsA || [], window.__lastEventsB || []);
+  window.__fixtureTournamentId = r && r.id ? String(r.id) : null;
+  window.__ssCompetitionLock = r || null;
+  if (el) { el.value = r && r.id ? String(r.id) : ""; el.dataset.manual = "0"; }
+  if (nameEl) {
+    let t = "";
+    if (r && r.id) {
+      const why = {
+        "league-id": "locked to selected league",
+        "league-name": "matched selected league by name",
+        "league-id-absent": "selected league not found in pasted games",
+        "shared": "competition both teams played in",
+        "no-shared": "no shared competition, verify",
+        "single-side": "provisional until both teams are pasted",
+      }[r.source] || r.source;
+      t = "(" + (r.name ? r.name + " · " : "") + why + (r.combined ? " · " + r.combined + " games" : "") + ")";
+      if ((r.source === "shared" || r.source === "no-shared") && r.combined < 3) t += " ⚠ thin match, verify manually";
+    }
+    nameEl.textContent = t;
+  }
+  if (typeof engineDebug === "function") engineDebug("Competition lock", r);
+  return r;
 }
 function detectTournamentIdIntersection(eventsA, eventsB) {
   function countByTournament(events) {
@@ -6173,10 +6292,14 @@ function updateTeamUIFromStats(side, stats) {
   AppState.context.data[side].venue.eventIds10 = ((stats.venueGameRows?.[role === "away" ? "away" : "home"]) || []).map(r => r.eventId).slice(0, 10);
   if (Array.isArray(stats.ftScoredDates) && stats.ftScoredDates.length) {
     AppState.context.data[side].overall.ftScoredDates10 = stats.ftScoredDates.slice(0, 10);
+    AppState.context.data[side].overall.ftAllowedDates10 = (Array.isArray(stats.ftAllowedDates) && stats.ftAllowedDates.length ? stats.ftAllowedDates : stats.ftScoredDates).slice(0, 10); /* v2.5.1 */
     ["h1", "h2", "q1", "q2", "q3", "q4"].forEach(function (mk) {
       const own = stats[mk + "ScoredDates"];
       const series = stats[mk + "ScoredList"] || stats.overall && stats.overall[mk + "Scored10"];
-      const dates = Array.isArray(own) && own.length ? own : stats.ftScoredDates;
+      const _sl = Array.isArray(series) ? series.length : 0; /* v2.5.1: FT dates only when the series really is the FT game set */
+      const dates = Array.isArray(own) && own.length ? own : (_sl === stats.ftScoredDates.length ? stats.ftScoredDates : []);
+      const _ad = stats[mk + "AllowedDates"]; const _al = stats[mk + "AllowedList"];
+      if (Array.isArray(_ad) && Array.isArray(_al) && _ad.length === _al.length && _ad.length) AppState.context.data[side].overall[mk + "AllowedDates10"] = _ad.slice(0, 10);
       const n = Array.isArray(series) && series.length ? Math.min(10, series.length, dates.length) : Math.min(10, dates.length);
       AppState.context.data[side].overall[mk + "ScoredDates10"] = dates.slice(0, n);
       if (typeof stashSeriesDates === "function") stashSeriesDates(side, mk, dates.slice(0, n), "scored");
@@ -6278,6 +6401,7 @@ function updateTeamUIFromStats(side, stats) {
 function reprocessBothTeamsFromEvents() {
   window.__ssPaceGen = (window.__ssPaceGen || 0) + 1; 
   const _paceGen = window.__ssPaceGen;
+  if (typeof ssApplyCompetitionLock === "function") ssApplyCompetitionLock(); /* v2.5.2 */
   const tid = getFixtureTournamentId();
   const bundle = { A: null, B: null };
   if (window.__lastEventsA && window.__lastEventsA.length) {
@@ -6303,7 +6427,9 @@ function reprocessBothTeamsFromEvents() {
 function onTournamentIdInput() {
   const nameEl = document.getElementById("ssTournamentName");
   if (nameEl) nameEl.textContent = "";
-  const val = (document.getElementById("ssTournamentId")?.value || "").trim();
+  const _tidInEl = document.getElementById("ssTournamentId");
+  const val = (_tidInEl?.value || "").trim();
+  if (_tidInEl) _tidInEl.dataset.manual = val ? "1" : "0"; /* v2.5.2 */
   if (!val) {
     window.__fixtureTournamentId = null;
     reprocessBothTeamsFromEvents();
@@ -6369,208 +6495,209 @@ function isWomenLeagueKey(leagueKey) {
   if (!k) return false;
   return k.endsWith("_w") || WOMEN_LEAGUE_IRREGULAR_KEYS.has(k);
 }
+/* v2.5.2: uniqueTournament ids verified against live SofaScore data (api.sofascore1.com, 2026-10-10) */
 const SOFA_LEAGUE_MATCH = {
-  aba: { ids: [], tokens: ["liga aba", "aba league", "adriatic"], country: [], reject: ["preseason"] },
-  aba_pre: { ids: [], tokens: ["aba", "adriatic"], country: [], reject: [] },
+  aba: { ids: ["235"], tokens: ["liga aba", "aba league", "adriatic"], country: [], reject: ["preseason"] },
+  aba_pre: { ids: ["36655"], tokens: ["aba", "adriatic"], country: [], reject: [] },
   acb: { ids: ["264"], tokens: ["acb", "liga endesa", "liga acb"], country: ["spain"], reject: ["femenina"] },
-  albania_w: { ids: [], tokens: ["a 1", "a-1", "superliga"], country: ["albania"], reject: [] },
-  albania_superliga: { ids: [], tokens: ["superliga", "super liga"], country: ["albania"], reject: [] },
-  angola_league: { ids: [], tokens: ["unitel", "baia", "angola"], country: ["angola"], reject: [] },
-  argentina_liga_femenina: { ids: [], tokens: ["femenina", "liga femenina"], country: ["argentina"], reject: [] },
-  argentina_lnb: { ids: [], tokens: ["lnb", "liga nacional"], country: ["argentina"], reject: ["femenina"] },
+  albania_w: { ids: ["29874", "29912"], tokens: ["a 1", "a-1", "superliga"], country: ["albania"], reject: [] },
+  albania_superliga: { ids: ["22624"], tokens: ["superliga", "super liga"], country: ["albania"], reject: [] },
+  angola_league: { ids: ["25608"], tokens: ["unitel", "baia", "angola"], country: ["angola"], reject: [] },
+  argentina_liga_femenina: { ids: ["29888"], tokens: ["femenina", "liga femenina"], country: ["argentina"], reject: [] },
+  argentina_lnb: { ids: ["1680"], tokens: ["lnb", "liga nacional"], country: ["argentina"], reject: ["femenina"] },
   armenia_a_league: { ids: [], tokens: ["league a", "armenia"], country: ["armenia"], reject: [] },
-  aus_big_v: { ids: [], tokens: ["big v"], country: ["australia"], reject: [] },
-  aus_big_v_w: { ids: [], tokens: ["big v"], country: ["australia"], reject: [] },
-  ausnbl: { ids: [], tokens: ["nbl"], country: ["australia"], reject: ["nbl1", "big v", "wnbl"] },
-  aus_nbl1_central_w: { ids: [], tokens: ["nbl1 central", "nbl 1 central"], country: ["australia"], reject: [] },
-  aus_nbl1_east_w: { ids: [], tokens: ["nbl1 east", "nbl 1 east"], country: ["australia"], reject: [] },
-  aus_nbl1_north_w: { ids: [], tokens: ["nbl1 north", "nbl 1 north"], country: ["australia"], reject: [] },
-  aus_nbl1_south_w: { ids: [], tokens: ["nbl1 south", "nbl 1 south"], country: ["australia"], reject: [] },
-  aus_nbl1_west_w: { ids: [], tokens: ["nbl1 west", "nbl 1 west"], country: ["australia"], reject: [] },
-  aus_nbl1_central: { ids: [], tokens: ["nbl1 central", "nbl 1 central"], country: ["australia"], reject: [] },
-  aus_nbl1_east: { ids: [], tokens: ["nbl1 east", "nbl 1 east"], country: ["australia"], reject: [] },
-  aus_nbl1_north: { ids: [], tokens: ["nbl1 north", "nbl 1 north"], country: ["australia"], reject: [] },
-  aus_nbl1_south: { ids: [], tokens: ["nbl1 south", "nbl 1 south"], country: ["australia"], reject: [] },
-  aus_nbl1_west: { ids: [], tokens: ["nbl1 west", "nbl 1 west"], country: ["australia"], reject: [] },
-  aus_wnbl: { ids: [], tokens: ["wnbl"], country: ["australia"], reject: ["nbl1"] },
-  austria_superliga: { ids: [], tokens: ["superliga", "super liga", "bsl"], country: ["austria"], reject: [] },
-  austria_zweite: { ids: [], tokens: ["zweite", "2 liga", "2. liga", "second league"], country: ["austria"], reject: [] },
-  azerbaijan_abl: { ids: [], tokens: ["abl", "azerbaijan"], country: ["azerbaijan"], reject: [] },
-  bahrain_premier: { ids: [], tokens: ["premier", "bahrain"], country: ["bahrain"], reject: [] },
-  bal: { ids: [], tokens: ["basketball africa league", "africa league", "the bal"], country: [], reject: [] },
-  bbl: { ids: [], tokens: ["easycredit", "bbl", "basketball bundesliga"], country: ["germany"], reject: ["pro a", "pro b", "dbbl"] },
-  belarus_premier: { ids: [], tokens: ["premier", "belarus"], country: ["belarus"], reject: [] },
+  aus_big_v: { ids: ["3084"], tokens: ["big v"], country: ["australia"], reject: [] },
+  aus_big_v_w: { ids: ["10267"], tokens: ["big v"], country: ["australia"], reject: [] },
+  ausnbl: { ids: ["1524"], tokens: ["nbl"], country: ["australia"], reject: ["nbl1", "big v", "wnbl"] },
+  aus_nbl1_central_w: { ids: ["16741"], tokens: ["nbl1 central", "nbl 1 central", "nbl1 women central"], country: ["australia"], reject: [] },
+  aus_nbl1_east_w: { ids: ["18600", "18404"], tokens: ["nbl1 east", "nbl 1 east", "nbl1 women east"], country: ["australia"], reject: [] },
+  aus_nbl1_north_w: { ids: ["16819"], tokens: ["nbl1 north", "nbl 1 north", "nbl1 women north"], country: ["australia"], reject: [] },
+  aus_nbl1_south_w: { ids: ["16821"], tokens: ["nbl1 south", "nbl 1 south", "nbl1 women south"], country: ["australia"], reject: [] },
+  aus_nbl1_west_w: { ids: ["16742"], tokens: ["nbl1 west", "nbl 1 west", "nbl1 women west"], country: ["australia"], reject: [] },
+  aus_nbl1_central: { ids: ["16739"], tokens: ["nbl1 central", "nbl 1 central"], country: ["australia"], reject: [] },
+  aus_nbl1_east: { ids: ["18599", "18403"], tokens: ["nbl1 east", "nbl 1 east"], country: ["australia"], reject: [] },
+  aus_nbl1_north: { ids: ["16818"], tokens: ["nbl1 north", "nbl 1 north"], country: ["australia"], reject: [] },
+  aus_nbl1_south: { ids: ["16776"], tokens: ["nbl1 south", "nbl 1 south"], country: ["australia"], reject: [] },
+  aus_nbl1_west: { ids: ["16740"], tokens: ["nbl1 west", "nbl 1 west"], country: ["australia"], reject: [] },
+  aus_wnbl: { ids: ["1506"], tokens: ["wnbl"], country: ["australia"], reject: ["nbl1"] },
+  austria_superliga: { ids: ["297"], tokens: ["superliga", "super liga", "bsl"], country: ["austria"], reject: [] },
+  austria_zweite: { ids: ["20082"], tokens: ["zweite", "2 liga", "2. liga", "second league"], country: ["austria"], reject: [] },
+  azerbaijan_abl: { ids: ["24261"], tokens: ["abl", "azerbaijan"], country: ["azerbaijan"], reject: [] },
+  bahrain_premier: { ids: ["24412"], tokens: ["premier", "bahrain"], country: ["bahrain"], reject: [] },
+  bal: { ids: ["16968"], tokens: ["basketball africa league", "africa league", "the bal"], country: [], reject: [] },
+  bbl: { ids: ["227"], tokens: ["easycredit", "bbl", "basketball bundesliga"], country: ["germany"], reject: ["pro a", "pro b", "dbbl"] },
+  belarus_premier: { ids: ["26240"], tokens: ["premier", "belarus"], country: ["belarus"], reject: [] },
   belarus_premier_w: { ids: [], tokens: ["premier", "belarus"], country: ["belarus"], reject: [] },
-  belgium_top: { ids: [], tokens: ["top division", "bnxt", "awbl", "eurobasket belgium"], country: ["belgium"], reject: [] },
-  belgium_w: { ids: [], tokens: ["women", "awbl", "top division"], country: ["belgium"], reject: [] },
-  bnxt: { ids: [], tokens: ["bnxt"], country: [], reject: [] },
-  bolivia_libobasquet: { ids: [], tokens: ["libobasquet"], country: ["bolivia"], reject: [] },
-  bih_1st: { ids: [], tokens: ["prvenstvo", "winwin", "win win", "1st division", "division 1", "prva liga"], country: ["bosnia"], reject: [] },
+  belgium_top: { ids: ["18558", "1492"], tokens: ["top division", "bnxt", "awbl", "eurobasket belgium"], country: ["belgium", "international"], reject: [] },
+  belgium_w: { ids: ["29549"], tokens: ["women", "awbl", "top division"], country: ["belgium"], reject: [] },
+  bnxt: { ids: ["18558"], tokens: ["bnxt"], country: [], reject: [] },
+  bolivia_libobasquet: { ids: ["13906"], tokens: ["libobasquet"], country: ["bolivia"], reject: [] },
+  bih_1st: { ids: ["14306"], tokens: ["prvenstvo", "winwin", "win win", "1st division", "division 1", "prva liga"], country: ["bosnia"], reject: [] },
   bih_w: { ids: [], tokens: ["women"], country: ["bosnia"], reject: [] },
-  brazil_lbf_w: { ids: [], tokens: ["lbf"], country: ["brazil"], reject: [] },
-  brazil_nbb: { ids: [], tokens: ["nbb", "novo basquete"], country: ["brazil"], reject: [] },
-  bulgaria_nbl: { ids: [], tokens: ["nbl"], country: ["bulgaria"], reject: [] },
-  bulgaria_w: { ids: [], tokens: ["women"], country: ["bulgaria"], reject: [] },
-  cba: { ids: [], tokens: ["cba"], country: ["china"], reject: ["wcba", "nbl"] },
-  cebl: { ids: [], tokens: ["cebl"], country: ["canada"], reject: [] },
+  brazil_lbf_w: { ids: ["19970"], tokens: ["lbf"], country: ["brazil"], reject: [] },
+  brazil_nbb: { ids: ["1562"], tokens: ["nbb", "novo basquete"], country: ["brazil"], reject: [] },
+  bulgaria_nbl: { ids: ["1920"], tokens: ["nbl"], country: ["bulgaria"], reject: [] },
+  bulgaria_w: { ids: ["24273"], tokens: ["women"], country: ["bulgaria"], reject: [] },
+  cba: { ids: ["1566"], tokens: ["cba"], country: ["china"], reject: ["wcba", "nbl"] },
+  cebl: { ids: ["21995"], tokens: ["cebl"], country: ["canada"], reject: [] },
   chile_lnb: { ids: ["9506"], tokens: ["lnb", "liga nacional"], country: ["chile"], reject: ["lnb 2", "lnb2"] },
-  chile_lnb2: { ids: [], tokens: ["lnb 2", "lnb2", "segunda", "liga 2"], country: ["chile"], reject: [] },
-  china_nbl: { ids: [], tokens: ["nbl"], country: ["china"], reject: ["cba", "wcba"] },
-  china_wcba: { ids: [], tokens: ["wcba"], country: ["china"], reject: [] },
+  chile_lnb2: { ids: ["25873"], tokens: ["lnb 2", "lnb2", "segunda", "liga 2"], country: ["chile"], reject: [] },
+  china_nbl: { ids: ["27568"], tokens: ["nbl"], country: ["china"], reject: ["cba", "wcba"] },
+  china_wcba: { ids: ["2339"], tokens: ["wcba"], country: ["china"], reject: [] },
   club_friendly: { ids: ["1195"], tokens: ["club friendly", "friendly"], country: [], reject: [] },
-  colombia_wplay: { ids: [], tokens: ["wplay", "profesional", "lpb"], country: ["colombia"], reject: [] },
-  costarica_lsb: { ids: [], tokens: ["lsb"], country: ["costa rica"], reject: [] },
-  croatia_premier: { ids: [], tokens: ["premijer", "premier", "ht premijer"], country: ["croatia"], reject: [] },
+  colombia_wplay: { ids: ["22376"], tokens: ["wplay", "profesional", "lpb"], country: ["colombia"], reject: [] },
+  costarica_lsb: { ids: ["25751"], tokens: ["lsb"], country: ["costa rica"], reject: [] },
+  croatia_premier: { ids: ["579"], tokens: ["premijer", "premier", "ht premijer"], country: ["croatia"], reject: [] },
   cuba_lsb: { ids: [], tokens: ["lsb"], country: ["cuba"], reject: [] },
-  cyprus_div_a: { ids: [], tokens: ["division a", "opap", "div a"], country: ["cyprus"], reject: [] },
-  nbl_cz: { ids: [], tokens: ["nbl", "kooperativa"], country: ["czech"], reject: [] },
-  czech_w: { ids: [], tokens: ["women", "zbl"], country: ["czech"], reject: [] },
+  cyprus_div_a: { ids: ["9557"], tokens: ["division a", "opap", "div a"], country: ["cyprus"], reject: [] },
+  nbl_cz: { ids: ["250"], tokens: ["nbl", "kooperativa"], country: ["czech"], reject: [] },
+  czech_w: { ids: ["1484"], tokens: ["women", "zbl"], country: ["czech"], reject: [] },
   denmark_bliga: { ids: ["843"], tokens: ["basketligaen"], country: ["denmark"], reject: [] },
-  denmark_w: { ids: [], tokens: ["kvindebasketligaen", "women"], country: ["denmark"], reject: [] },
-  dr_lnb: { ids: [], tokens: ["lnb"], country: ["dominican"], reject: [] },
-  champions_league: { ids: [], tokens: ["champions league", "basketball champions league"], country: [], reject: [] },
+  denmark_w: { ids: ["24277"], tokens: ["kvindebasketligaen", "women"], country: ["denmark"], reject: [] },
+  dr_lnb: { ids: ["14089"], tokens: ["lnb"], country: ["dominican"], reject: [] },
+  champions_league: { ids: ["9357"], tokens: ["champions league", "basketball champions league"], country: [], reject: [] },
   ecuador_basquetpro: { ids: [], tokens: ["basquet pro", "basquetpro"], country: ["ecuador"], reject: [] },
-  egypt_premier: { ids: [], tokens: ["premier", "egypt"], country: ["egypt"], reject: [] },
-  el_salvador_lmb: { ids: [], tokens: ["liga mayor", "lmb"], country: ["el salvador", "salvador"], reject: [] },
+  egypt_premier: { ids: ["32628"], tokens: ["premier", "egypt"], country: ["egypt"], reject: [] },
+  el_salvador_lmb: { ids: ["17343"], tokens: ["liga mayor", "lmb"], country: ["el salvador", "salvador"], reject: [] },
   england_slb: { ids: ["23722"], tokens: ["slb", "super league basketball"], country: ["england"], reject: [] },
-  england_slb_w: { ids: [], tokens: ["slb", "super league", "wbbl"], country: ["england"], reject: [] },
-  estonia_kml: { ids: [], tokens: ["kml", "meistriliiga"], country: ["estonia"], reject: [] },
-  estonia_w: { ids: [], tokens: ["meistriliiga", "women"], country: ["estonia"], reject: [] },
-  eurocup: { ids: [], tokens: ["eurocup", "euro cup"], country: [], reject: ["euroleague"] },
+  england_slb_w: { ids: ["26814"], tokens: ["slb", "super league", "wbbl"], country: ["england"], reject: [] },
+  estonia_kml: { ids: ["973", "11479"], tokens: ["kml", "meistriliiga", "latvian estonian"], country: ["estonia"], reject: [] },
+  estonia_w: { ids: ["25027"], tokens: ["meistriliiga", "women"], country: ["estonia"], reject: [] },
+  eurocup: { ids: ["141"], tokens: ["eurocup", "euro cup"], country: [], reject: ["euroleague"] },
   euroleague: { ids: ["138"], tokens: ["euroleague", "euroliga", "turkish airlines euroleague"], country: [], reject: ["eurocup"] },
-  fiba_ac: { ids: [], tokens: ["americup"], country: [], reject: [] },
-  fiba_ac_w: { ids: [], tokens: ["americup"], country: [], reject: [] },
-  fiba_asia_preq: { ids: [], tokens: ["asia cup", "pre qualification", "pre-qualification", "prequalification"], country: [], reject: [] },
-  fiba_eb: { ids: [], tokens: ["eurobasket"], country: [], reject: ["qualification", "women", "u20"] },
-  fiba_eb_q: { ids: [], tokens: ["eurobasket", "qualification"], country: [], reject: ["u20"] },
-  fiba_eb_w: { ids: [], tokens: ["eurobasket"], country: [], reject: ["u20"] },
-  fiba_intercontinental_cup: { ids: [], tokens: ["intercontinental"], country: [], reject: [] },
-  fiba_u20eb_a: { ids: [], tokens: ["u20 eurobasket", "u20 euro basket", "division a"], country: [], reject: ["division b"] },
-  fiba_u20eb_b: { ids: [], tokens: ["u20 eurobasket", "u20 euro basket", "division b"], country: [], reject: [] },
-  finland_koris: { ids: [], tokens: ["korisliiga"], country: ["finland"], reject: [] },
-  france_lfb_w: { ids: [], tokens: ["lfb"], country: ["france"], reject: [] },
-  proa: { ids: [], tokens: ["betclic elite", "jeep elite", "lnb elite", "pro a", "betclic"], country: ["france"], reject: [] },
-  prob: { ids: [], tokens: ["pro b", "elite 2"], country: ["france"], reject: ["nm1"] },
-  georgia_super: { ids: [], tokens: ["superleague", "super league"], country: ["georgia"], reject: [] },
+  fiba_ac: { ids: ["681"], tokens: ["americup"], country: [], reject: [] },
+  fiba_ac_w: { ids: ["730"], tokens: ["americup"], country: [], reject: [] },
+  fiba_asia_preq: { ids: ["37114"], tokens: ["asia cup", "pre qualification", "pre-qualification", "prequalification"], country: [], reject: [] },
+  fiba_eb: { ids: ["285"], tokens: ["eurobasket"], country: [], reject: ["qualification", "women", "u20"] },
+  fiba_eb_q: { ids: ["662"], tokens: ["eurobasket", "qualification"], country: [], reject: ["u20"] },
+  fiba_eb_w: { ids: ["659"], tokens: ["eurobasket"], country: [], reject: ["u20"] },
+  fiba_intercontinental_cup: { ids: ["1512"], tokens: ["intercontinental"], country: [], reject: [] },
+  fiba_u20eb_a: { ids: ["893"], tokens: ["u20 eurobasket", "u20 euro basket", "division a", "u20 fiba eurobasket div a"], country: [], reject: ["division b", "div b"] },
+  fiba_u20eb_b: { ids: ["894"], tokens: ["u20 eurobasket", "u20 euro basket", "division b", "u20 fiba eurobasket div b"], country: [], reject: [] },
+  finland_koris: { ids: ["226"], tokens: ["korisliiga"], country: ["finland"], reject: [] },
+  france_lfb_w: { ids: ["1854"], tokens: ["lfb"], country: ["france"], reject: [] },
+  proa: { ids: ["156"], tokens: ["betclic elite", "jeep elite", "lnb elite", "pro a", "betclic"], country: ["france"], reject: [] },
+  prob: { ids: ["1189"], tokens: ["pro b", "elite 2"], country: ["france"], reject: ["nm1"] },
+  georgia_super: { ids: ["24106"], tokens: ["superleague", "super league"], country: ["georgia"], reject: [] },
   georgia_w: { ids: [], tokens: ["superliga", "women"], country: ["georgia"], reject: [] },
-  germany_dbbl: { ids: [], tokens: ["dbbl", "damen basketball"], country: ["germany"], reject: [] },
-  germany_proa: { ids: [], tokens: ["pro a", "proa"], country: ["germany"], reject: ["betclic", "jeep elite"] },
-  gb_super_league_w: { ids: [], tokens: ["super league", "wbbl", "slb women"], country: ["great britain", "england", "britain"], reject: [] },
-  greece_a1_w: { ids: [], tokens: ["a1", "women"], country: ["greece"], reject: [] },
+  germany_dbbl: { ids: ["251"], tokens: ["dbbl", "damen basketball"], country: ["germany"], reject: [] },
+  germany_proa: { ids: ["1165"], tokens: ["pro a", "proa"], country: ["germany"], reject: ["betclic", "jeep elite"] },
+  gb_super_league_w: { ids: ["26814"], tokens: ["super league", "wbbl", "slb women"], country: ["great britain", "england", "britain"], reject: [] },
+  greece_a1_w: { ids: ["9543"], tokens: ["a1", "women"], country: ["greece"], reject: [] },
   bcl: { ids: ["304"], tokens: ["stoiximan", "gbl", "greek basket", "basket league", "a1"], country: ["greece"], reject: ["champions league"] },
   guatemala_national: { ids: [], tokens: ["liga nacional"], country: ["guatemala"], reject: [] },
-  hongkong_a1: { ids: [], tokens: ["hka1", "a1", "hong kong", "hongkong"], country: ["hong kong", "hongkong"], reject: [] },
+  hongkong_a1: { ids: ["31336"], tokens: ["hka1", "a1", "hong kong", "hongkong"], country: ["hong kong", "hongkong"], reject: [] },
   hungary_nb1: { ids: ["10594"], tokens: ["nb i", "nb 1", "nb-i", "nb1", "hungary nb"], country: ["hungary"], reject: [] },
-  iceland_1st: { ids: [], tokens: ["first division", "division 1", "1 deild"], country: ["iceland"], reject: ["urvalsdeild"] },
-  iceland_urvalsdeild: { ids: [], tokens: ["urvalsdeild"], country: ["iceland"], reject: [] },
-  iceland_urvalsdeild_w: { ids: [], tokens: ["urvalsdeild"], country: ["iceland"], reject: [] },
+  iceland_1st: { ids: ["30073"], tokens: ["first division", "division 1", "1 deild", "1st division"], country: ["iceland"], reject: ["urvalsdeild"] },
+  iceland_urvalsdeild: { ids: ["9507"], tokens: ["urvalsdeild"], country: ["iceland"], reject: [] },
+  iceland_urvalsdeild_w: { ids: ["9504"], tokens: ["urvalsdeild"], country: ["iceland"], reject: [] },
   india_inbl: { ids: [], tokens: ["inbl"], country: ["india"], reject: [] },
-  indonesia_ibl: { ids: [], tokens: ["ibl"], country: ["indonesia"], reject: [] },
-  intl_friendly: { ids: [], tokens: ["friendly"], country: [], reject: [] },
-  iran_super_league: { ids: [], tokens: ["super league", "iran"], country: ["iran"], reject: [] },
-  ireland_super_league: { ids: [], tokens: ["super league"], country: ["ireland"], reject: [] },
-  isl: { ids: [], tokens: ["winner league", "israel super", "winner"], country: ["israel"], reject: ["national league"] },
-  israel_w: { ids: [], tokens: ["women", "premier"], country: ["israel"], reject: [] },
-  italy_a1_w: { ids: [], tokens: ["serie a1", "a1"], country: ["italy"], reject: ["a2"] },
-  lba: { ids: [], tokens: ["lega basket", "serie a", "lba"], country: ["italy"], reject: ["serie a2", "serie b"] },
-  italy_a2: { ids: [], tokens: ["serie a2", "a2"], country: ["italy"], reject: ["serie b"] },
-  italy_a2_w: { ids: [], tokens: ["serie a2", "a2"], country: ["italy"], reject: [] },
+  indonesia_ibl: { ids: ["10155"], tokens: ["ibl"], country: ["indonesia"], reject: [] },
+  intl_friendly: { ids: ["871"], tokens: ["friendly"], country: [], reject: [] },
+  iran_super_league: { ids: ["11511"], tokens: ["super league", "iran"], country: ["iran"], reject: [] },
+  ireland_super_league: { ids: ["38647"], tokens: ["super league"], country: ["ireland"], reject: [] },
+  isl: { ids: ["1197"], tokens: ["winner league", "israel super", "winner", "israeli basketball super league"], country: ["israel"], reject: ["national league"] },
+  israel_w: { ids: ["20078"], tokens: ["women", "premier"], country: ["israel"], reject: [] },
+  italy_a1_w: { ids: ["556"], tokens: ["serie a1", "a1"], country: ["italy"], reject: ["a2"] },
+  lba: { ids: ["262"], tokens: ["lega basket", "serie a", "lba"], country: ["italy"], reject: ["serie a2", "serie b"] },
+  italy_a2: { ids: ["1520"], tokens: ["serie a2", "a2"], country: ["italy"], reject: ["serie b"] },
+  italy_a2_w: { ids: ["24062"], tokens: ["serie a2", "a2"], country: ["italy"], reject: [] },
   italy_serb: { ids: ["14251"], tokens: ["serie b", "serie-b"], country: ["italy"], reject: ["interregionale"] },
-  bleague: { ids: [], tokens: ["b.league", "b league", "bleague", "b-league", "b1"], country: ["japan"], reject: [] },
-  japan_w: { ids: [], tokens: ["w league", "wjbl"], country: ["japan"], reject: [] },
-  jordan_premier: { ids: [], tokens: ["premier"], country: ["jordan"], reject: [] },
-  kazakhstan_champ: { ids: [], tokens: ["championship", "kazakhstan"], country: ["kazakhstan"], reject: [] },
-  korea_kbl: { ids: [], tokens: ["kbl"], country: ["korea"], reject: ["wkbl"] },
-  kosovo_superleague: { ids: [], tokens: ["superleague", "super league"], country: ["kosovo"], reject: [] },
-  kuwait_div1: { ids: [], tokens: ["division", "kuwait"], country: ["kuwait"], reject: [] },
-  latvia_lbl: { ids: [], tokens: ["lbl"], country: ["latvia"], reject: [] },
+  bleague: { ids: ["1502"], tokens: ["b.league", "b league", "bleague", "b-league", "b1"], country: ["japan"], reject: [] },
+  japan_w: { ids: ["19521"], tokens: ["w league", "wjbl"], country: ["japan"], reject: [] },
+  jordan_premier: { ids: ["26243"], tokens: ["premier"], country: ["jordan"], reject: [] },
+  kazakhstan_champ: { ids: ["29868"], tokens: ["championship", "kazakhstan"], country: ["kazakhstan"], reject: [] },
+  korea_kbl: { ids: ["1540"], tokens: ["kbl"], country: ["korea"], reject: ["wkbl"] },
+  kosovo_superleague: { ids: ["16731", "29657"], tokens: ["superleague", "super league", "superliga"], country: ["kosovo"], reject: [] },
+  kuwait_div1: { ids: ["25531"], tokens: ["division", "kuwait"], country: ["kuwait"], reject: [] },
+  latvia_lbl: { ids: ["982", "11479"], tokens: ["lbl", "latvian estonian"], country: ["latvia"], reject: [] },
   latvia_w: { ids: [], tokens: ["women"], country: ["latvia"], reject: [] },
-  lebanon_1st: { ids: [], tokens: ["first division", "division 1", "flb"], country: ["lebanon"], reject: [] },
-  lkl: { ids: [], tokens: ["lkl", "citadele lkl"], country: ["lithuania"], reject: [] },
+  lebanon_1st: { ids: ["14250"], tokens: ["first division", "division 1", "flb"], country: ["lebanon"], reject: [] },
+  lkl: { ids: ["975"], tokens: ["lkl", "citadele lkl"], country: ["lithuania"], reject: [] },
   lithuania_w: { ids: [], tokens: ["women", "moteru"], country: ["lithuania"], reject: [] },
-  luxembourg_total: { ids: [], tokens: ["total league"], country: ["luxembourg"], reject: [] },
+  luxembourg_total: { ids: ["29343"], tokens: ["total league", "enovos"], country: ["luxembourg"], reject: [] },
   malta_div1: { ids: [], tokens: ["division 1", "malta"], country: ["malta"], reject: [] },
-  mexico_cibacopa: { ids: [], tokens: ["cibacopa"], country: ["mexico"], reject: [] },
-  mexico_lnbp: { ids: [], tokens: ["lnbp"], country: ["mexico"], reject: [] },
-  moldova_div1: { ids: [], tokens: ["division 1", "div 1", "national division"], country: ["moldova"], reject: [] },
-  moldova_w: { ids: [], tokens: ["women"], country: ["moldova"], reject: [] },
-  mongolia_league: { ids: [], tokens: ["the league", "mongolia"], country: ["mongolia"], reject: [] },
-  montenegro_liga: { ids: [], tokens: ["prva a", "prva liga"], country: ["montenegro"], reject: [] },
-  morocco_n1: { ids: [], tokens: ["nationale 1", "division 1"], country: ["morocco"], reject: [] },
-  nznbl: { ids: [], tokens: ["nbl"], country: ["new zealand"], reject: [] },
-  nicaragua_lsb: { ids: [], tokens: ["lsb"], country: ["nicaragua"], reject: [] },
+  mexico_cibacopa: { ids: ["25416"], tokens: ["cibacopa"], country: ["mexico"], reject: [] },
+  mexico_lnbp: { ids: ["1472"], tokens: ["lnbp"], country: ["mexico"], reject: [] },
+  moldova_div1: { ids: ["30550"], tokens: ["division 1", "div 1", "national division", "divizia nationala"], country: ["moldova"], reject: ["women"] },
+  moldova_w: { ids: ["30546"], tokens: ["women"], country: ["moldova"], reject: [] },
+  mongolia_league: { ids: ["25147"], tokens: ["the league", "mongolia"], country: ["mongolia"], reject: [] },
+  montenegro_liga: { ids: ["24093"], tokens: ["prva a", "prva liga", "i a mckl"], country: ["montenegro"], reject: [] },
+  morocco_n1: { ids: ["32121"], tokens: ["nationale 1", "division 1"], country: ["morocco"], reject: [] },
+  nznbl: { ids: ["13476"], tokens: ["nbl"], country: ["new zealand"], reject: [] },
+  nicaragua_lsb: { ids: ["23936"], tokens: ["lsb"], country: ["nicaragua"], reject: [] },
   nigeria_premier: { ids: [], tokens: ["nbbf", "premier"], country: ["nigeria"], reject: [] },
-  macedonia_w: { ids: [], tokens: ["women"], country: ["macedonia"], reject: [] },
-  macedonia_superleague: { ids: [], tokens: ["super league", "superleague"], country: ["macedonia"], reject: [] },
-  norway_blno: { ids: [], tokens: ["blno"], country: ["norway"], reject: [] },
-  norway_blno_w: { ids: [], tokens: ["blno"], country: ["norway"], reject: [] },
+  macedonia_w: { ids: ["30219"], tokens: ["women", "prva liga zeni", "zeni"], country: ["macedonia"], reject: [] },
+  macedonia_superleague: { ids: ["24094"], tokens: ["super league", "superleague", "prva liga"], country: ["macedonia"], reject: ["zeni"] },
+  norway_blno: { ids: ["11470"], tokens: ["blno"], country: ["norway"], reject: [] },
+  norway_blno_w: { ids: ["29539"], tokens: ["blno"], country: ["norway"], reject: [] },
   panama_lpb: { ids: [], tokens: ["lpb"], country: ["panama"], reject: [] },
-  paraguay_lnb: { ids: [], tokens: ["lnb"], country: ["paraguay"], reject: ["lnbf"] },
-  paraguay_lnbf: { ids: [], tokens: ["lnbf"], country: ["paraguay"], reject: [] },
+  paraguay_lnb: { ids: ["26299"], tokens: ["lnb"], country: ["paraguay"], reject: ["lnbf"] },
+  paraguay_lnbf: { ids: ["29679"], tokens: ["lnbf"], country: ["paraguay"], reject: [] },
   peru_lnb: { ids: [], tokens: ["lnb"], country: ["peru"], reject: [] },
-  phil_mpbl: { ids: [], tokens: ["mpbl"], country: ["philippines"], reject: [] },
-  pba: { ids: [], tokens: ["pba", "philippine cup", "commissioner", "governors"], country: ["philippines"], reject: ["mpbl"] },
+  phil_mpbl: { ids: ["23937"], tokens: ["mpbl"], country: ["philippines"], reject: [] },
+  pba: { ids: ["1956", "1712", "1656"], tokens: ["pba", "philippine cup", "commissioner", "governors"], country: ["philippines"], reject: ["mpbl"] },
   poland_1liga: { ids: ["11467"], tokens: ["1 liga", "1-liga", "1. liga", "1st division", "pekao"], country: ["poland"], reject: ["kobiet", "orlen basket liga"] },
   poland_blk: { ids: ["1916"], tokens: ["plkk", "liga kobiet", "orlen basket liga kobiet", "blk"], country: ["poland"], reject: [] },
   plk: { ids: ["263"], tokens: ["plk", "orlen basket liga"], country: ["poland"], reject: ["1 liga", "kobiet"] },
-  portugal_lfb_w: { ids: [], tokens: ["liga feminina", "lfb"], country: ["portugal"], reject: [] },
-  portugal_lpb: { ids: [], tokens: ["lpb"], country: ["portugal"], reject: ["proliga", "taca"] },
-  portugal_proliga: { ids: [], tokens: ["proliga"], country: ["portugal"], reject: [] },
-  portugal_taca: { ids: [], tokens: ["taca", "taca da liga", "league cup"], country: ["portugal"], reject: [] },
-  puerto_rico_bsn: { ids: [], tokens: ["bsn"], country: ["puerto rico"], reject: ["bsnf"] },
-  puerto_rico_bsnf: { ids: [], tokens: ["bsnf"], country: ["puerto rico"], reject: [] },
-  qatar_league: { ids: [], tokens: ["qatar"], country: ["qatar"], reject: [] },
-  romania_ln: { ids: [], tokens: ["liga nationala", "nationala", "lnb"], country: ["romania"], reject: [] },
-  romania_w: { ids: [], tokens: ["women"], country: ["romania"], reject: [] },
-  russia_premier_w: { ids: [], tokens: ["premier"], country: ["russia"], reject: [] },
-  russia_super: { ids: [], tokens: ["super league", "vtb"], country: ["russia"], reject: [] },
-  rwanda: { ids: [], tokens: ["rwanda"], country: ["rwanda"], reject: [] },
-  saudi_league: { ids: [], tokens: ["premier", "sbl"], country: ["saudi"], reject: [] },
-  saudi_league_w: { ids: [], tokens: ["women"], country: ["saudi"], reject: [] },
+  portugal_lfb_w: { ids: ["20157"], tokens: ["liga feminina", "lfb"], country: ["portugal"], reject: [] },
+  portugal_lpb: { ids: ["1926"], tokens: ["lpb"], country: ["portugal"], reject: ["proliga", "taca"] },
+  portugal_proliga: { ids: ["21160"], tokens: ["proliga"], country: ["portugal"], reject: [] },
+  portugal_taca: { ids: ["21489"], tokens: ["taca", "taca da liga", "league cup"], country: ["portugal"], reject: [] },
+  puerto_rico_bsn: { ids: ["17374"], tokens: ["bsn"], country: ["puerto rico"], reject: ["bsnf"] },
+  puerto_rico_bsnf: { ids: ["28751"], tokens: ["bsnf"], country: ["puerto rico"], reject: [] },
+  qatar_league: { ids: ["24299", "30401"], tokens: ["qatar"], country: ["qatar"], reject: [] },
+  romania_ln: { ids: ["1948"], tokens: ["liga nationala", "nationala", "lnb", "lnbm"], country: ["romania"], reject: [] },
+  romania_w: { ids: ["19359"], tokens: ["women"], country: ["romania"], reject: [] },
+  russia_premier_w: { ids: ["1201"], tokens: ["premier"], country: ["russia"], reject: [] },
+  russia_super: { ids: ["29552"], tokens: ["super league", "vtb"], country: ["russia"], reject: [] },
+  rwanda: { ids: ["24912"], tokens: ["rwanda"], country: ["rwanda"], reject: [] },
+  saudi_league: { ids: ["24301", "29937"], tokens: ["premier", "sbl"], country: ["saudi"], reject: [] },
+  saudi_league_w: { ids: ["24271"], tokens: ["women"], country: ["saudi"], reject: [] },
   senegal_n1: { ids: [], tokens: ["nationale 1", "nm1"], country: ["senegal"], reject: [] },
-  serbia_kls: { ids: [], tokens: ["kls", "admiral bet"], country: ["serbia"], reject: [] },
-  serbia_w: { ids: [], tokens: ["women"], country: ["serbia"], reject: [] },
-  singapore_nbl: { ids: [], tokens: ["nbl"], country: ["singapore"], reject: [] },
-  slovakia_sbl: { ids: [], tokens: ["sbl"], country: ["slovakia"], reject: [] },
-  slovenia_1a: { ids: [], tokens: ["1 a skl", "1. a", "skl"], country: ["slovenia"], reject: [] },
-  slovenia_w: { ids: [], tokens: ["women"], country: ["slovenia"], reject: [] },
-  safrica_bnl: { ids: [], tokens: ["bnl"], country: ["south africa"], reject: [] },
-  korea_w: { ids: [], tokens: ["wkbl"], country: ["korea"], reject: ["kbl"] },
-  spain_liga_femenina: { ids: [], tokens: ["femenina endesa", "liga femenina", "endesa"], country: ["spain"], reject: [] },
-  spain_primera: { ids: [], tokens: ["primera feb", "leb oro", "primera"], country: ["spain"], reject: ["segunda", "femenina"] },
-  spain_segunda: { ids: [], tokens: ["segunda feb", "leb plata", "segunda"], country: ["spain"], reject: ["femenina"] },
-  sweden_w: { ids: [], tokens: ["damligan"], country: ["sweden"], reject: [] },
-  sweden_sbl: { ids: [], tokens: ["sbl"], country: ["sweden"], reject: ["damligan"] },
-  swiss_sbl: { ids: [], tokens: ["sb league", "sbl"], country: ["switzerland", "swiss"], reject: [] },
-  swiss_w: { ids: [], tokens: ["sb league", "sbl"], country: ["switzerland", "swiss"], reject: [] },
-  taipei_tpbl: { ids: [], tokens: ["tpbl", "p league", "p. league", "pleague"], country: ["taiwan", "chinese taipei"], reject: [] },
-  thailand_tbl: { ids: [], tokens: ["tbl"], country: ["thailand"], reject: [] },
-  tunisia_champ: { ids: [], tokens: ["championnat", "pro a"], country: ["tunisia"], reject: [] },
-  turkey_bsl: { ids: [], tokens: ["bsl", "super lig", "super ligi"], country: ["turkey", "turkiye"], reject: ["tbl", "tb2l", "kbsl"] },
-  turkey_tb2l: { ids: [], tokens: ["tb2l"], country: ["turkey", "turkiye"], reject: [] },
-  turkey_tbl: { ids: [], tokens: ["tbl"], country: ["turkey", "turkiye"], reject: ["tb2l", "thailand"] },
-  turkey_kbsl: { ids: [], tokens: ["kbsl", "women super"], country: ["turkey", "turkiye"], reject: [] },
+  serbia_kls: { ids: ["754"], tokens: ["kls", "admiral bet"], country: ["serbia"], reject: [] },
+  serbia_w: { ids: ["29654"], tokens: ["women"], country: ["serbia"], reject: [] },
+  singapore_nbl: { ids: ["27960"], tokens: ["nbl", "national basketball league"], country: ["singapore"], reject: [] },
+  slovakia_sbl: { ids: ["1410"], tokens: ["sbl"], country: ["slovakia"], reject: [] },
+  slovenia_1a: { ids: ["745"], tokens: ["1 a skl", "1. a", "skl", "liga otp", "otp banka"], country: ["slovenia"], reject: [] },
+  slovenia_w: { ids: ["29553"], tokens: ["women"], country: ["slovenia"], reject: [] },
+  safrica_bnl: { ids: ["22798"], tokens: ["bnl"], country: ["south africa"], reject: [] },
+  korea_w: { ids: ["2334"], tokens: ["wkbl"], country: ["korea"], reject: ["kbl"] },
+  spain_liga_femenina: { ids: ["1538"], tokens: ["femenina endesa", "liga femenina", "endesa"], country: ["spain"], reject: [] },
+  spain_primera: { ids: ["1514"], tokens: ["primera feb", "leb oro", "primera"], country: ["spain"], reject: ["segunda", "femenina"] },
+  spain_segunda: { ids: ["24118"], tokens: ["segunda feb", "leb plata", "segunda"], country: ["spain"], reject: ["femenina"] },
+  sweden_w: { ids: ["14195"], tokens: ["damligan", "swedish basketball league women"], country: ["sweden"], reject: [] },
+  sweden_sbl: { ids: ["277"], tokens: ["sbl"], country: ["sweden"], reject: ["damligan", "women"] },
+  swiss_sbl: { ids: ["1938"], tokens: ["sb league", "sbl", "lna", "switzerland lna"], country: ["switzerland", "swiss"], reject: ["women"] },
+  swiss_w: { ids: ["21124"], tokens: ["sb league", "sbl"], country: ["switzerland", "swiss"], reject: [] },
+  taipei_tpbl: { ids: ["23944"], tokens: ["tpbl", "p league", "p. league", "pleague"], country: ["taiwan", "chinese taipei"], reject: [] },
+  thailand_tbl: { ids: ["13683"], tokens: ["tbl"], country: ["thailand"], reject: [] },
+  tunisia_champ: { ids: ["14574"], tokens: ["championnat", "pro a", "national a league"], country: ["tunisia"], reject: [] },
+  turkey_bsl: { ids: ["519"], tokens: ["bsl", "super lig", "super ligi"], country: ["turkey", "turkiye"], reject: ["tbl", "tb2l", "kbsl"] },
+  turkey_tb2l: { ids: ["19844"], tokens: ["tb2l"], country: ["turkey", "turkiye"], reject: [] },
+  turkey_tbl: { ids: ["19323"], tokens: ["tbl", "1 lig"], country: ["turkey", "turkiye"], reject: ["tb2l", "thailand"] },
+  turkey_kbsl: { ids: ["1532"], tokens: ["kbsl", "women super"], country: ["turkey", "turkiye"], reject: [] },
   uae_national_league: { ids: [], tokens: ["uae", "emirates"], country: ["uae", "emirates"], reject: [] },
-  ukraine_superleague: { ids: [], tokens: ["superleague", "super league", "fbu"], country: ["ukraine"], reject: [] },
-  united_league: { ids: [], tokens: ["vtb", "united league"], country: [], reject: [] },
-  uruguay_lfb_w: { ids: [], tokens: ["lfb"], country: ["uruguay"], reject: [] },
-  uruguay_lub: { ids: [], tokens: ["lub"], country: ["uruguay"], reject: [] },
-  nba: { ids: [], tokens: ["nba"], country: [], reject: ["g league", "summer"] },
-  nba_gl: { ids: [], tokens: ["g league", "gleague"], country: [], reject: ["summer"] },
-  nba_summer: { ids: [], tokens: ["summer league"], country: [], reject: [] },
-  ncaa: { ids: [], tokens: [], country: [], reject: ["ncaa", "college"] },
-  ncaaw: { ids: [], tokens: [], country: [], reject: ["ncaa", "college"] },
-  wnba: { ids: [], tokens: ["wnba"], country: [], reject: ["preseason"] },
-  wnba_pre: { ids: [], tokens: ["wnba"], country: [], reject: [] },
+  ukraine_superleague: { ids: ["2162"], tokens: ["superleague", "super league", "fbu"], country: ["ukraine"], reject: [] },
+  united_league: { ids: ["1438"], tokens: ["vtb", "united league"], country: [], reject: [] },
+  uruguay_lfb_w: { ids: ["26277"], tokens: ["lfb"], country: ["uruguay"], reject: [] },
+  uruguay_lub: { ids: ["10587"], tokens: ["lub"], country: ["uruguay"], reject: [] },
+  nba: { ids: ["132"], tokens: ["nba"], country: [], reject: ["g league", "summer"] },
+  nba_gl: { ids: ["1580"], tokens: ["g league", "gleague"], country: [], reject: ["summer"] },
+  nba_summer: { ids: ["10415"], tokens: ["summer league"], country: [], reject: [] },
+  ncaa: { ids: ["33651", "13434"], tokens: [], country: [], reject: ["ncaa", "college"] },
+  ncaaw: { ids: ["33655", "16718"], tokens: [], country: [], reject: ["ncaa", "college"] },
+  wnba: { ids: ["486"], tokens: ["wnba"], country: [], reject: ["preseason"] },
+  wnba_pre: { ids: ["9509"], tokens: ["wnba"], country: [], reject: [] },
   uzbekistan_super: { ids: [], tokens: ["super league"], country: ["uzbekistan"], reject: [] },
-  venezuela_sl: { ids: [], tokens: ["superliga", "spb"], country: ["venezuela"], reject: [] },
-  vietnam_vba: { ids: [], tokens: ["vba"], country: ["vietnam"], reject: [] },
-  fiba_wc: { ids: [], tokens: ["world cup"], country: [], reject: ["qualification", "women"] },
-  fiba_wc_q_africa: { ids: [], tokens: ["world cup", "africa"], country: [], reject: [] },
-  fiba_wc_q_americas: { ids: [], tokens: ["world cup", "americas"], country: [], reject: [] },
-  fiba_wc_q_asia: { ids: [], tokens: ["world cup", "asia"], country: [], reject: [] },
-  fiba_wc_q_europe: { ids: [], tokens: ["world cup", "europe"], country: [], reject: [] },
-  fiba_wc_w: { ids: [], tokens: ["world cup"], country: [], reject: ["qualification"] },
+  venezuela_sl: { ids: ["16764"], tokens: ["superliga", "spb"], country: ["venezuela"], reject: [] },
+  vietnam_vba: { ids: ["20590"], tokens: ["vba"], country: ["vietnam"], reject: [] },
+  fiba_wc: { ids: ["441"], tokens: ["world cup"], country: [], reject: ["qualification", "women"] },
+  fiba_wc_q_africa: { ids: ["10460"], tokens: ["world cup", "africa"], country: [], reject: [] },
+  fiba_wc_q_americas: { ids: ["10461"], tokens: ["world cup", "americas"], country: [], reject: [] },
+  fiba_wc_q_asia: { ids: ["10486"], tokens: ["world cup", "asia"], country: [], reject: [] },
+  fiba_wc_q_europe: { ids: ["10437"], tokens: ["world cup", "europe"], country: [], reject: [] },
+  fiba_wc_w: { ids: ["442"], tokens: ["world cup"], country: [], reject: ["qualification"] },
   unknown: { ids: [], tokens: [], country: [], reject: [] }
 };
 const FULL_KEY_TOKEN_OVERRIDES = (function () {
@@ -7011,76 +7138,7 @@ async function parseSofascoreIndividual(side) {
 if (typeof engineDebug === "function") engineDebug("json paste A path", { note: "diagnostic only" });
     } else {
     }
-    const _leagueMappedTid = getSofaUniqueTournamentIdForLeague(leagueSelect);
-    if (_leagueMappedTid) {
-      window.__fixtureTournamentId = _leagueMappedTid;
-      const _tidEl = document.getElementById("ssTournamentId");
-      const _tNameEl = document.getElementById("ssTournamentName");
-      if (_tidEl) _tidEl.value = _leagueMappedTid;
-      if (_tNameEl) {
-        const _lab = _leagueLabel || leagueSelect;
-        _tNameEl.textContent = "(" + _lab + " · locked to selected league)";
-      }
-      engineDebug("Tournament forced from selected league", {
-        side,
-        league: leagueSelect,
-        tid: _leagueMappedTid,
-      });
-    } else if (getFixtureTournamentId() == null) {
-      const _evA = window.__lastEventsA || [];
-      const _evB = window.__lastEventsB || [];
-      if (_evA.length > 0 && _evB.length > 0) {
-        const _candidates = detectTournamentIdIntersection(_evA, _evB);
-        if (_candidates.length >= 1) {
-          const _best = _candidates[0];
-          window.__fixtureTournamentId = _best.id;
-          const _tidEl = document.getElementById("ssTournamentId");
-          const _tNameEl = document.getElementById("ssTournamentName");
-          if (_tidEl && !_tidEl.value.trim()) _tidEl.value = _best.id;
-          if (_tNameEl)
-            _tNameEl.textContent = _best.name
-              ? "(" + _best.name + (_candidates.length > 1 ? " · override if wrong" : "") + ")"
-              : "";
-          engineDebug(
-            "Tournament auto-detected via intersection: " + _best.id + " (" + _best.name + ")",
-            { side, candidates: _candidates.length },
-          );
-          if (_best.combined < 3 && _tNameEl) {
-            _tNameEl.textContent +=
-              " ⚠ thin match (" + _best.combined + " games) — verify manually";
-            const _ssStatusEl = document.getElementById("ssFetchStatus");
-            if (_ssStatusEl) {
-              _ssStatusEl.style.color = "#d98a00";
-              _ssStatusEl.textContent =
-                "⚠ Tournament auto-match is thin (" +
-                _best.combined +
-                " games combined). Consider entering the Tournament ID manually.";
-            }
-          }
-        } else {
-          const _tNameEl = document.getElementById("ssTournamentName");
-          if (_tNameEl)
-            _tNameEl.textContent = "(no shared tournament found — paste fixture JSON or enter ID)";
-          engineDebug("Intersection detection: no shared tournament between both teams", { side });
-        }
-      } else {
-        const primaryTid = detectPrimaryTournamentForEvents(events);
-        if (primaryTid) {
-          window.__fixtureTournamentId = primaryTid;
-          const _tidEl = document.getElementById("ssTournamentId");
-          const _tNameEl = document.getElementById("ssTournamentName");
-          if (_tidEl && !_tidEl.value.trim()) _tidEl.value = primaryTid;
-          const primaryEvent = events.find(
-            (ev) => String(ev?.tournament?.uniqueTournament?.id) === primaryTid,
-          );
-          const primaryName =
-            primaryEvent?.tournament?.name ||
-            primaryEvent?.tournament?.uniqueTournament?.name ||
-            "";
-          if (_tNameEl && primaryName) _tNameEl.textContent = "(" + primaryName + ")";
-        }
-      }
-    }
+    if (typeof ssApplyCompetitionLock === "function") ssApplyCompetitionLock(); /* v2.5.2: one lock for both teams (was: first team's most-played competition) */
     const isFirstPaste =
       side === "A"
         ? document.getElementById("aFTScored")?.value?.trim() === ""
@@ -7228,14 +7286,9 @@ function extractH2HFromPastedEvents() {
   let _h2hTournamentId = null;
   if (!_friendlyH2HPaste) {
     const _fixtureTid = getFixtureTournamentId();
-    const _specH2H = (typeof SOFA_LEAGUE_MATCH === "object" && SOFA_LEAGUE_MATCH[_leagueKeyH2HPaste]) || null;
-    const _knownH2HIds = Array.isArray(_specH2H?.ids) ? _specH2H.ids.map(String) : [];
-    _h2hTournamentId = _fixtureTid != null && _fixtureTid !== "" ? String(_fixtureTid) : (_knownH2HIds.find(id => uniqueEvents.some(ev => String(ev?.tournament?.uniqueTournament?.id || "") === id)) || null);
+    if (_fixtureTid != null && _fixtureTid !== "") _h2hTournamentId = String(_fixtureTid);
+    else { const _rcH = typeof ssResolveCompetition === "function" ? ssResolveCompetition(_leagueKeyH2HPaste, uniqueEvents, uniqueEvents) : null; _h2hTournamentId = _rcH && _rcH.id ? String(_rcH.id) : null; } /* v2.5.2: no write-back into SOFA_LEAGUE_MATCH */
     if (!_h2hTournamentId && typeof detectPrimaryTournamentForEvents === "function") _h2hTournamentId = detectPrimaryTournamentForEvents(uniqueEvents);
-    try {
-      const _specPersist = SOFA_LEAGUE_MATCH[_leagueKeyH2HPaste];
-      if (_h2hTournamentId && _specPersist && Array.isArray(_specPersist.ids) && !_specPersist.ids.map(String).includes(String(_h2hTournamentId))) _specPersist.ids.push(String(_h2hTournamentId));
-    } catch (_ePersistTid) {}
     /* STRICT COMPETITION: without a tournament id the games cannot be tied to one competition, so H2H is left out */
     if (false && _h2hTournamentId == null) { /* DECISIONS 4: any competition */
       clearAutoH2HState();
@@ -11129,7 +11182,9 @@ function computeQuarterProjection({
       const bVenueQ = _qVenueNeutral ? [] : getResolvedVenueSeries("B", qKey, "scored", _ctxRoot, _parsed);
       const aVenueQA = _qVenueNeutral ? [] : getResolvedVenueSeries("A", qKey, "allowed", _ctxRoot, _parsed);
       const bVenueQA = _qVenueNeutral ? [] : getResolvedVenueSeries("B", qKey, "allowed", _ctxRoot, _parsed);
-      const _qVenueMin = Math.max(1, Number(getParam("quarterSpreadMinSampleSplit", league) ?? 3));
+      /* P4-14: DECISIONS — venue splits blend only once 5+ venue games exist. This reused the quarter-MARGIN spread
+         sample knob (3), so quarter totals blended venue form from 3 games. Use the same venue minimum as FT/1H. */
+      const _qVenueMin = Math.max(1, Number((typeof VENUE_BLEND_CONFIG !== "undefined" && VENUE_BLEND_CONFIG.minGames) || 5));
       const _qAScoredOverall = _dateAwareAvgAQ;
       const _qBScoredOverall = _dateAwareAvgBQ;
       const _qAVenueSc = getDateAwareOrFallbackAverage(aVenueQ, "A", qKey, _ctxRoot, league, config?.recencyWeights ?? null, "venue");
@@ -18480,6 +18535,7 @@ async function _bbRdProxyFetchNet(url, timeoutMs = 12000) {
     if (/live\.euroleague\.net\/api\/Header/i.test(s)) return 8 * 1000;
     if (/api\.kbl\.or\.kr\/match\/list\/today/i.test(s)) return 10 * 1000;
     if (/api\.kbl\.or\.kr\/match\/[A-Za-z0-9]+$/i.test(s)) return 10 * 1000;
+    if (/api\.kbl\.or\.kr\/match\/[A-Za-z0-9]+\/text-cast$/i.test(s)) return 8 * 1000; /* P4-LIVECLOCK */
     return 15 * 60 * 1000;
   }
   if (_proxyFetchCache.has(cacheKey)) {
@@ -18612,9 +18668,8 @@ async function _bbRdProxyFetchNet(url, timeoutMs = 12000) {
         const workerData = await fetchJson(
           WORKER_URL + "?url=" + encodeURIComponent(url),
           "Worker",
-          {
-            "X-Engine-Secret": (typeof CLIENT_RATE_GATE_TOKEN !== "undefined" ? CLIENT_RATE_GATE_TOKEN : WORKER_SHARED_SECRET),
-          },
+          undefined, /* P4-9: the X-Engine-Secret header is not in the Worker's Access-Control-Allow-Headers, so the browser's CORS preflight
+                        blocked EVERY Worker fallback (verified live 10 Oct 2026); the Worker never checks it. No custom header = simple GET, no preflight. */
           workerTimeoutMs,
         );
         try { if (directErr && directErr.name === "TypeError" && !directErr.bbRdSkip) _bbRdDirectBlocked.set(_host, Date.now()); } catch (_rd4) {} /* FIX RD4 */
@@ -18745,7 +18800,7 @@ function applySmartLineToPick(pickRow, rawInput, league, wideRangeState = null) 
 function parseMarketRangeMeta(val) {
   if (val === null || val === undefined || !String(val).trim()) return null;
   const raw = String(val).trim();
-  const normalizedRaw = normalizeDashes(raw);
+  const normalizedRaw = normalizeDashes(raw).replace(/(\d),(\d)/g, "$1.$2"); /* P4-3: comma decimals (85,5 / 150,5 - 160,5) from comma-locale keyboards */
   const normalizeLine = (num) => Number(num);
   const finitePositive = (num) => Number.isFinite(num) && num > 0;
   const rangeMatch = normalizedRaw.match(
@@ -19296,6 +19351,20 @@ function bbMarginSample(mk, parsed) {
     return sc.map((v, i) => v - al[i]).filter((v) => Number.isFinite(v));
   } catch (_e) { return null; }
 }
+/* P4-7: one shadow entry per game/market/side/line. Re-running the same game used to append a duplicate each time
+   (counted again when settled) and the 2000-entry log (~1.6 MB) competed with the tracker for Safari's 5 MB storage. */
+function bbShadowLog(entry) {
+  try {
+    const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
+    const key = (e) => [e.eventId || ("noid:" + (e.league || "") + ":" + (e.roleA || "") + ":" + new Date(e.ts || 0).toISOString().slice(0, 10)), e.marketKey, e.side, e.line].join("|");
+    const k = key(Object.assign({}, entry, { ts: entry.ts || Date.now() }));
+    const i = arr.findIndex((e) => !e.result && key(e) === k);
+    if (i >= 0) arr[i] = entry; else arr.push(entry);
+    let out = arr.slice(-1000);
+    try { localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(out)); }
+    catch (_q) { out = out.slice(-300); localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(out)); }
+  } catch (_e) {}
+}
 /* BB-FIX: virtual settlement of blocked picks. Call bbShadowSettle(eventId, marketKey, actualValue) after a game ends; bbShadowReport() shows whether blocks were right. */
 function bbShadowSettle(eventId, marketKey, actual) {
   try {
@@ -19440,12 +19509,8 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
           const why = "TRAP BLOCK: " + hsig.filter((x) => x.level !== "INFO").map((x) => x.note).join("; ");
           p.blockedPick = p.pick;
           forcePickNoPlayWithNote(p, why); /* BB-FIX #4: apply NO PLAY first so the shadow log reads the final noPlayReason */
-          try {
-            const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
-            arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side: txt, line: Lh, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "",
-              marketIntegrity: p.marketIntegrity || null, noPlayReason: p.noPlayReason || why });
-            localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr.slice(-2000)));
-          } catch (_e) {}
+          bbShadowLog({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side: txt, line: Lh, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "",
+              marketIntegrity: p.marketIntegrity || null, noPlayReason: p.noPlayReason || why }); /* P4-7 */
         }
         return;
       }
@@ -19582,12 +19647,8 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
         const why = "TRAP BLOCK: " + sig.filter((x) => x.level !== "INFO").map((x) => "[" + x.level + "] " + x.note).join("; ");
         p.blockedPick = p.pick;
         forcePickNoPlayWithNote(p, why); /* BB-FIX #4: apply NO PLAY first so the shadow log reads the final noPlayReason */
-        try {
-          const arr = JSON.parse(localStorage.getItem("BB_SHADOW_BLOCKED") || "[]");
-          arr.push({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side, line: L, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "",
-              marketIntegrity: p.marketIntegrity || null, noPlayReason: p.noPlayReason || why });
-          localStorage.setItem("BB_SHADOW_BLOCKED", JSON.stringify(arr.slice(-2000)));
-        } catch (_e) {}
+        bbShadowLog({ ts: Date.now(), eventId: (typeof getCurrentFixtureMeta === "function" ? (getCurrentFixtureMeta() || {}).eventId : null) || null, league, marketKey: mk, side, line: L, proj: p.proj, reason: why, roleA: (typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "") || "",
+              marketIntegrity: p.marketIntegrity || null, noPlayReason: p.noPlayReason || why }); /* P4-7 */
       }
     } catch (_ge) {
       if (typeof engineDebug === "function") engineDebug("applyBBMarketGate failed", { error: String(_ge && _ge.message || _ge) });
@@ -19668,7 +19729,7 @@ function describeLast10Field(id) {
 }
 function countLast10Values(raw) {
   return String(raw == null ? "" : raw)
-    .split(",")
+    .split(/[,;\s]+/) /* P4-5: same separators readLooseSeries accepts, so "80 81 82" cannot skip the 8-10 rule */
     .map(function (x) { return x.trim(); })
     .filter(function (x) { return x !== "" && bbStrictFinite(x); }).length;
 }
@@ -19901,13 +19962,16 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
     const sideObj = root?.[side] || {};
     const scoped = sideObj?.[scope] || {};
     const mk = String(marketKey || "ft");
-    if (String(metric || "").toLowerCase() === "allowed") {
-      dates = scoped[mk + "AllowedDates10"] || scoped[mk + "AllowedDates"] || null;
-    } else {
-      dates = scoped[mk + "ScoredDates10"] || scoped[mk + "ScoredDates"] || (scope === "overall" ? sideObj.overall?.ftScoredDates10 : null) || null;
-    }
+    /* v2.5.1: first array whose length matches the series (an empty [] no longer blocks the fallbacks) */
+    const fit = function () { for (let i = 0; i < arguments.length; i++) { const d = arguments[i]; if (Array.isArray(d) && d.length && d.length === raw.length) return d; } return null; };
+    const ftFallback = scope === "overall" ? sideObj.overall?.ftScoredDates10 : null; /* pre-existing behaviour, now only when the lengths match */
+    const own = [scoped[mk + "ScoredDates10"], scoped[mk + "ScoredDates"]], ownAllowed = [scoped[mk + "AllowedDates10"], scoped[mk + "AllowedDates"]];
+    /* scored and allowed values come from the same game rows, so either one's dates are the lineage of both */
+    if (String(metric || "").toLowerCase() === "allowed") dates = fit(...ownAllowed, ...own, ftFallback);
+    else dates = fit(...own, ...ownAllowed, ftFallback);
   }
   if (!dates || !dates.length) dates = getStashedSeriesDates(side, marketKey, metric);
+  if ((!dates || dates.length !== raw.length) && String(metric || "").toLowerCase() === "allowed") { const _sd = getStashedSeriesDates(side, marketKey, "scored"); if (Array.isArray(_sd) && _sd.length === raw.length) dates = _sd; }
   let asOf = null;
   try {
     asOf = typeof resolvePredictionAsOf === "function" ? resolvePredictionAsOf(null, root) || null : null;
@@ -19918,8 +19982,12 @@ function getDateAwareOrFallbackAverage(series, side, marketKey, contextData, lea
   } catch (_eAs) {}
   if (sourceIsFetched) {
     if (!Array.isArray(dates) || dates.length !== raw.length) {
-      if (typeof engineDebug === "function") engineDebug("getDateAwareOrFallbackAverage: strict event lineage failure", { side, marketKey, scope, seriesLen: raw.length, datesLen: Array.isArray(dates) ? dates.length : 0 });
-      return NaN;
+      /* v2.5.1: no aligned dates. Live prediction (as-of now/upcoming): use the undated recency average and log a [WARN].
+         Historical replay (as-of in the past): stay strict (NaN) so no later game can leak in. */
+      let _cut = NaN; try { _cut = asOf ? (typeof normalizeAsOfCutoff === "function" ? normalizeAsOfCutoff(asOf) : Date.parse(asOf)) : NaN; } catch (_c) {}
+      const _live = !Number.isFinite(_cut) || _cut >= Date.now() - 12 * 3600 * 1000;
+      if (typeof engineDebug === "function") engineDebug("[WARN] date lineage unavailable for " + side + " " + marketKey + " " + scope + (metric ? " " + metric : "") + (_live ? ": using undated recency average" : ": replay, value skipped"), { side, marketKey, scope, metric, seriesLen: raw.length, datesLen: Array.isArray(dates) ? dates.length : 0 });
+      return _live ? weightedRecentAverage(clean, recencyWeights, league, marketKey) : NaN;
     }
     if (asOf) {
       const cutoff = typeof normalizeAsOfCutoff === "function" ? normalizeAsOfCutoff(asOf) : Date.parse(asOf);
@@ -20082,7 +20150,8 @@ function ensureTrackedPickKeys(pick = {}) {
     getTrackerImpactLabel(next.trackerImpactKey);
   next.resultStatus = String(next.resultStatus || "pending").toLowerCase();
   if (["win", "loss", "push"].includes(next.resultStatus) && !next.settledAt) {
-    next.settledAt = next.eventDate || next.createdAt || "1970-01-01T00:00:00.000Z";
+    /* P4-13: a manual settlement already carries its own time; only fall back to the game time when nothing else exists */
+    next.settledAt = next.manualSettledAt || next.eventDate || next.createdAt || "1970-01-01T00:00:00.000Z";
   }
   next.modelVersion = normalizeModelVersion(next.modelVersion);
   next.createdAt = next.createdAt || new Date().toISOString();
@@ -21603,6 +21672,7 @@ function _tickLiveClocks() {
     const eid = el.dataset.liveClk;
     const info = g_liveGameStatus.get(eid);
     if (!info || info.clock === "HALF") return;
+    if (info.clockSource === "last-play") return; /* P4-LIVECLOCK: KBL clock is the time of the last play; counting it down would invent time */
     const capturedAt = info.capturedAt || Date.now();
     const origSecs = parseClockToSeconds(info.clock);
     if (origSecs === null) return;
@@ -22494,6 +22564,7 @@ function archiveExpiredTrackedPicks() {
 
 <script>function safeParseDate(val) {
   if (!val) return 0;
+  if (typeof val === "number" || /^\d{9,13}$/.test(String(val).trim())) { const n = Number(val); return n > 0 ? (n < 1e11 ? n * 1000 : n) : 0; } /* P4-6: epoch s/ms */
   let ms = Date.parse(String(val));
   if (Number.isFinite(ms) && ms > 0) return ms;
   ms = Date.parse(String(val).replace(/-/g, "/").replace("T", " "));
@@ -22660,7 +22731,9 @@ function startTrackerHousekeepingTicker() {
   stopTrackerHousekeepingTicker();
   _trackerHousekeepingTimer = setInterval(() => {
     try {
-      if (archiveExpiredTrackedPicks()) renderTrackedPicks();
+      /* P4-13: re-render every minute while the modal is open (renderTrackedPicks runs the archive sweep itself), so a
+         settled pick that is already in archivedPicks also drops off exactly when its 10 h window ends */
+      renderTrackedPicks();
     } catch (_hkErr) {
       engineDebug("tracker housekeeping tick failed", { error: _hkErr?.message || String(_hkErr) });
     }
@@ -22721,10 +22794,20 @@ function renderTrackedPicks() {
   const archived = Array.isArray(AppState.tracker.state.archivedPicks)
     ? AppState.tracker.state.archivedPicks
     : [];
-  const allPicks = [...active];
+  /* P4-13: settled picks must stay listed for TRACKER_SETTLED_VISIBLE_MS (10 h) after settlement. Cloud sync (v3)
+     files every settled pick in an "r:" chunk, which loads into archivedPicks, and reconcileTrackerBucketConflicts
+     then prefers that archived copy over the active one, so a pick vanished from this list (active-only) right
+     after it settled. Also take recently-settled archived picks; isTrackedPickVisibleOnPage measures the window
+     from settledAt. Active copies come first, so they win the de-dup below. */
+  const _recentArchivedSettled = archived.filter((p) => {
+    if (!p) return false;
+    const st = String(p.resultStatus || "").toLowerCase();
+    return (st === "win" || st === "loss" || st === "push") && isTrackedPickVisibleOnPage(p);
+  });
+  const allPicks = [...active, ..._recentArchivedSettled];
   const uniquePicksMap = new Map();
   allPicks.forEach((p) => {
-    const sig = makeTrackedSignature(p);
+    const sig = (typeof makeTrackerActiveMergeKey === "function" && makeTrackerActiveMergeKey(ensureTrackedPickKeys(p))) || makeTrackedSignature(p);
     if (
       !uniquePicksMap.has(sig) ||
       getTrackedPickTimeMs(p) > getTrackedPickTimeMs(uniquePicksMap.get(sig))
@@ -22895,7 +22978,7 @@ function renderTrackedPicks() {
                   _liveClockLabel === "HALF"
                     ? "HALF"
                     : _liveClockLabel.replace(/^(Q\d+|OT\d*)\s+/i, "");
-                const safeClock = escapeHtml(_clockOnly);
+                const safeClock = escapeHtml(String(_clockOnly).trim() || String(_liveClockLabel).trim()); /* P4-LIVECLOCK: no clock from the source -> show the quarter */
                 const _hasLiveScore =
                   Number.isFinite(_liveInfo.homeScore) && Number.isFinite(_liveInfo.awayScore);
                 const homeTotal = _hasLiveScore ? Math.round(_liveInfo.homeScore) : null;
@@ -25757,6 +25840,7 @@ async function refreshTrackedPickResults() {
               }
               const base = getTrackedLeagueApiBase(p.league);
               if (!base) return null;
+              if (!/^\d+$/.test(String(p.eventId || ""))) return null; /* P4-10: ESPN ids are numeric; manual-... ids returned HTTP 400 on every refresh */
               return [`${p.league}:${p.eventId}`, { source: "espn", base, eventId: p.eventId }];
             })
             .filter(Boolean),
@@ -25982,6 +26066,7 @@ async function refreshTrackedPickResults() {
               _existingLive?._expiredAt && Date.now() - _existingLive._expiredAt > 5 * 60 * 1000
             )) {
               g_liveGameStatus.set(pick.eventId, {
+                clockSource: (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(pick.league || "")) ? "last-play" : undefined, /* P4-LIVECLOCK */
                 period: Number(period || 0),
                 clock: _isHalf ? "HALF" : String(clock || ""),
                 statusName: String(statusName || ""),
@@ -26667,11 +26752,11 @@ function bbPreAdjustmentForMarket(mk, c) {
    Continue the audit at Section 10.
    Part: Head-to-head weight.
    Function: getH2HWeight.
-   Role: H2H blend weight. Ceiling is 0.35. Can be lower.
+   Role: H2H blend weight. Ceiling is 0.20 (DECISIONS 4).
    Chunks below are numbered one statement at a time. Nothing in this section is grouped past a single statement.
    ============================================================ */
 function getH2HWeight(lenA, lenB) {
-  /* FIX_GUIDE step 4: H2H needs >= 4 games; weight n/(n+20), capped at 25%. */
+  /* FIX_GUIDE step 4: H2H needs >= 4 games; weight n/(n+20), capped at 20% (DECISIONS 4). */
   const n = Math.min(Number(lenA) || 0, Number(lenB) || 0);
   if (n < 4) return 0;
   return Math.min(0.20, n / (n + 20)); /* DECISIONS 4: 4 meetings 0.167, 5+ 0.20 */
@@ -30250,6 +30335,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         h1Allowed10,
         h1ScoredDates: h1Scored10Dates,
         h1AllowedDates: h1Allowed10Dates,
+        h2ScoredDates: h2Scored10Dates, /* v2.5.1 */
         h2AllowedDates: h2Allowed10Dates,
         q1ScoredDates: qDates.q1,
         q2ScoredDates: qDates.q2,
@@ -32100,6 +32186,7 @@ function kblApplyDetailQuarters(norm, detail) {
   if (g.isEnded != null) norm.isEnded = kblTruthy(g.isEnded);
   if (norm.isEnded) norm.status = "result";
   else if (norm.isStarted) norm.status = "playing";
+  norm.liveClock = detail.__bbLiveClock || null; /* P4-LIVECLOCK */
   if (norm.home.score == null && hq && Number.isFinite(hq.q1)) {
     norm.home.score = (hq.q1 || 0) + (hq.q2 || 0) + (hq.q3 || 0) + (hq.q4 || 0);
     for (let i = 1; i <= 5; i++) {
@@ -32136,12 +32223,20 @@ function kblGameToEspnCompetition(g) {
   if (!g) return null;
   const played = kblGameIsPlayed(g) || String(g.status || "").toLowerCase() === "result";
   const live = !played && (kblGameIsLive(g) || String(g.status || "").toLowerCase() === "playing");
-  const period = kblPlayingQuarterToPeriod(g.playingQuarter);
-  const clock = live ? String(g.playingQuarter || "").toUpperCase() || "LIVE" : "";
+  /* P4-LIVECLOCK: displayClock used to be playingQuarter ("Q3"), so the tracker showed the quarter and never a time.
+     It is now "M:SS" from the latest text-cast event when that event belongs to the current quarter, else "" (the tracker
+     then shows the quarter only). */
+  const _pqPeriod = kblPlayingQuarterToPeriod(g.playingQuarter);
+  const _lc = live && g.liveClock ? g.liveClock : null;
+  const _lcPeriod = _lc ? kblPlayingQuarterToPeriod(_lc.q) : 0;
+  const _lcSame = !!(_lc && _lcPeriod && (!_pqPeriod || _lcPeriod === _pqPeriod));
+  const period = _pqPeriod || _lcPeriod;
+  const _lcText = _lc ? Math.max(0, Math.floor(_lc.m)) + ":" + String(Math.max(0, Math.floor(_lc.s))).padStart(2, "0") : "";
+  const clock = live && _lcSame ? _lcText : "";
   const half =
     live &&
-    (period === 2 || period === 3) &&
-    (clock === "HALF" || /HALF|HT/i.test(String(g.playingQuarter || "")));
+    ((period === 2 || period === 3) && /HALF|HT/i.test(String(g.playingQuarter || "")) ||
+      (_lc && _lcPeriod === 2 && _lcText === "0:00" && (_pqPeriod === 2 || _pqPeriod === 3)));
   const home = g.home || {};
   const away = g.away || {};
   const homeScore = home.score;
@@ -32290,6 +32385,18 @@ async function fetchKblMatchDetail(gmkey, opts) {
   }
   try {
     const data = await kblProxyGet("/match/" + encodeURIComponent(id), 20000);
+    /* P4-LIVECLOCK: /match/{id} has no game clock. While the game is live, read the clock of the latest
+       text-cast event (m = minutes, s = seconds left, q = quarter). A failure only loses the clock. */
+    try {
+      const _g = (data && data.game) || {};
+      if (kblTruthy(_g.isStarted) && !kblTruthy(_g.isEnded)) {
+        const tc = await kblProxyGet("/match/" + encodeURIComponent(id) + "/text-cast", 8000);
+        const rows = Array.isArray(tc) ? tc : Array.isArray(tc && tc.data) ? tc.data : [];
+        let last = null;
+        rows.forEach((r) => { if (r && Number.isFinite(Number(r.m)) && Number.isFinite(Number(r.s)) && (!last || Number(r.n) >= Number(last.n))) last = r; });
+        if (last && data && typeof data === "object") data.__bbLiveClock = { m: Number(last.m), s: Number(last.s), q: String(last.q || ""), n: Number(last.n) };
+      }
+    } catch (_tcErr) { logDebug("fetchKblMatchDetail text-cast failed", { gmkey: id, error: String(_tcErr && _tcErr.message || _tcErr) }); }
     _kblCache.set(cacheKey, { ts: Date.now(), detail: data });
     return data;
   } catch (e) {
@@ -32697,6 +32804,7 @@ async function pollKblLiveForLeague(league, eventIds, signal) {
           league,
           capturedAt: Date.now(),
           clockFrozen: false,
+          clockSource: "last-play", /* P4-LIVECLOCK: KBL clock = time of the latest play, shown as-is (no countdown) */
           homeScore,
           awayScore,
           qScores,
@@ -32710,7 +32818,7 @@ async function pollKblLiveForLeague(league, eventIds, signal) {
           didChange = true;
         }
         if (qScores) existing.qScores = qScores;
-        if (!existing.clockFrozen && clock !== "HALF") {
+        if (!existing.clockFrozen && clock !== "HALF" && existing.clockSource !== "last-play") {
           existing.clockFrozen = true;
           didChange = true;
         }
@@ -35626,6 +35734,7 @@ async function bbTmFetchCompetition(league, eventId) {
   }
   const base = typeof getTrackedLeagueApiBase === "function" ? getTrackedLeagueApiBase(league) : "";
   if (!base || typeof proxyFetch !== "function") return null;
+  if (!/^\d+$/.test(String(eventId || ""))) return null; /* P4-10: manual-... ids are not ESPN events */
   const data = await proxyFetch(base + "/summary?event=" + encodeURIComponent(eventId), 6000).catch(() => null);
   return (data && data.header && data.header.competitions && data.header.competitions[0]) || null;
 }
@@ -38482,6 +38591,9 @@ function recordLiveCalculationSnapshot(metaOrGameId, pick, state) {
    Chunks below are numbered one statement at a time. Nothing in this section is grouped past a single statement.
    ============================================================ */
 function suppressCorrelatedHalfPlays(picks) {
+  /* P4-2: retired. It dropped Q1 or 1H by raw point edge (not comparable across markets) and left the old PLAY text as the reason.
+     bbApplyBetLimits already drops same-direction correlated totals keeping the higher EV (DECISIONS 6/7) and writes the reason. */
+  return picks;
   if (!Array.isArray(picks)) return picks;
   const live = function (p) {
     return p && p.pick && p.pick !== "NO PLAY" && p.pick !== "NaN";
@@ -39232,7 +39344,7 @@ async function runEngine() {
   function _countSeries(id) {
     const el = document.getElementById(id);
     if (!el) return 0;
-    return String(el.value || "").split(",").map(function (x) { return x.trim(); }).filter(function (x) { return x && isFinite(Number(x)); }).length;
+    return String(el.value || "").split(/[,;\s]+/).map(function (x) { return x.trim(); }).filter(function (x) { return x && isFinite(Number(x)); }).length; /* P4-5 */
   }
   const _ftN = Math.min(_countSeries("aFTScored"), _countSeries("bFTScored"));
   if (_ftN && _ftN < 8) {
@@ -40655,6 +40767,9 @@ async function runEngine() {
         fullModel: h1Calc.h1FullModel,
         sampleTier: h1Calc.h1SampleTier,
         hasH2H: h1Calc.h1HasH2H,
+        trap: h1aTrap,
+        volatility: h1aVolatilityForConf, /* P4-1: 1H team totals carried no volatility, so the trap gate always blocked them */
+        volLimit: _teamAVolLim * (getParam("h1VolScale", league) ?? 0.7071),
         coeffFitted: _coeffFitted,
       },
       {
@@ -40673,6 +40788,9 @@ async function runEngine() {
         fullModel: h1Calc.h1FullModel,
         sampleTier: h1Calc.h1SampleTier,
         hasH2H: h1Calc.h1HasH2H,
+        trap: h1bTrap,
+        volatility: h1bVolatilityForConf, /* P4-1: 1H team totals carried no volatility, so the trap gate always blocked them */
+        volLimit: _teamBVolLim * (getParam("h1VolScale", league) ?? 0.7071),
         coeffFitted: _coeffFitted,
       },
     ];
@@ -41501,6 +41619,8 @@ async function runEngine() {
     if (el) el.value = "";
   });
   window.__fixtureTournamentId = null;
+  window.__ssCompetitionLock = null;
+  { const _tidClr = document.getElementById("ssTournamentId"); if (_tidClr) _tidClr.dataset.manual = "0"; } /* v2.5.2 */
   window.__lastEventsA = null;
   window.__lastEventsB = null;
   window.__h2hEntryCache = [];
