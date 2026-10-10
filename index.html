@@ -1,6 +1,11 @@
-S
 <!--
 BB ENGINE PATCH RECORD
+v5 (11 Oct 2026) UI/inputs pass:
+V5-1. Stat boxes show the real games (whole numbers). The opponent-adjusted / early-season-blended lists are still
+      computed and still feed the model through AppState.context; they are no longer written into the input boxes.
+V5-2. Stats paste no longer opens Market Lines / Team A / Team B; sections only open when the user opens them.
+V5-3. Odds panel: no input boxes, only a green Fetch SportyBet odds button (hidden inputs still hold the odds).
+V5-4. Market Lines and Odds headers show Auto-filled whenever SportyBet / an inputs JSON filled them.
 Changes made in this version:
 1. EV sanity and minimum-edge checks compare conditional win probability against conditional market probability/breakeven when push probability is nonzero.
 2. Confidence grading retains its calibrated/blended probability; the separate EV-model probability is recorded diagnostically instead of overwriting it.
@@ -13,7 +18,7 @@ v3 (pass 5) additions:
 8. bbEvaluateSignal accepts optional extra.odds / noPlayBlock / minEV / sd so the maths is unit-testable without the DOM (live behaviour unchanged).
 9. Removed dead getPick_LEGACY. Unfitted confidence model is now neutral (p=0.5) instead of invented coefficients.
 10. New validation harness (CALC-AUDIT-325): bbBacktest, bbPromoteDecision, bbDriftCheck, bbRunSelfTests, bbBacktestFromTracker (console). Seeded bootstrap CIs, calibration, Brier vs de-vigged market, walk-forward recalibration.
-11. Kill switch: stakes forced to 0 when rolling-100 real-odds ROI has 95% upper bound < 0.
+11. Kill switch (harness ignores legacy clv values that have no closing line): stakes forced to 0 when rolling-100 real-odds ROI has 95% upper bound < 0.
 Console: bbRunSelfTests() runs 23 maths tests; bbBacktestFromTracker() reports out-of-sample evidence once you have settled picks.
 Validation: all 15 embedded JavaScript blocks pass Node.js syntax checks.
 Limitations: no historical results/odds dataset was supplied, so real-world calibration/profitability cannot be verified. The entire source has not been exhaustively revalidated against all runtime flows; remaining audit items should not be considered proven fixed by syntax checks alone.
@@ -771,6 +776,7 @@ function bbAdjustTeamStats(stats, events, teamId, label) {
     };
     BB_LIST_MAP.forEach(function (m) {
       var list = stats[m[0]]; if (!Array.isArray(list) || !list.length) return;
+      stats.bbRawLists = stats.bbRawLists || {}; stats.bbRawLists[m[0]] = list.slice(); /* V5-1: real games, kept for the input boxes */
       var rows = rowsFor(m[1], m[3]); if (rows.length !== list.length) return;
       var period = m[3], metric = m[2], adjList = list.slice();
       rows.forEach(function (row, i) {
@@ -804,6 +810,12 @@ function bbAdjustTeamStats(stats, events, teamId, label) {
     });
   } catch (e) { info.error = String(e && e.message || e); }
   return info;
+}
+/* V5-1: list as it should be shown in an input box: the real (unadjusted) games when the adjustment ran, else the list itself */
+function bbBoxList(stats, key) {
+  var raw = stats && stats.bbRawLists && stats.bbRawLists[key];
+  var src = Array.isArray(raw) ? raw : (stats ? stats[key] : null);
+  return Array.isArray(src) ? src : [];
 }
 // ========== CALC-AUDIT-024: OFFENSIVE AND DEFENSIVE MODELING AND ADJUSTMENTS — END ==========
 // ========== CALC-AUDIT-025: OFFENSIVE AND DEFENSIVE MODELING AND ADJUSTMENTS — BEGIN ==========
@@ -865,6 +877,12 @@ function bbApplyInputsJson(o) {
     if (el.type === "checkbox") el.checked = !!v; else el.value = v == null ? "" : String(v);
     el.dispatchEvent(new Event("input", { bubbles: true })); el.dispatchEvent(new Event("change", { bubbles: true })); n++;
   });
+  try { /* V5-4: market lines / odds that arrive through an inputs JSON count as auto-filled */
+    var _hasM = false, _hasO = false;
+    Object.keys(o).forEach(function (k) { var v = o[k]; if (v == null || String(v).trim() === "") return; if (/Market$/.test(k)) _hasM = true; else if (/Odds$/.test(k)) _hasO = true; });
+    var _mt = document.getElementById("mAutoTag"); if (_mt && _hasM) _mt.style.display = "inline";
+    var _ot2 = document.getElementById("oddsAutoTag"); if (_ot2 && _hasO) _ot2.style.display = "inline";
+  } catch (_tagE) {}
   return { applied: n, missing: missing };
 }
 /* ===================== SPORTYBET ODDS (via the user's worker) ===================== */
@@ -958,7 +976,7 @@ function bbSportyStatus(msg, bad) { var el = document.getElementById("sportyStat
 async function bbFetchSportyOdds() {
   var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
   var home = (document.getElementById("teamAName") || {}).value || "", away = (document.getElementById("teamBName") || {}).value || "";
-  if (!home || !away) { bbSportyStatus("Enter Team A (home) and Team B (away) names first, or type the odds by hand.", true); return null; }
+  if (!home || !away) { bbSportyStatus("Enter Team A (home) and Team B (away) names first, then tap Fetch SportyBet odds.", true); return null; }
   var startMs = 0;
   try { var fm = getCurrentFixtureMeta(); var ed = fm && (fm.eventDate || fm.startTimestamp); if (ed) startMs = typeof ed === "number" ? (ed < 1e12 ? ed * 1000 : ed) : Date.parse(ed); if (!Number.isFinite(startMs)) startMs = 0; } catch (_e) {}
   bbSportyStatus("Fetching SportyBet list…");
@@ -973,7 +991,7 @@ async function bbFetchSportyOdds() {
       match = bbSportyMatchEvent(evs, home, away, startMs);
       if ((page * 100) >= total) break;
     }
-    if (!match) { bbSportyStatus("No SportyBet game matched " + home + " vs " + away + (startMs ? " (±15 min)" : "") + ". Type the odds by hand.", true); return null; }
+    if (!match) { bbSportyStatus("No SportyBet game matched " + home + " vs " + away + (startMs ? " (±15 min)" : "") + ". Tap Fetch SportyBet odds to retry.", true); return null; }
     bbSportyStatus("Matched " + match.event.homeTeamName + " v " + match.event.awayTeamName + ". Fetching markets…");
     var r2 = await bbFetchT(base + "/sporty/event?id=" + encodeURIComponent(match.event.eventId), { headers: { Accept: "application/json" } });
     var j2 = await r2.json().catch(function () { return null; });
@@ -983,7 +1001,7 @@ async function bbFetchSportyOdds() {
     bbSportyStatus("SportyBet " + j2.data.homeTeamName + " v " + j2.data.awayTeamName + ": filled " + filled.length + " market(s): " + filled.join("; ") + ". Check them, then Run.");
     return { match: match.event.eventId, filled: filled };
   } catch (e) {
-    bbSportyStatus("SportyBet fetch failed (" + String(e && e.message || e) + "). Enter the odds by hand.", true);
+    bbSportyStatus("SportyBet fetch failed (" + String(e && e.message || e) + "). Tap Fetch SportyBet odds to retry.", true);
     return null;
   }
 }
@@ -1010,7 +1028,7 @@ function bbSetOddsVisible(show) {
   var s = document.getElementById("oddsSection"), b = document.getElementById("oddsBoxes"), lk = bbCurLeague();
   var manual = !!lk && !bbIsAutoLeague(lk);
   if (s) s.style.display = (show || manual) ? "" : "none";
-  if (b) b.style.display = show ? "" : "none";
+  if (b) b.style.display = "none"; /* V5-3: odds boxes never show; the Fetch button fills the (hidden) inputs */
 }
 function bbSyncOddsVisibility() { var lk = bbCurLeague(); bbSetOddsVisible(!!lk && !bbIsAutoLeague(lk) && !(window.__bbSportyLast && window.__bbSportyLast.ok)); }
 function bbSportyChooser(list, memKey, opts) {
@@ -1040,6 +1058,7 @@ function bbOddsReset() {
   document.querySelectorAll("#oddsSection input").forEach(function (i) { i.value = ""; });
   bbSportyStatus(""); bbMarketStatus("");
   var t = document.getElementById("mAutoTag"); if (t) t.style.display = "none";
+  var _ot = document.getElementById("oddsAutoTag"); if (_ot) _ot.style.display = "none"; /* V5-4 */
   window.__bbSportyLast = null; window.__bbLinesNow = null; window.__bbPlayCells = []; /* v2.7 */
   try { bbSportyChooser(null); } catch (_e) {}
 }
@@ -1112,8 +1131,8 @@ function bbSportyApply(result, opts) {
   if (!result || !result.ok) {
     window.__bbSportyLast = { ok: false };
     bbSetOddsVisible(!!bbCurLeague());
-    var msg = "SportyBet: " + ((result && result.reason) || "fetch failed") + ". Type the odds below (and check the lines).";
-    bbSportyStatus(msg, true); bbMarketStatus("⚠ SportyBet odds not found - enter odds in the Odds section.", true);
+    var msg = "SportyBet: " + ((result && result.reason) || "fetch failed") + ". Tap Fetch SportyBet odds to retry.";
+    bbSportyStatus(msg, true); bbMarketStatus("⚠ SportyBet odds not found - tap Fetch SportyBet odds to retry.", true);
     return null;
   }
   var markets = result.data.markets || [], parsed = {};
@@ -1127,6 +1146,7 @@ function bbSportyApply(result, opts) {
   var filled = bbSportyFill(parsed);
   window.__bbSportyLast = { ok: true, eventId: result.event.eventId, filled: filled, at: Date.now(), home: result.event.homeTeamName || (result.data && result.data.homeTeamName) || "", away: result.event.awayTeamName || (result.data && result.data.awayTeamName) || "", ko: Number(result.event.estimateStartTime || (result.data && result.data.estimateStartTime)) || null }; /* v2.7: names + kickoff for CLV */
   var tag = document.getElementById("mAutoTag"); if (tag) tag.style.display = filled.length ? "inline" : "none";
+  var _oTag = document.getElementById("oddsAutoTag"); if (_oTag) _oTag.style.display = filled.length ? "inline" : "none"; /* V5-4 */
   bbSetOddsVisible(false);
   bbSportyStatus("SportyBet " + result.data.homeTeamName + " v " + result.data.awayTeamName + ": " + filled.length + " market(s) filled.");
   bbMarketStatus("SportyBet: " + result.data.homeTeamName + " v " + result.data.awayTeamName + " - " + filled.length + " markets, odds stored.");
@@ -1174,7 +1194,7 @@ function bbAfterInputsJson() {
       ["teamAName", "teamBName"].forEach(function (id) { var el = document.getElementById(id); if (el) el.value = ""; });
       var p = document.getElementById("bbEvPanel"); if (p) p.remove();
       window.__bbSeasonInfo = {}; window.__bbH2HInfo = {};
-      ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag", "aIntegrityTag", "bIntegrityTag"].forEach(function (id) { var el = document.getElementById(id); if (el) el.style.display = "none"; });
+      ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag", "oddsAutoTag", "aIntegrityTag", "bIntegrityTag"].forEach(function (id) { var el = document.getElementById(id); if (el) el.style.display = "none"; });
       bbSyncOddsVisibility();
     });
     var sb = document.getElementById("sportyFetchBtn");
@@ -5286,13 +5306,13 @@ body.dark-mode .tracker-analytics-section-head {
 <!-- ========== CALC-AUDIT-041: HTML INPUT REGION — BOOKMAKER ODDS INPUTS USED BY EV / DE-VIG CALCULATIONS — BEGIN ========== -->
 <!-- AUDIT-NAV: HTML element #oddsSection (markup unchanged); the values it holds are read by JavaScript calculation code. Label only, no claim of correctness. -->
   <div class="section" id="oddsSection" style="display:none">
-    <h3>Odds (required for a PLAY) - Team A = HOME, Team B = AWAY</h3>
+    <h3>Odds (required for a PLAY) - Team A = HOME, Team B = AWAY <span class="autofill-indicator" id="oddsAutoTag">✅ Auto-filled</span></h3>
     <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
-      <button id="sportyFetchBtn" type="button">Fetch SportyBet odds</button>
-      <span id="sportyStatus" style="font-size:12px;opacity:.85">Uses Team A/B or Player A/B names. Or type the odds.</span>
+      <button id="sportyFetchBtn" type="button" style="background:#2f8f4a !important;color:#fff !important;border:none !important;font-weight:800 !important;padding:10px 18px !important;border-radius:6px !important;cursor:pointer !important;box-shadow:0 2px 8px rgba(47,143,74,.35) !important">Fetch SportyBet odds</button>
+      <span id="sportyStatus" style="font-size:12px;opacity:.85">Uses the Team A / Team B names to find the game.</span>
       <select id="sportyPick" style="display:none;max-width:100%;font-size:12px" aria-label="Choose the SportyBet game"></select>
     </div>
-    <div id="oddsBoxes" style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-top: 6px">
+    <div id="oddsBoxes" style="display: none" aria-hidden="true">
       <input id="ftOverOdds" placeholder="FT Over odds" /><input id="ftUnderOdds" placeholder="FT Under odds" />
       <input id="handicapHomeOdds" placeholder="Handicap Home odds" /><input id="handicapAwayOdds" placeholder="Handicap Away odds" />
       <input id="winnerHomeOdds" placeholder="Winner Home odds" /><input id="winnerAwayOdds" placeholder="Winner Away odds" />
@@ -6608,12 +6628,16 @@ function updateTeamUIFromStats(side, stats) {
   const prefix = side === "A" ? "a" : "b";
   const display10S = stats.scoredList.slice(0, 10);
   const display10A = stats.allowedList.slice(0, 10);
+  /* V5-1: the boxes show the real games; display10S/display10A (adjusted) still go to AppState.context for the model */
+  const _rawList = function (k) { return bbBoxList(stats, k); };
+  const box10S = _rawList("scoredList").slice(0, 10);
+  const box10A = _rawList("allowedList").slice(0, 10);
   const setVal = (id, val) => {
     const el = document.getElementById(id);
     if (el) el.value = val;
   };
-  setVal(prefix + "FTScored", display10S.join(","));
-  setVal(prefix + "FTAllowed", display10A.join(","));
+  setVal(prefix + "FTScored", box10S.join(","));
+  setVal(prefix + "FTAllowed", box10A.join(","));
   ["1HScored","1HAllowed","2HScored","2HAllowed",
    "Q1Scored","Q1Allowed","Q2Scored","Q2Allowed",
    "Q3Scored","Q3Allowed","Q4Scored","Q4Allowed"].forEach(function (suf) {
@@ -6637,52 +6661,52 @@ function updateTeamUIFromStats(side, stats) {
       if (sec) sec.style.display = "block";
       show(elSH, false); show(elAH, false); show(elSA, true); show(elAA, true);
       setBox(elSH, []); setBox(elAH, []);
-      setBox(elSA, stats.awayScoredList);
-      setBox(elAA, stats.awayAllowedList);
+      setBox(elSA, _rawList("awayScoredList"));
+      setBox(elAA, _rawList("awayAllowedList"));
     } else if (role === "home") {
       if (sec) sec.style.display = "block";
       show(elSH, true); show(elAH, true); show(elSA, false); show(elAA, false);
       setBox(elSA, []); setBox(elAA, []);
-      setBox(elSH, stats.homeScoredList);
-      setBox(elAH, stats.homeAllowedList);
+      setBox(elSH, _rawList("homeScoredList"));
+      setBox(elAH, _rawList("homeAllowedList"));
     }
   })();
   if (typeof fillVenueMarketInputs === "function") {
     const _venueStatsForUi = {
-      scored: role === "away" ? stats.awayScoredList : stats.homeScoredList,
-      allowed: role === "away" ? stats.awayAllowedList : stats.homeAllowedList,
-      h1Scored: role === "away" ? stats.h1AwayScoredList : stats.h1HomeScoredList,
-      h1Allowed: role === "away" ? stats.h1AwayAllowedList : stats.h1HomeAllowedList,
-      h2Scored: role === "away" ? stats.h2AwayScoredList : stats.h2HomeScoredList,
-      h2Allowed: role === "away" ? stats.h2AwayAllowedList : stats.h2HomeAllowedList,
-      q1Scored: role === "away" ? stats.q1AwayScoredList : stats.q1HomeScoredList,
-      q1Allowed: role === "away" ? stats.q1AwayAllowedList : stats.q1HomeAllowedList,
-      q2Scored: role === "away" ? stats.q2AwayScoredList : stats.q2HomeScoredList,
-      q2Allowed: role === "away" ? stats.q2AwayAllowedList : stats.q2HomeAllowedList,
-      q3Scored: role === "away" ? stats.q3AwayScoredList : stats.q3HomeScoredList,
-      q3Allowed: role === "away" ? stats.q3AwayAllowedList : stats.q3HomeAllowedList,
-      q4Scored: role === "away" ? stats.q4AwayScoredList : stats.q4HomeScoredList,
-      q4Allowed: role === "away" ? stats.q4AwayAllowedList : stats.q4HomeAllowedList,
+      scored: role === "away" ? _rawList("awayScoredList") : _rawList("homeScoredList"),
+      allowed: role === "away" ? _rawList("awayAllowedList") : _rawList("homeAllowedList"),
+      h1Scored: role === "away" ? _rawList("h1AwayScoredList") : _rawList("h1HomeScoredList"),
+      h1Allowed: role === "away" ? _rawList("h1AwayAllowedList") : _rawList("h1HomeAllowedList"),
+      h2Scored: role === "away" ? _rawList("h2AwayScoredList") : _rawList("h2HomeScoredList"),
+      h2Allowed: role === "away" ? _rawList("h2AwayAllowedList") : _rawList("h2HomeAllowedList"),
+      q1Scored: role === "away" ? _rawList("q1AwayScoredList") : _rawList("q1HomeScoredList"),
+      q1Allowed: role === "away" ? _rawList("q1AwayAllowedList") : _rawList("q1HomeAllowedList"),
+      q2Scored: role === "away" ? _rawList("q2AwayScoredList") : _rawList("q2HomeScoredList"),
+      q2Allowed: role === "away" ? _rawList("q2AwayAllowedList") : _rawList("q2HomeAllowedList"),
+      q3Scored: role === "away" ? _rawList("q3AwayScoredList") : _rawList("q3HomeScoredList"),
+      q3Allowed: role === "away" ? _rawList("q3AwayAllowedList") : _rawList("q3HomeAllowedList"),
+      q4Scored: role === "away" ? _rawList("q4AwayScoredList") : _rawList("q4HomeScoredList"),
+      q4Allowed: role === "away" ? _rawList("q4AwayAllowedList") : _rawList("q4HomeAllowedList"),
     };
     fillVenueMarketInputs(prefix, _venueStatsForUi, role);
   }
   if (stats.h1ScoredList?.length >= 2) {
-    setVal(prefix + "1HScored", stats.h1ScoredList.slice(0, 10).join(","));
-    setVal(prefix + "1HAllowed", stats.h1AllowedList.slice(0, 10).join(","));
+    setVal(prefix + "1HScored", _rawList("h1ScoredList").slice(0, 10).join(","));
+    setVal(prefix + "1HAllowed", _rawList("h1AllowedList").slice(0, 10).join(","));
   }
   if (stats.h2ScoredList?.length >= 2) {
-    setVal(prefix + "2HScored", stats.h2ScoredList.slice(0, 10).join(","));
-    setVal(prefix + "2HAllowed", stats.h2AllowedList.slice(0, 10).join(","));
+    setVal(prefix + "2HScored", _rawList("h2ScoredList").slice(0, 10).join(","));
+    setVal(prefix + "2HAllowed", _rawList("h2AllowedList").slice(0, 10).join(","));
   }
   if (stats.q1ScoredList?.length >= 2) {
-    setVal(prefix + "Q1Scored", stats.q1ScoredList.slice(0, 10).join(","));
-    setVal(prefix + "Q2Scored", stats.q2ScoredList.slice(0, 10).join(","));
-    setVal(prefix + "Q3Scored", stats.q3ScoredList.slice(0, 10).join(","));
-    setVal(prefix + "Q4Scored", stats.q4ScoredList.slice(0, 10).join(","));
-    setVal(prefix + "Q1Allowed", stats.q1AllowedList.slice(0, 10).join(","));
-    setVal(prefix + "Q2Allowed", stats.q2AllowedList.slice(0, 10).join(","));
-    setVal(prefix + "Q3Allowed", stats.q3AllowedList.slice(0, 10).join(","));
-    setVal(prefix + "Q4Allowed", stats.q4AllowedList.slice(0, 10).join(","));
+    setVal(prefix + "Q1Scored", _rawList("q1ScoredList").slice(0, 10).join(","));
+    setVal(prefix + "Q2Scored", _rawList("q2ScoredList").slice(0, 10).join(","));
+    setVal(prefix + "Q3Scored", _rawList("q3ScoredList").slice(0, 10).join(","));
+    setVal(prefix + "Q4Scored", _rawList("q4ScoredList").slice(0, 10).join(","));
+    setVal(prefix + "Q1Allowed", _rawList("q1AllowedList").slice(0, 10).join(","));
+    setVal(prefix + "Q2Allowed", _rawList("q2AllowedList").slice(0, 10).join(","));
+    setVal(prefix + "Q3Allowed", _rawList("q3AllowedList").slice(0, 10).join(","));
+    setVal(prefix + "Q4Allowed", _rawList("q4AllowedList").slice(0, 10).join(","));
   }
   if (!AppState.context.data[side]) AppState.context.data[side] = {};
   if (!AppState.context.data[side].overall) AppState.context.data[side].overall = {};
@@ -7697,9 +7721,7 @@ if (typeof engineDebug === "function") engineDebug("json paste A path", { note: 
     }
     window.__ssLastPasteMsg = st ? st.textContent : "";
     if (pasteEl) pasteEl.value = "";
-    openSection("marketSection");
-    openSection("teamASection");
-    openSection("teamBSection");
+    /* V5-2: sections are no longer opened automatically after a paste; the user opens them */
     invalidateFetchedAudit();
   } catch (err) {
     const msg = String(err && err.message ? err.message : err || "");
@@ -30434,7 +30456,7 @@ const FIELD_GROUPS = {
     "aQ4H2H",
     "bQ4H2H",
   ],
-  autoTags: ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag"],
+  autoTags: ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag", "oddsAutoTag"],
   periodInputs: [
     "a1HScored",
     "a1HAllowed",
@@ -44616,7 +44638,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
       if (res !== "win" && res !== "loss") return; /* pushes carry no win/loss information for calibration */
       var p = Number(r.modelProb != null ? r.modelProb : r.winProbability);
       if (!(p > 0 && p < 1)) return;
-      var o = Number(r.oddsDecimal), f = r.fairProb != null ? Number(r.fairProb) : NaN, c = r.clv != null ? Number(r.clv) : NaN;
+      var o = Number(r.oddsDecimal), f = r.fairProb != null ? Number(r.fairProb) : NaN, c = (r.clv != null && r.closingLine != null && Number.isFinite(Number(r.closingLine))) ? Number(r.clv) : NaN; /* v4: legacy records stored clv = +/-line when no closing line existed; trust clv only with a real closing line */
       var ts = Date.parse(r.createdAt || r.timestamp || r.date || ""); if (!Number.isFinite(ts)) ts = Number(r.ts);
       out.push({ p: p, y: res === "win" ? 1 : 0, odds: o > 1 && r.oddsTyped !== false ? o : NaN, fair: f > 0 && f < 1 ? f : NaN, clv: Number.isFinite(c) ? c : NaN, ts: Number.isFinite(ts) ? ts : NaN, idx: idx, bucket: r.marketKey || "", league: r.league || "" });
     });
