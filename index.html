@@ -175,7 +175,7 @@ function bbSignalBucket(mk) {
   if (m === "winner") return "winner";
   if (/^(team_a|team_b)$/.test(m)) return "team";
   if (/^h1_team_[ab]$/.test(m)) return "h1team";
-  if (/^(h1|h2)$/.test(m)) return "period";
+  if (m === "h1") return "period";
   return "ft";
 }
 function bbSignalLearned() {
@@ -207,7 +207,7 @@ function bbActualForPick(p) {
     const sc = String(p && p.actualScore || "").split("-").map(x => Number(String(x).trim()));
     if (sc.length !== 2 || !sc.every(Number.isFinite)) return null;
     const mk = String(p.marketKey || "").toLowerCase(), a = sc[0], b = sc[1];
-    if (/^(ft|h1|h2)$/.test(mk)) return a + b;
+    if (/^(ft|h1)$/.test(mk)) return a + b;
     if (mk === "team_a" || mk === "h1_team_a") return a;
     if (mk === "team_b" || mk === "h1_team_b") return b;
     if (mk === "winner") return a - b;
@@ -346,12 +346,12 @@ function bbSeasonKeyOf(rec) { return rec.ut + "|" + rec.se; }
 // ========== CALC-AUDIT-022: CORE NUMERIC HELPERS — BEGIN ==========
 // AUDIT-NAV: members: bbPerVal
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
-/* team averages within a tournament-season (friendlies excluded). period: "ft" | "h1" | "h2" */
+/* team averages within a tournament-season (friendlies excluded). period: "ft" | "h1" */
 function bbPerVal(rec, isHome, period) {
   if (period === "ft") return isHome ? rec.hr : rec.ar;
   var p = isHome ? rec.hp : rec.ap; if (!p) return NaN;
   var g = function (i) { return p[i] == null ? NaN : p[i]; };
-  if (period === "h1") return g(0) + g(1); if (period === "h2") return g(2) + g(3);
+  if (period === "h1") return g(0) + g(1);
   return NaN;
 }
 // ========== CALC-AUDIT-022: CORE NUMERIC HELPERS — END ==========
@@ -402,12 +402,11 @@ var BB_TEAM_CONTEXT_CONFIG = {
 var BB_LIST_MAP = [
   ["scoredList", "overall", "scored", "ft"], ["allowedList", "overall", "allowed", "ft"],
   ["h1ScoredList", "overall", "scored", "h1"], ["h1AllowedList", "overall", "allowed", "h1"],
-  ["h2ScoredList", "overall", "scored", "h2"], ["h2AllowedList", "overall", "allowed", "h2"],
 ];
 ["home", "away"].forEach(function (v) {
   var V = v === "home" ? "Home" : "Away";
   BB_LIST_MAP.push([v + "ScoredList", v, "scored", "ft"], [v + "AllowedList", v, "allowed", "ft"]);
-  ["h1", "h2"].forEach(function (p) { BB_LIST_MAP.push([p + V + "ScoredList", v, "scored", p], [p + V + "AllowedList", v, "allowed", p]); });
+  ["h1"].forEach(function (p) { BB_LIST_MAP.push([p + V + "ScoredList", v, "scored", p], [p + V + "AllowedList", v, "allowed", p]); });
 });
 // ========== CALC-AUDIT-024: OFFENSIVE AND DEFENSIVE MODELING AND ADJUSTMENTS — BEGIN ==========
 // AUDIT-NAV: members: bbAdjustTeamStats
@@ -612,7 +611,6 @@ function bbSportyPickLine(markets, id, wantLine) {
 var BB_SPORTY_FIELDS = [
   ["225", null, "ftMarket", "FT total"],
   ["68", null, "h1Market", "1H total"],
-  ["90", null, "h2Market", "2H total"],
   ["227", null, "teamAMarket", "Team A total"],
   ["228", null, "teamBMarket", "Team B total"],
   ["69", null, "h1TeamAMarket", "1H Team A"],
@@ -681,6 +679,10 @@ async function bbFetchSportyLines() {
   document.addEventListener("input", function (e) { if (e && e.target && (e.target.id === "teamAName" || e.target.id === "teamBName")) relabel(); });
   document.addEventListener("DOMContentLoaded", function () {
     relabel();
+    var lk = bbCurLeague();
+    var lookup = document.getElementById("sportyLinesSection");
+    var isAuto = lk && typeof isAutoFetchLeague === "function" && isAutoFetchLeague(lk);
+    if (lookup) { lookup.hidden = !!isAuto; lookup.style.display = isAuto ? "none" : "block"; }
     
   });
 })();
@@ -4502,10 +4504,7 @@ body.dark-mode .tracker-analytics-section-head {
         <label>1H Total</label
         ><input id="h1Market" placeholder="75.5 - 85.5" aria-label="75.5 - 85.5" />
       </div>
-      <div id="h2MarketSection">
-        <label>2H Total</label
-        ><input id="h2Market" placeholder="75.5 - 85.5" aria-label="75.5 - 85.5" />
-      </div>
+      
     </div>
 
     <div
@@ -4569,21 +4568,12 @@ body.dark-mode .tracker-analytics-section-head {
       </div>
     </div>
 
-    <div id="a2HSection" style="display:none">
-      <div class="market-history-block">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
-          <div><label>2H Scored</label><input id="a2HScored" placeholder="42,38,45,40,41,43,39,44,37,42" aria-label="2H Scored" /></div>
-          <div><label>2H Allowed</label><input id="a2HAllowed" placeholder="39,36,41,35,38,40,37,42,36,39" aria-label="2H Allowed" /></div>
-          <div><label for="a2HScoredHome">Home 2H Scored</label><input id="a2HScoredHome" placeholder="42,38,45,40,41" aria-label="Home 2H Scored" /></div>
-          <div><label for="a2HAllowedHome">Home 2H Allowed</label><input id="a2HAllowedHome" placeholder="39,36,41,35,38" aria-label="Home 2H Allowed" /></div>
-        </div>
-      </div>
-    </div>
+    
 
     
 
     <div class="venue-role-opposite" hidden aria-hidden="true">
-      <input type="hidden" id="aFTScoredAway" /><input type="hidden" id="aFTAllowedAway" /><input type="hidden" id="a1HScoredAway" /><input type="hidden" id="a1HAllowedAway" /><input type="hidden" id="a2HScoredAway" /><input type="hidden" id="a2HAllowedAway" />
+      <input type="hidden" id="aFTScoredAway" /><input type="hidden" id="aFTAllowedAway" /><input type="hidden" id="a1HScoredAway" /><input type="hidden" id="a1HAllowedAway" />
     </div>
   </div>
 <!-- ========== CALC-AUDIT-039: HTML INPUT REGION — TEAM A STAT-SERIES INPUTS USED BY CALCULATIONS — END ========== -->
@@ -4612,21 +4602,12 @@ body.dark-mode .tracker-analytics-section-head {
       </div>
     </div>
 
-    <div id="b2HSection" style="display:none">
-      <div class="market-history-block">
-          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
-          <div><label>2H Scored</label><input id="b2HScored" placeholder="42,38,45,40,41,43,39,44,37,42" aria-label="2H Scored" /></div>
-          <div><label>2H Allowed</label><input id="b2HAllowed" placeholder="39,36,41,35,38,40,37,42,36,39" aria-label="2H Allowed" /></div>
-          <div><label for="b2HScoredAway">Away 2H Scored</label><input id="b2HScoredAway" placeholder="42,38,45,40,41" aria-label="Away 2H Scored" /></div>
-          <div><label for="b2HAllowedAway">Away 2H Allowed</label><input id="b2HAllowedAway" placeholder="39,36,41,35,38" aria-label="Away 2H Allowed" /></div>
-        </div>
-      </div>
-    </div>
+    
 
     
 
     <div class="venue-role-opposite" hidden aria-hidden="true">
-      <input type="hidden" id="bFTScoredHome" /><input type="hidden" id="bFTAllowedHome" /><input type="hidden" id="b1HScoredHome" /><input type="hidden" id="b1HAllowedHome" /><input type="hidden" id="b2HScoredHome" /><input type="hidden" id="b2HAllowedHome" />
+      <input type="hidden" id="bFTScoredHome" /><input type="hidden" id="bFTAllowedHome" /><input type="hidden" id="b1HScoredHome" /><input type="hidden" id="b1HAllowedHome" />
     </div>
   </div>
 <!-- ========== CALC-AUDIT-040: HTML INPUT REGION — TEAM B STAT-SERIES INPUTS USED BY CALCULATIONS — END ========== -->
@@ -5611,7 +5592,7 @@ function updateTeamUIFromStats(side, stats) {
   };
   setVal(prefix + "FTScored", box10S.join(","));
   setVal(prefix + "FTAllowed", box10A.join(","));
-  ["1HScored","1HAllowed","2HScored","2HAllowed"].forEach(function (suf) {
+  ["1HScored","1HAllowed"].forEach(function (suf) {
     setVal(prefix + suf, "");
   });
   const role = typeof getFixtureSideRole === "function" ? getFixtureSideRole(side) : "";
@@ -5648,8 +5629,6 @@ function updateTeamUIFromStats(side, stats) {
       allowed: role === "away" ? _rawList("awayAllowedList") : _rawList("homeAllowedList"),
       h1Scored: role === "away" ? _rawList("h1AwayScoredList") : _rawList("h1HomeScoredList"),
       h1Allowed: role === "away" ? _rawList("h1AwayAllowedList") : _rawList("h1HomeAllowedList"),
-      h2Scored: role === "away" ? _rawList("h2AwayScoredList") : _rawList("h2HomeScoredList"),
-      h2Allowed: role === "away" ? _rawList("h2AwayAllowedList") : _rawList("h2HomeAllowedList"),
     };
     fillVenueMarketInputs(prefix, _venueStatsForUi, role);
   }
@@ -5657,14 +5636,10 @@ function updateTeamUIFromStats(side, stats) {
     setVal(prefix + "1HScored", _rawList("h1ScoredList").slice(0, 10).join(","));
     setVal(prefix + "1HAllowed", _rawList("h1AllowedList").slice(0, 10).join(","));
   }
-  if (stats.h2ScoredList?.length >= 2) {
-    setVal(prefix + "2HScored", _rawList("h2ScoredList").slice(0, 10).join(","));
-    setVal(prefix + "2HAllowed", _rawList("h2AllowedList").slice(0, 10).join(","));
-  }
   if (!AppState.context.data[side]) AppState.context.data[side] = {};
   if (!AppState.context.data[side].overall) AppState.context.data[side].overall = {};
   const _marketSourceMap = AppState.context.data[side].dataSourceByMarket || {};
-  ["ft","h1","h2"].forEach(function (mk) {
+  ["ft","h1"].forEach(function (mk) {
     _marketSourceMap[mk] = String(g_fetchMeta?.[side]?.[mk]?.source || g_fetchMeta?.[side]?.ft?.source || "sofascore_events").toLowerCase();
   });
   AppState.context.data[side].dataSourceByMarket = _marketSourceMap;
@@ -5673,7 +5648,7 @@ function updateTeamUIFromStats(side, stats) {
   AppState.context.data[side].overall.eventIds10 = (stats.eventIds || []).slice(0, 10);
   AppState.context.data[side].overall.gameRows10 = (stats.overallGameRows || []).slice(0, 10);
   AppState.context.data[side].venue = {};
-  ["h1","h2"].forEach(function (mk) {
+  ["h1"].forEach(function (mk) {
     AppState.context.data[side].overall[mk + "Scored10"] = [];
     AppState.context.data[side].overall[mk + "Allowed10"] = [];
     AppState.context.data[side].overall[mk + "ScoredDates10"] = [];
@@ -5726,12 +5701,6 @@ function updateTeamUIFromStats(side, stats) {
     AppState.context.data[side].overall.h1ScoredDates10 = (stats.h1ScoredDates || []).slice(0, 10);
     AppState.context.data[side].overall.h1AllowedDates10 = (stats.h1AllowedDates || []).slice(0, 10);
   }
-  if (stats.h2ScoredList?.length) {
-    AppState.context.data[side].overall.h2Scored10 = stats.h2ScoredList.slice(0, 10);
-    AppState.context.data[side].overall.h2Allowed10 = stats.h2AllowedList.slice(0, 10);
-    AppState.context.data[side].overall.h2ScoredDates10 = (stats.h2ScoredDates || []).slice(0, 10);
-    AppState.context.data[side].overall.h2AllowedDates10 = (stats.h2AllowedDates || []).slice(0, 10);
-  }
   AppState.context.data[side].venue.eventIds10 = ((stats.venueGameRows?.[role === "away" ? "away" : "home"]) || []).map(r => r.eventId).slice(0, 10);
   // CALC-AUDIT-048.W02 waypoint: if-block (Math.* x2)
   if (Array.isArray(stats.ftScoredDates) && stats.ftScoredDates.length) {
@@ -5750,17 +5719,6 @@ function updateTeamUIFromStats(side, stats) {
     AppState.context.data[side].venue.h1Allowed10 = _venueH1Allowed;
     AppState.context.data[side].venue.h1ScoredDates10 = _venueH1Dates.scored.slice(0, 10);
     AppState.context.data[side].venue.h1AllowedDates10 = _venueH1Dates.allowed.slice(0, 10);
-  }
-  const _vH2S = _role === "away" ? stats.h2AwayScoredList : stats.h2HomeScoredList;
-  const _vH2A = _role === "away" ? stats.h2AwayAllowedList : stats.h2HomeAllowedList;
-  const _vH2SD = _role === "away" ? stats.h2AwayScoredDates : stats.h2HomeScoredDates;
-  const _vH2AD = _role === "away" ? stats.h2AwayAllowedDates : stats.h2HomeAllowedDates;
-  if (_vH2S && _vH2S.length) {
-    if (!AppState.context.data[side].venue) AppState.context.data[side].venue = {};
-    AppState.context.data[side].venue.h2Scored10 = _vH2S.slice(0, 10);
-    AppState.context.data[side].venue.h2Allowed10 = (_vH2A || []).slice(0, 10);
-    AppState.context.data[side].venue.h2ScoredDates10 = (_vH2SD || []).slice(0, 10);
-    AppState.context.data[side].venue.h2AllowedDates10 = (_vH2AD || []).slice(0, 10);
   }
   AppState.context.data[side].ortg10 = Array.isArray(stats.ortg10) ? stats.ortg10.slice(0, 10) : [];
   AppState.context.data[side].drtg10 = Array.isArray(stats.drtg10) ? stats.drtg10.slice(0, 10) : [];
@@ -7140,7 +7098,7 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 1,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2"],
+    appliesTo: ["ft", "h1"],
     description: "Floor for H2H context weight after injury/vol/blowout haircuts",
     lastVerifiedAt: null,
   },
@@ -7236,7 +7194,7 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 2.5,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b"],
+    appliesTo: ["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b"],
     description:
       "Per-league and optional per-market Under threshold multiplier. Default 1.5 global with a hard minimum of 1.3; market overrides are resolved before the floor.",
     lastVerifiedAt: null,
@@ -7303,7 +7261,6 @@ const TUNABLE_PARAM_REGISTRY = {
     appliesTo: [
       "ft",
       "h1",
-      "h2",
       "team_a",
       "team_b",
       "winner",
@@ -7320,7 +7277,6 @@ const TUNABLE_PARAM_REGISTRY = {
     appliesTo: [
       "ft",
       "h1",
-      "h2",
       "team_a",
       "team_b",
       "winner",
@@ -7337,7 +7293,6 @@ const TUNABLE_PARAM_REGISTRY = {
     appliesTo: [
       "ft",
       "h1",
-      "h2",
       "team_a",
       "team_b",
       "winner",
@@ -7351,7 +7306,7 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 30,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2"],
+    appliesTo: ["ft", "h1"],
     description: "Volatility limits used to scale volatility ratio",
     lastVerifiedAt: null,
   },
@@ -7364,17 +7319,6 @@ const TUNABLE_PARAM_REGISTRY = {
     appliesTo: ["h1"],
     description:
       "Half-game volatility limit as a fraction of the full-game volatilityLimit (getMarketVolLimit). Default 0.7071 ≈ 1/sqrt(2), a time-fraction variance scaling.",
-    lastVerifiedAt: null,
-  },
-  h2VolScale: {
-    value: 0.7071,
-    min: 0.4,
-    max: 1.0,
-    type: "scalar",
-    scope: "global",
-    appliesTo: ["h2"],
-    description:
-      "Second-half volatility limit as a fraction of full-game volatilityLimit. Default matches h1VolScale (1/sqrt(2)). Audit #3.",
     lastVerifiedAt: null,
   },
   advBetaOffense: {
@@ -7403,7 +7347,7 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 1.5,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2"],
+    appliesTo: ["ft", "h1"],
     description: "Optional extra edge scale. Default 1.0 is a no-op. Audit #7 — now registered and applied.",
     lastVerifiedAt: null,
   },
@@ -7413,7 +7357,7 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 1.5,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2"],
+    appliesTo: ["ft", "h1"],
     description: "Optional extra injury-impact scale. Default 1.0 is a no-op. Audit #7.",
     lastVerifiedAt: null,
   },
@@ -7448,16 +7392,6 @@ const TUNABLE_PARAM_REGISTRY = {
     description: "Point edge threshold required for 1H picks",
     lastVerifiedAt: null,
   },
-  edgeH2PointThreshold: {
-    value: 6.0,
-    min: 2.0,
-    max: 15.0,
-    type: "scalar",
-    scope: "global",
-    appliesTo: ["h2"],
-    description: "Point edge threshold required for 2H Total picks",
-    lastVerifiedAt: null,
-  },
   edgeTeamPointThreshold: {
     value: 8.0,
     min: 3.0,
@@ -7481,13 +7415,13 @@ const TUNABLE_PARAM_REGISTRY = {
   },
   maxVolRatioOver: {
     value: 1.5, min: 1.0, max: 3.0, type: "scalar", scope: "global",
-    appliesTo: ["ft", "h1", "h2", "team_a", "team_b"],
+    appliesTo: ["ft", "h1", "team_a", "team_b"],
     description: "Volatility-ratio cap above which an Over is forced to NO PLAY (applyBBMarketGate). Provisional - validate on settled data.",
     lastVerifiedAt: null,
   },
   maxVolRatioUnder: {
     value: 1.25, min: 0.8, max: 3.0, type: "scalar", scope: "global",
-    appliesTo: ["ft", "h1", "h2", "team_a", "team_b"],
+    appliesTo: ["ft", "h1", "team_a", "team_b"],
     description: "Volatility-ratio cap above which an Under is forced to NO PLAY (stricter than Over). Provisional - validate on settled data.",
     lastVerifiedAt: null,
   },
@@ -7497,7 +7431,7 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 0,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2", "team_a", "team_b"],
+    appliesTo: ["ft", "h1", "team_a", "team_b"],
     description: "Point signal (per team, before market scaling) for 1 day rest after a short previous gap. Live-wired in buildTeamMarketIntelSignal.",
     lastVerifiedAt: null,
   },
@@ -7507,15 +7441,10 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 1.0,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b"],
+    appliesTo: ["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b"],
     marketOverrides: {
       ft: { value: 1, lastVerifiedAt: null },
       h1: { value: 0.5, lastVerifiedAt: null },
-      h2: { value: 0.5, lastVerifiedAt: null },
-      
-      
-      
-      
       team_a: { value: 0.5, lastVerifiedAt: null },
       team_b: { value: 0.5, lastVerifiedAt: null },
       h1_team_a: { value: 0.5, lastVerifiedAt: null },
@@ -7529,7 +7458,7 @@ const TUNABLE_PARAM_REGISTRY = {
     max: 0,
     type: "scalar",
     scope: "global",
-    appliesTo: ["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b"],
+    appliesTo: ["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b"],
     description:
       "Point signal applied by buildTeamMarketIntelSignal when a team has under 1 day of rest (back-to-back); market scaling is resolved centrally by getFatigueMarketScale.",
     lastVerifiedAt: null,
@@ -7635,7 +7564,6 @@ function pruneUnverifiedLeagueOverrideDrift() {
     edgeFTPointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.ft,
     edgeH1PointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.h1,
     edgeTeamPointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.team,
-    edgeH2PointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.h2,
     edgeWinnerPointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.winner,
   };
   let prunedCount = 0;
@@ -7793,7 +7721,6 @@ function getTunableParam(key, league, market) {
     team_b: "ft",
     winner: "winner",
     h1: "h1",
-    h2: "h2",
   };
   const rawMarket =
     market != null && market !== ""
@@ -7856,7 +7783,7 @@ function setTunableParam(key, newValue, scopeLeague, verifiedAt, market) {
   }
   const stamp = verifiedAt || new Date().toISOString();
   const marketKey = market != null && market !== "" ? String(market).toLowerCase() : "";
-  const validMarkets = new Set(["ft", "team_a", "team_b", "h1", "h2", "h1_team_a", "h1_team_b", "winner"]);
+  const validMarkets = new Set(["ft", "team_a", "team_b", "h1", "h1_team_a", "h1_team_b", "winner"]);
   if (marketKey && !validMarkets.has(marketKey)) {
     engineDebug("setTunableParam: invalid market override", { key, market: marketKey });
     return false;
@@ -8909,7 +8836,6 @@ function initLeagueOverridesFromDefaults() {
   const edgeRegistryDefaults = {
     ft: Number(TUNABLE_PARAM_REGISTRY.edgeFTPointThreshold?.value),
     h1: Number(TUNABLE_PARAM_REGISTRY.edgeH1PointThreshold?.value),
-    h2: Number(TUNABLE_PARAM_REGISTRY.edgeH2PointThreshold?.value),
     team: Number(TUNABLE_PARAM_REGISTRY.edgeTeamPointThreshold?.value),
     winner: Number(TUNABLE_PARAM_REGISTRY.edgeWinnerPointThreshold?.value),
   };
@@ -8917,7 +8843,6 @@ function initLeagueOverridesFromDefaults() {
   const edgeParamByField = {
     ft: "edgeFTPointThreshold",
     h1: "edgeH1PointThreshold",
-    h2: "edgeH2PointThreshold",
     team: "edgeTeamPointThreshold",
     winner: "edgeWinnerPointThreshold",
   };
@@ -9193,7 +9118,7 @@ window.listLockedConfigs = listLockedConfigs;
 window.getLockStatus = getLockStatus;
 function getLiveLockBanner(league) {
   if (!league || typeof hasLockedConfig !== "function") return "";
-  const markets = ["ft", "h1", "h2"];
+  const markets = ["ft", "h1"];
   const active = markets.filter(function (m) {
     return hasLockedConfig(league, m);
   });
@@ -10445,7 +10370,7 @@ function actualForMarket(pick) {
   const parsed = typeof parseFinalScore === "function" ? parseFinalScore(s) : { total: parseFloat(s), home: NaN, away: NaN };
   const looksScoreline = /^\d+(?:\.\d+)?\s*[-–:]\s*\d+(?:\.\d+)?$/.test(s);
   if (mk === "ft") return Number.isFinite(parsed.total) ? parsed.total : NaN;
-  if (mk === "h1" || mk === "h2") {
+  if (mk === "h1") {
     if (looksScoreline) return Number.isFinite(parsed.total) ? parsed.total : NaN;
     const n = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(s) ? Number(s) : NaN;
     return Number.isFinite(n) ? n : NaN;
@@ -10467,7 +10392,7 @@ function actualForMarket(pick) {
 // ========== CALC-AUDIT-083: SCORE PROJECTIONS — END ==========
 // ========== CALC-AUDIT-084: CALIBRATION, TUNING AND BACKTESTING — BEGIN ==========
 // AUDIT-NAV: members: evaluatePickWithParams
-// AUDIT-NAV: calls other labeled calc code: actualForMarket, bbStrictFinite, blendConfidenceAndDistribution, compute1HProjection, compute2HProjection
+// AUDIT-NAV: calls other labeled calc code: actualForMarket, bbStrictFinite, blendConfidenceAndDistribution, compute1HProjection
 // AUDIT-NAV: (cont.) computeFTProjection, computeMarginProjection, distributionWinProbability, getConfidenceWinProbability, getMarketVolLimit, getPick
 // AUDIT-NAV: (cont.) getTunableParam, parseFinalScore, selectedSideEdgeForProbability
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
@@ -10498,7 +10423,7 @@ function evaluatePickWithParams(pick, paramOverrides) {
     }
     return originalGetParam ? originalGetParam(key, lg, market) : getTunableParam(key, lg, market);
   };
-  // CALC-AUDIT-084.W03 waypoint: try-block (calls computeFTProjection, compute1HProjection, compute2HProjection, bbStrictFinite, computeMarginProjection, getPick, ...; Math.* x1; arithmetic ops x4)
+  // CALC-AUDIT-084.W03 waypoint: try-block (calls computeFTProjection, compute1HProjection, bbStrictFinite, computeMarginProjection, getPick, ...; Math.* x1; arithmetic ops x4)
   try {
     let proj, lineVal, edge;
     const finalLines = lines;
@@ -10563,19 +10488,6 @@ function evaluatePickWithParams(pick, paramOverrides) {
       proj = calc.projBFT;
       lineVal = finalLines.bLine;
       edge = calc.bEdge;
-    } else if (marketKey === "h2") {
-      const calc = compute2HProjection({
-        league,
-        parsed,
-        lines: finalLines,
-        injMultA,
-        injMultB,
-        config: _h2hFactorOverride,
-        contextData: _replayCtx,
-      });
-      proj = calc.h2Proj;
-      lineVal = bbStrictFinite(finalLines && finalLines.h2Line) ? Number(finalLines.h2Line) : Number(pick.line);
-      edge = calc.h2Edge;
     } else if (marketKey === "winner") {
       let calcW = typeof computeFTProjection === "function"
         ? computeFTProjection({ league, parsed, lines: finalLines, injMultA, injMultB, config: _h2hFactorOverride, contextData: _replayCtx })
@@ -10765,7 +10677,7 @@ function assertInvariant(condition, label, context) {
 /* CALCULATION SECTION */
 function getMetricForMarket(marketKey) {
   const key = String(marketKey || "").toLowerCase();
-  if (key === "ft" || key === "h1" || key === "team_a" || key === "team_b" || key === "h2" || key === "h1_team_a" || key === "h1_team_b") {
+  if (key === "ft" || key === "h1" || key === "team_a" || key === "team_b" || key === "h1_team_a" || key === "h1_team_b") {
     return { decision: "brier", projection: "rmse" };
   }
   return { decision: "brier", projection: null };
@@ -11648,168 +11560,144 @@ const LEAGUE_EDGE_POINT_THRESHOLDS = {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   wnba: {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   wnba_pre: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   ncaa: {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   ncaaw: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   euroleague: {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   eurocup: {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   acb: {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   lba: {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   turkey_bsl: {
     ft: 5.5,
     h1: 5.0,
     team: 5.5,
-    h2: 5.0,
     winner: 4.5,
   },
   aba: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   ausnbl: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   bcl: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   champions_league: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   bnxt: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   bbl: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   bleague: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   cba: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   china_nbl: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   korea_kbl: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   pba: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   lkl: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   nba_gl: {
     ft: 5.0,
     h1: 4.5,
     team: 5.0,
-    h2: 4.5,
     winner: 4.0,
   },
   nba_summer: {
     ft: 6.5,
     h1: 6.0,
     team: 6.5,
-    h2: 6.0,
     winner: 5.5,
   },
   bal: { ft: 5.0, h1: 4.5, team: 5.0 },
@@ -11926,14 +11814,14 @@ const BB_PROTECTED_EDGE_POLICY = (function () {
   return deep({
     version: "protected-edge-v1",
     overEdgeBump: 0, /* FIX_GUIDE step 3 */
-    overBumpBuckets: ["ft", "h1", "h2", "team"],
-    underFactorFloor: { ft: 1.5, h1: 1.5, h2: 1.6, team_a: 1.6, team_b: 1.6, h1_team_a: 1.6, h1_team_b: 1.6 },
+    overBumpBuckets: ["ft", "h1", "team"],
+    underFactorFloor: { ft: 1.5, h1: 1.5, team_a: 1.6, team_b: 1.6, h1_team_a: 1.6, h1_team_b: 1.6 },
     underFactorFloorDefault: 1.3,
     edgeMultMin: 0.5,
     edgeMultMax: 1.5,
     blowoutMultFloor: 1.15,
     blowoutGapMax: 15,
-    registryFallback: { ft: 5, h1: 6, h2: 6, team: 8, winner: 5 },
+    registryFallback: { ft: 5, h1: 6, team: 8, winner: 5 },
     recentForm: { window: 10, windowCombined: 20, minValid: 8, minShare: 0.7 }, /* FIX_GUIDE step 8 */
     h2h: { window: 10, minValid: 5, supportShare: 0.6, conflictShare: 0.4, canVeto: false, canRescue: false },
   });
@@ -11949,7 +11837,6 @@ function bbEdgeMarketBucket(marketKey) {
   if (m === "team_a" || m === "team_b") return "team";
   if (m === "h1_team_a" || m === "h1_team_b") return "h1";
   if (m === "h1") return "h1";
-  if (m === "h2") return "h2";
   if (m === "winner") return "winner";
   return "ft";
 }
@@ -11994,10 +11881,9 @@ function _bbRawLeagueEdgePointThreshold(league, marketKey) {
   const mk = String(marketKey || "ft").toLowerCase();
   const key = mk === "team_a" || mk === "team_b" ? "team"
     : mk === "h1_team_a" || mk === "h1_team_b" ? "h1"
-    : ["h1", "h2", "winner"].includes(mk) ? mk : "ft";
+    : ["h1", "winner"].includes(mk) ? mk : "ft";
   const paramKey = key === "ft" ? "edgeFTPointThreshold"
     : key === "h1" ? "edgeH1PointThreshold"
-    : key === "h2" ? "edgeH2PointThreshold"
     : key === "team" ? "edgeTeamPointThreshold"
     : key === "winner" ? "edgeWinnerPointThreshold" : null;
   if (paramKey && typeof getParam === "function") {
@@ -12022,10 +11908,9 @@ function getLeagueEdgePointThreshold(league, marketKey) {
   const mk = String(marketKey || "ft").toLowerCase();
   const bucket = mk === "team_a" || mk === "team_b" ? "team"
     : mk === "h1_team_a" || mk === "h1_team_b" ? "h1"
-    : ["h1", "h2", "winner"].includes(mk) ? mk : "ft";
+    : ["h1", "winner"].includes(mk) ? mk : "ft";
   const paramKey = bucket === "ft" ? "edgeFTPointThreshold"
     : bucket === "h1" ? "edgeH1PointThreshold"
-    : bucket === "h2" ? "edgeH2PointThreshold"
     : bucket === "team" ? "edgeTeamPointThreshold"
     : bucket === "winner" ? "edgeWinnerPointThreshold" : null;
   let tuned = NaN;
@@ -12613,12 +12498,6 @@ function getLeagueScoreBase(league) {
   return LEAGUE_BASES.unknown;
 }
 // ========== CALC-AUDIT-110: TOTALS AND LINE-RANGE CALCULATIONS — END ==========
-const QSHAPE_STORAGE_KEY = "BB_TEAM_QSHAPE_V1";
-// ========== CALC-AUDIT-111: CONSTANTS AND MODEL CONFIGURATION — BEGIN ==========
-// AUDIT-NAV: members: QSHAPE_MIN_GAMES
-// AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
-const QSHAPE_MIN_GAMES = 6;
-// ========== CALC-AUDIT-111: CONSTANTS AND MODEL CONFIGURATION — END ==========
 // ========== CALC-AUDIT-112: SCORE PROJECTIONS — BEGIN ==========
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 // ========== CALC-AUDIT-112: SCORE PROJECTIONS — END ==========
@@ -13936,7 +13815,7 @@ function bbLrFamily(mk) {
   const m = String(mk || "").toLowerCase();
   if (m === "ft") return "TOT_FT";
   if (m === "h1") return "TOT_H1";
-  if (m === "h2") return "TOT_H2";
+  
   if (m === "team_a" || m === "team_b") return "TEAM_FT";
   if (m === "h1_team_a" || m === "h1_team_b") return "TEAM_H1";
   if (m === "winner") return "ML";
@@ -14577,7 +14456,6 @@ function bbLrTeamMemoryDelta(mk, tm) {
     case "team_a": return dA;
     case "team_b": return dB;
     case "h1": return (dA + dB) * sh;
-    case "h2": return (dA + dB) * (1 - sh);
     case "h1_team_a": return dA * sh;
     case "h1_team_b": return dB * sh;
     case "winner": return dA - dB;
@@ -14686,8 +14564,8 @@ function bbLrApplyToPicks(picks, ctx) {
 // ========== CALC-AUDIT-137: TRACKER-DERIVED STATISTICS, SETTLEMENT AND LEARNING — END ==========
 function bbLrSegLabel(k) {
   const s = String(k || "");
-  const fam = { TOT_FT: "FT totals", TOT_H1: "1H totals", TOT_H2: "2H totals", TEAM_FT: "Team totals", TEAM_H1: "1H team totals", ML: "Winner" };
-  const mk = { ft: "FT total", h1: "1H total", h2: "2H total", team_a: "Home team total", team_b: "Away team total", h1_team_a: "1H home team total", h1_team_b: "1H away team total", winner: "Winner" };
+  const fam = { TOT_FT: "FT totals", TOT_H1: "1H totals", TEAM_FT: "Team totals", TEAM_H1: "1H team totals", ML: "Winner" };
+  const mk = { ft: "FT total", h1: "1H total", team_a: "Home team total", team_b: "Away team total", h1_team_a: "1H home team total", h1_team_b: "1H away team total", winner: "Winner" };
   const [lv, rest] = s.split(":");
   if (lv === "G") return "All picks";
   if (lv === "K") return rest === "ml" ? "Winner picks" : "Totals";
@@ -15182,7 +15060,7 @@ function _bbRdBuildTrackerDerivedStateFromPicks(inputPicks = []) {
     upsertDerivedBucket(environmentMap, environmentKey, environmentKey, pick);
     upsertDerivedBucket(marketSideMap, marketSideKey, marketSideKey, pick);
     const marketKey = String(pick.marketKey || "");
-    if (["ft", "h1", "h2"].includes(marketKey)) {
+    if (["ft", "h1"].includes(marketKey)) {
       if (pick.homeTeamKey) {
         const homeBucketKey = `${pick.league || "unknown"}:${pick.homeTeamKey}`;
         upsertDerivedBucket(teamMap, homeBucketKey, pick.homeTeam || pick.homeTeamKey, pick);
@@ -16474,7 +16352,7 @@ window.addEventListener("unhandledrejection", (event) => {
 });
 function maybeReadH2HEnabled(kind, snapshotOverride = null) {
   const k = String(kind || "").toLowerCase();
-  const map = { ft: "useFTH2H", h1: "use1HH2H", h2: "use2HH2H" };
+  const map = { ft: "useFTH2H", h1: "use1HH2H" };
   if (snapshotOverride && typeof snapshotOverride === "object" && typeof snapshotOverride[map[k]] === "boolean") {
     return snapshotOverride[map[k]];
   }
@@ -16482,10 +16360,6 @@ function maybeReadH2HEnabled(kind, snapshotOverride = null) {
   if (id) {
     const el = document.getElementById(id);
     if (el) return !!el.checked;
-  }
-  if (k === "h2") {
-    const games = AppState.context && Array.isArray(AppState.context.data?.h2hGames) ? AppState.context.data.h2hGames : [];
-    return games.filter((g) => Number.isFinite(Number(g.h2A)) && Number(g.h2A) > 0 && Number.isFinite(Number(g.h2B)) && Number(g.h2B) > 0).length >= 2;
   }
   return false;
 }
@@ -17249,7 +17123,7 @@ function normalizeDashes(str) {
   return String(str ?? "").replace(/[\u2013\u2014\u2212]/g, "-");
 }
 // ========== CALC-AUDIT-153: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — BEGIN ==========
-// AUDIT-NAV: members: readVal, extractFirstHalf, extractSecondHalf
+ // AUDIT-NAV: members: readVal, extractFirstHalf
 // AUDIT-NAV: calls other labeled calc code: readVal
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 function readVal(p) {
@@ -17266,12 +17140,6 @@ function extractFirstHalf(lm, lo) {
     return [NaN, NaN];
   }
   return [readVal(lm[0]), readVal(lo[0])];
-}
-function extractSecondHalf(lm, lo) {
-  if (!Array.isArray(lm) || !Array.isArray(lo) || lm.length < 2 || lo.length < 2) {
-    return [NaN, NaN];
-  }
-  return [readVal(lm[1]), readVal(lo[1])];
 }
 // ========== CALC-AUDIT-153: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — END ==========
 function resetResultsTable() {
@@ -17768,7 +17636,7 @@ function parseMarketRangeMeta(val) {
 function getWideRangeThreshold(marketKey) {
   const key = String(marketKey || "").toLowerCase();
   if (key === "ft") return 8;
-  if (key === "h1" || key === "h2" || key === "team_a" || key === "team_b" || key === "h1_team_a" || key === "h1_team_b" || key === "h2_team_a" || key === "h2_team_b") return 6;
+  if (key === "h1" || key === "team_a" || key === "team_b" || key === "h1_team_a" || key === "h1_team_b") return 6;
   return null;
 }
 // ========== CALC-AUDIT-157: TOTALS AND LINE-RANGE CALCULATIONS — END ==========
@@ -17902,7 +17770,7 @@ function applyWideRangeGate(pickRow, rawMarketInput, marketKey) {
 function buildWideRangeGateState(rawMarketInputs, league = "") {
   const raw = rawMarketInputs || {};
   const keys = [
-    "ft", "winner", "h1", "h2", "team_a", "team_b",
+    "ft", "winner", "h1", "team_a", "team_b",
     "h1_team_a", "h1_team_b",
   ];
   const state = {};
@@ -18015,10 +17883,6 @@ function applySiblingMarketContradictionGate(picks, rawMarketInputs) {
   if (_fin(_ta) && _fin(_tb) && _fin(_ft)) {
     blockOutlier(["team_a", "team_b", "ft"], "Market contradiction: Team A + Team B vs FT lines");
   }
-  const _h1 = lineOf("h1"), _h2 = lineOf("h2");
-  if (_fin(_h1) && _fin(_h2) && _fin(_ft)) {
-    blockOutlier(["h1", "h2", "ft"], "Market contradiction: 1H + 2H vs FT lines");
-  }
   const _h1a = lineOf("h1_team_a"), _h1b = lineOf("h1_team_b");
   if (_fin(_h1a) && _fin(_h1b) && _fin(_h1)) {
     blockOutlier(["h1_team_a", "h1_team_b", "h1"], "Market contradiction: 1H Team A + 1H Team B vs 1H lines");
@@ -18082,7 +17946,7 @@ function bbH2HEvidence(mk, parsed, line, side) {
     const num = (arr) => (Array.isArray(arr) ? arr.map(Number) : []);
     if (one) {
       series = num(getH2HSeries(one[0], one[1], parsed)).filter((v) => Number.isFinite(v) && v > 0);
-    } else if (/^(ft|h1|h2|q[1-4])$/.test(mk)) {
+    } else if (/^(ft|h1)$/.test(mk)) {
       const a = num(getH2HSeries("A", mk, parsed)), b = num(getH2HSeries("B", mk, parsed));
       series = a.length && a.length === b.length ? a.map((v, i) => v + b[i]).filter((v) => Number.isFinite(v) && v > 0) : null; /* misaligned = unavailable, not success */
     }
@@ -18218,7 +18082,6 @@ function bbTrapSample(mk, parsed) {
     if (mk === "h1_team_b") return single(fcc(getManualSeries("B", "h1", parsed || null, root)));
     if (mk === "ft") return join(periodTotal("A", "ft"), periodTotal("B", "ft"));
     if (mk === "h1") return join(periodTotal("A", "h1"), periodTotal("B", "h1"));
-    if (mk === "h2") return join(periodTotal("A", "h2"), periodTotal("B", "h2"));
   } catch (_e) {}
   return null;
 }
@@ -18227,7 +18090,7 @@ function bbTrapSample(mk, parsed) {
 // AUDIT-NAV: members: BB_UNDER_FACTOR_DEFAULTS
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 /* BB-FIX #9: per-market Under factors. Provisional defaults apply only while the factor is still the untuned 1.5; never below 1.3. */
-const BB_UNDER_FACTOR_DEFAULTS = { ft: 1.5, h1: 1.5, h2: 1.6, team_a: 1.6, team_b: 1.6, h1_team_a: 1.6, h1_team_b: 1.6 };
+const BB_UNDER_FACTOR_DEFAULTS = { ft: 1.5, h1: 1.5, team_a: 1.6, team_b: 1.6, h1_team_a: 1.6, h1_team_b: 1.6 };
 // ========== CALC-AUDIT-165: CONSTANTS AND MODEL CONFIGURATION — END ==========
 // ========== CALC-AUDIT-166: PICK AND SIGNAL EVALUATION — BEGIN ==========
 // AUDIT-NAV: members: bbUnderEdgeFactor
@@ -18316,16 +18179,15 @@ function bbShadowSettleFromCompetition(eventId, competition, final) {
     const sH = num(home.score), sA = num(away.score);
     if (!Number.isFinite(sH) || !Number.isFinite(sA)) return;
     const lsH = (home.linescores || []).map(num), lsA = (away.linescores || []).map(num);
-    const hasQ = lsH.length >= 4 && lsA.length >= 4 && lsH.slice(0, 4).every(Number.isFinite) && lsA.slice(0, 4).every(Number.isFinite);
+    const hasHalfData = lsH.length >= 4 && lsA.length >= 4 && lsH.slice(0, 4).every(Number.isFinite) && lsA.slice(0, 4).every(Number.isFinite);
     const sum = (a, i, j) => a.slice(i, j).reduce((x, y) => x + y, 0);
     open.forEach((e) => {
       const mk = e.marketKey; const aHome = e.roleA === "home"; const aKnown = e.roleA === "home" || e.roleA === "away";
       let actual = NaN;
       if (mk === "ft") actual = sH + sA;
-      else if (hasQ && mk === "h1") actual = sum(lsH, 0, 2) + sum(lsA, 0, 2);
-      else if (hasQ && mk === "h2") actual = sum(lsH, 2, 4) + sum(lsA, 2, 4);
+      else if (hasHalfData && mk === "h1") actual = sum(lsH, 0, 2) + sum(lsA, 0, 2);
       else if (aKnown && (mk === "team_a" || mk === "team_b")) actual = (mk === "team_a") === aHome ? sH : sA;
-      else if (aKnown && hasQ && (mk === "h1_team_a" || mk === "h1_team_b")) actual = (mk === "h1_team_a") === aHome ? sum(lsH, 0, 2) : sum(lsA, 0, 2);
+      else if (aKnown && hasHalfData && (mk === "h1_team_a" || mk === "h1_team_b")) actual = (mk === "h1_team_a") === aHome ? sum(lsH, 0, 2) : sum(lsA, 0, 2);
       else if (mk === "winner") actual = sH - sA;
       if (Number.isFinite(actual)) bbShadowSettle(eventId, mk, actual);
     });
@@ -18435,7 +18297,7 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
       if (!bbStrictFinite(p.volatility) || !bbStrictFinite(p.volLimit) || Number(p.volLimit) <= 0) {
         add("VOL", "BLOCK", "missing/invalid volatility data for line-based market");
       } else {
-        const vr = Number(p.volatility) / (Number(p.volLimit) * (/^(ft|h1|h2)$/.test(String(p.marketKey || "")) ? Math.SQRT2 : 1)); /* FIX_GUIDE step 3: combined-total SD vs combined limit */
+        const vr = Number(p.volatility) / (Number(p.volLimit) * (/^(ft|h1)$/.test(String(p.marketKey || "")) ? Math.SQRT2 : 1)); /* FIX_GUIDE step 3: combined-total SD vs combined limit */
         if (bbStrictFinite(vr) && vr > VOL_CAP[side]) add("VOL", "BLOCK", "volatility ratio " + vr.toFixed(2) + " > cap " + VOL_CAP[side]);
       }
       if (side === "UNDER" && typeof getConfidenceRank === "function") {
@@ -18584,7 +18446,6 @@ function getRawMarketInputMap() {
   return {
     ft: document.getElementById("ftMarket")?.value || "",
     h1: document.getElementById("h1Market")?.value || "",
-    h2: document.getElementById("h2Market")?.value || "",
     h1_team_a: document.getElementById("h1TeamAMarket")?.value || "",
     h1_team_b: document.getElementById("h1TeamBMarket")?.value || "",
     team_a: document.getElementById("teamAMarket")?.value || "",
@@ -18597,7 +18458,6 @@ function last10SeriesFieldIds() {
     "aFTScoredHome","aFTAllowedHome","aFTScoredAway","aFTAllowedAway",
     "bFTScored","bFTAllowed","b1HScored","b1HAllowed",
     "bFTScoredHome","bFTAllowedHome","bFTScoredAway","bFTAllowedAway",
-    "a2HScored","a2HAllowed","b2HScored","b2HAllowed",
   ];
 }
 function isVenueSplitLast10Field(id) {
@@ -18615,7 +18475,7 @@ const LAST10_MIN_GAMES = 8;
 const LAST10_MAX_GAMES = 10;
 // ========== CALC-AUDIT-174: CONSTANTS AND MODEL CONFIGURATION — END ==========
 function describeLast10Field(id) {
-  const m = /^([ab])(FT|1H|2H|Q[1-4])(Scored|Allowed)(Home|Away)?$/.exec(String(id || ""));
+  const m = /^([ab])(FT|1H)(Scored|Allowed)(Home|Away)?$/.exec(String(id || ""));
   if (!m) return String(id || "");
   return (m[1] === "a" ? "Team A" : "Team B") + (m[4] ? " " + m[4] : "") + " " + m[2] + " " + m[3];
 }
@@ -18721,7 +18581,7 @@ function parseGames(id) {
   if (parts.length > 10) return { err: "maximum 10 values allowed" };
   const out = [];
   const _tokRe = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/;
-  const _allowZero = /(?:q[1-4]|1h|2h|h1|h2)/i.test(String(id || "")) && !/ft/i.test(String(id || ""));
+  const _allowZero = /(?:1h|h1)/i.test(String(id || "")) && !/ft/i.test(String(id || ""));
   for (let i = 0; i < parts.length; i++) {
     const tok = String(parts[i]).trim();
     if (!_tokRe.test(tok)) return { err: '"' + parts[i] + '" at position ' + (i + 1) + " is not a strict number" };
@@ -19523,7 +19383,7 @@ function repairWinnerSettlementParityTrackedPicks(activeList, archivedList, opts
     return "";
   }
   const OU_MARKETS = {
-    ft: 1, h1: 1, h2: 1,
+    ft: 1, h1: 1,
     team_a: 1, team_b: 1, h1_team_a: 1, h1_team_b: 1,
   };
   let count = 0;
@@ -20798,16 +20658,6 @@ async function _pollLiveGameClocksImpl() {
           const _pAway = _pCompetitors.find((c) => c.homeAway === "away");
           const _pHomeScore = _pHome ? parseFloat(_pHome.score) || 0 : null;
           const _pAwayScore = _pAway ? parseFloat(_pAway.score) || 0 : null;
-          const _pHomeLS = (_pHome?.linescores || []).map(
-            (l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0,
-          );
-          const _pAwayLS = (_pAway?.linescores || []).map(
-            (l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0,
-          );
-          const _pQScores =
-            _pHomeLS.length && _pAwayLS.length
-              ? { home: _pHomeLS, away: _pAwayLS }
-              : existing?.qScores || null;
           if (!existing || existing.period !== period || existing.clock !== newClock) {
             g_liveGameStatus.set(eid, {
               period,
@@ -20818,7 +20668,6 @@ async function _pollLiveGameClocksImpl() {
               clockFrozen: false,
               homeScore: _pHomeScore,
               awayScore: _pAwayScore,
-              qScores: _pQScores,
               _expiredAt: existing?._expiredAt ?? null,
             });
             didChange = true;
@@ -20842,13 +20691,9 @@ async function _pollLiveGameClocksImpl() {
               existing.awayScore = _pAwayScore;
               didChange = true;
             }
-            if (_pQScores && _pQScores.home?.length) {
-              existing.qScores = _pQScores;
-              didChange = true;
-            }
             if (
               typeof settlePendingPicksFromCompetition === "function" &&
-              (isHalf || Number(period || 0) >= 2 || (_pQScores && (_pQScores.home || []).length >= 2))
+              (isHalf || Number(period || 0) >= 2)
             ) {
               const _retry = settlePendingPicksFromCompetition(eid, comp, false);
               if (_retry) didChange = true;
@@ -21671,7 +21516,7 @@ function closeTrackerModal() {
 }
 let g_trackerRenderToken = 0;
 function isRetainedMarketKey(marketKey) {
-  return new Set(["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner"])
+  return new Set(["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner"])
     .has(String(marketKey || "").toLowerCase());
 }
 function renderTrackedPicks() {
@@ -21763,7 +21608,6 @@ function renderTrackedPicks() {
       const mktOrderMap = {
         ft: 1,
         h1: 2,
-        h2: 3,
         h1_team_a: 4,
         h1_team_b: 10,
         team_a: 11,
@@ -21840,8 +21684,7 @@ function renderTrackedPicks() {
                   const _regP = LEAGUE_FETCH_RULES[_liveInfo.league || ""]?.regulationPeriods ?? 4;
                   const _p = Number(_liveInfo.period || 0);
                   if (_p === 0) return "LIVE";
-                  const _pLabel =
-                    _p <= _regP ? `Q${_p}` : _p - _regP === 1 ? "OT" : `OT${_p - _regP}`;
+                  const _pLabel = _p <= _regP ? `Period ${_p}` : _p - _regP === 1 ? "Overtime" : `Overtime ${_p - _regP}`;
                   return `${_pLabel} ${_liveInfo.clock}`;
                 })()
             : null;
@@ -21856,27 +21699,16 @@ function renderTrackedPicks() {
             ? (() => {
                 const _regP2 = LEAGUE_FETCH_RULES[_liveInfo.league || ""]?.regulationPeriods ?? 4;
                 const _curP2 = Number(_liveInfo.period || 0);
-                const _qH2 = _liveInfo.qScores?.home || [];
-                const _qA2 = _liveInfo.qScores?.away || [];
-                const _maxQ2 = Math.min(_curP2, _regP2, 4);
                 const _clockOnly =
                   _liveClockLabel === "HALF"
                     ? "HALF"
-                    : _liveClockLabel.replace(/^(Q\d+|OT\d*)\s+/i, "");
+                    : _liveClockLabel.replace(/^(Period \d+|Overtime(?: \d+)?)\s+/i, "");
                 const safeClock = escapeHtml(String(_clockOnly).trim() || String(_liveClockLabel).trim()); /* P4-LIVECLOCK: no clock from the source -> retain the live-period label */
                 const _hasLiveScore =
                   Number.isFinite(_liveInfo.homeScore) && Number.isFinite(_liveInfo.awayScore);
                 const homeTotal = _hasLiveScore ? Math.round(_liveInfo.homeScore) : null;
                 const awayTotal = _hasLiveScore ? Math.round(_liveInfo.awayScore) : null;
-                let _qRowsHtml = "";
-                for (let _qi = 0; _qi < _maxQ2; _qi++) {
-                  const _qHv = Number(_qH2[_qi]);
-                  const _qAv = Number(_qA2[_qi]);
-                  if (isFinite(_qHv) && isFinite(_qAv) && (_qHv > 0 || _qAv > 0)) {
-                    _qRowsHtml += `<div style="font-size:7px;font-weight:900;line-height:1.25;color:var(--text);white-space:nowrap;letter-spacing:0;">Q${_qi + 1}<span style="display:inline-block;min-width:13px;text-align:right;">${Math.round(_qHv)}</span>:<span style="display:inline-block;min-width:13px;">${Math.round(_qAv)}</span></div>`;
-                  }
-                }
-                return `<div style="color:var(--muted);font-size:8px;font-weight:900;line-height:1.0;letter-spacing:0.3px;margin-bottom:1px;">LIVE</div><div style="font-size:12px;font-weight:900;line-height:1.2;margin-bottom:2px;color:var(--tracker-strong);">${_hasLiveScore ? homeTotal + " : " + awayTotal : ""}</div><div style="font-size:6px;font-weight:800;line-height:1.1;margin-bottom:1px;color:var(--muted);white-space:nowrap;"><span style="font-size:5px;">⏰</span><span data-live-clk="${escapeHtml(p.eventId)}"> ${safeClock}</span></div>${_qRowsHtml}`;
+                return `<div style="color:var(--muted);font-size:8px;font-weight:900;line-height:1.0;letter-spacing:0.3px;margin-bottom:1px;">LIVE</div><div style="font-size:12px;font-weight:900;line-height:1.2;margin-bottom:2px;color:var(--tracker-strong);">${_hasLiveScore ? homeTotal + " : " + awayTotal : ""}</div><div style="font-size:6px;font-weight:800;line-height:1.1;margin-bottom:1px;color:var(--muted);white-space:nowrap;"><span style="font-size:5px;">⏰</span><span data-live-clk="${escapeHtml(p.eventId)}"> ${safeClock}</span></div>`;
               })()
             : "";
           const _settleSigAttr = encodeURIComponent(settleSig);
@@ -22302,7 +22134,6 @@ function renderTrackerAnalytics() {
     const map = {
       ft: "FT Total",
       h1: "1H Total",
-      h2: "2H Total",
       team_a: "Team A Total",
       team_b: "Team B Total",
     };
@@ -23558,7 +23389,7 @@ function manualSettlePlaceholder(pick) {
   if (isWinnerMarketKey(mk)) return "HOME/AWAY";
   if (mk === "team_a" || mk === "team_b") return "84";
   if (mk === "h1_team_a" || mk === "h1_team_b") return "42";
-  if (mk === "h1" || mk === "h2") return "42-40";
+  if (mk === "h1") return "42-40";
   if (mk === "winner") return "84-82";
   return "84-82";
 }
@@ -23571,7 +23402,7 @@ function manualSettleMarketLabel(pick) {
 }
 function manualSettlePeriodLabel(pick) {
   const per = typeof bbScPeriodOfMarket === "function" ? bbScPeriodOfMarket(pick && pick.marketKey) : "ft";
-  return { ft: "full time", h1: "1st half", h2: "2nd half" }[per] || "full time";
+  return { ft: "full time", h1: "1st half" }[per] || "full time";
 }
 // ========== CALC-AUDIT-202: TRACKER-DERIVED STATISTICS, SETTLEMENT AND LEARNING — BEGIN ==========
 // AUDIT-NAV: members: combineManualTeamScores
@@ -24330,7 +24161,6 @@ function bbScNameMatch(pickName, comp) {
 function bbScPeriodOfMarket(mk) {
   const key = String(mk || "").toLowerCase();
   if (key === "h1" || key.startsWith("h1_")) return "h1";
-  if (key === "h2") return "h2";
   return "ft";
 }
 // ========== CALC-AUDIT-205: TRACKER-DERIVED STATISTICS, SETTLEMENT AND LEARNING — BEGIN ==========
@@ -24347,10 +24177,6 @@ function bbPeriodScorelineForPick(pick, competition) {
     return isFinite(n) ? n : NaN;
   };
   let lsH = home.linescores || [], lsA = away.linescores || [];
-  if ((lsH.length < 2 || lsA.length < 2) && pick.eventId && typeof g_liveGameStatus !== "undefined" && g_liveGameStatus.has(pick.eventId)) {
-    const qs = g_liveGameStatus.get(pick.eventId)?.qScores;
-    if (qs && Array.isArray(qs.home) && Array.isArray(qs.away)) { lsH = qs.home.map((v) => ({ value: v })); lsA = qs.away.map((v) => ({ value: v })); }
-  }
   const regP = (typeof LEAGUE_FETCH_RULES !== "undefined" && LEAGUE_FETCH_RULES[pick.league || ""] && LEAGUE_FETCH_RULES[pick.league || ""].regulationPeriods) || 4;
   const per = bbScPeriodOfMarket(pick.marketKey);
   const sumIdx = (ls, idx) => idx.reduce((s, i) => s + val(ls[i]), 0);
@@ -24358,11 +24184,6 @@ function bbPeriodScorelineForPick(pick, competition) {
   if (per === "ft") { h = val(home.score); a = val(away.score); }
   else if (per === "h1") {
     if (regP >= 4) { h = sumIdx(lsH, [0, 1]); a = sumIdx(lsA, [0, 1]); } else { h = val(lsH[0]); a = val(lsA[0]); }
-  } else if (per === "h2") {
-    if (regP >= 4) { h = sumIdx(lsH, [2, 3]); a = sumIdx(lsA, [2, 3]); } else { h = val(lsH[1]); a = val(lsA[1]); }
-  } else {
-    const qi = Number(per.slice(1)) - 1;
-    if (regP >= 4) { h = val(lsH[qi]); a = val(lsA[qi]); }
   }
   if (!Number.isFinite(h) || !Number.isFinite(a)) return null;
   /* Team A = pick.homeTeam. ids first, then names; otherwise the feed's home team is assumed to be Team A */
@@ -24420,47 +24241,12 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
   if (completed && (!Number.isFinite(sHome) || !Number.isFinite(sAway))) return "pending"; /* AUDIT-FIX F3: NaN > NaN is false, so a missing score graded as an AWAY win */
   let lsHome = home.linescores || [];
   let lsAway = away.linescores || [];
-  if (
-    (lsHome.length < 2 || lsAway.length < 2) &&
-    pick.eventId &&
-    typeof g_liveGameStatus !== "undefined" &&
-    g_liveGameStatus.has(pick.eventId)
-  ) {
-    const qs = g_liveGameStatus.get(pick.eventId)?.qScores;
-    if (qs && Array.isArray(qs.home) && Array.isArray(qs.away) && qs.home.length && qs.away.length) {
-      lsHome = qs.home.map((v) => ({ value: v }));
-      lsAway = qs.away.map((v) => ({ value: v }));
-    }
-  }
-  let h1Home = NaN,
-    h1Away = NaN;
-  let q1Home = NaN,
-    q1Away = NaN,
-    q2Home = NaN,
-    q2Away = NaN,
-    q3Home = NaN,
-    q3Away = NaN,
-    q4Home = NaN,
-    q4Away = NaN; 
+  let h1Home = NaN, h1Away = NaN;
   if (lsHome.length >= 2 && lsAway.length >= 2) {
-    const _regP =
-      (typeof LEAGUE_FETCH_RULES !== "undefined" &&
-        LEAGUE_FETCH_RULES[pick.league || ""] &&
-        LEAGUE_FETCH_RULES[pick.league || ""].regulationPeriods) ||
-      4;
+    const _regP = LEAGUE_FETCH_RULES[pick.league || ""]?.regulationPeriods || 4;
     if (_regP >= 4) {
-      q1Home = getVal(lsHome[0]);
-      q1Away = getVal(lsAway[0]);
-      q2Home = getVal(lsHome[1]);
-      q2Away = getVal(lsAway[1]);
-      h1Home = q1Home + q2Home;
-      h1Away = q1Away + q2Away;
-      if (lsHome.length >= 4 && lsAway.length >= 4) {
-        q3Home = getVal(lsHome[2]);
-        q3Away = getVal(lsAway[2]);
-        q4Home = getVal(lsHome[3]);
-        q4Away = getVal(lsAway[3]);
-      }
+      h1Home = getVal(lsHome[0]) + getVal(lsHome[1]);
+      h1Away = getVal(lsAway[0]) + getVal(lsAway[1]);
     } else {
       h1Home = getVal(lsHome[0]);
       h1Away = getVal(lsAway[0]);
@@ -24501,27 +24287,6 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
   // CALC-AUDIT-206.W01 waypoint: if-block (Math.* x4; arithmetic ops x6)
   if (market === "ft") {
     actual = sHome + sAway;
-  } else if (market === "h2") {
-    const _regPH2tot =
-      (typeof LEAGUE_FETCH_RULES !== "undefined" &&
-        LEAGUE_FETCH_RULES[pick.league || ""] &&
-        LEAGUE_FETCH_RULES[pick.league || ""].regulationPeriods) ||
-      4;
-    const q3q4ReadyTot =
-      Number.isFinite(q3Home) &&
-      Number.isFinite(q3Away) &&
-      Number.isFinite(q4Home) &&
-      Number.isFinite(q4Away);
-    if (_regPH2tot <= 2 && lsHome.length >= 2 && lsAway.length >= 2) {
-      const p2H = getVal(lsHome[1]);
-      const p2A = getVal(lsAway[1]);
-      if (!Number.isFinite(p2H) || !Number.isFinite(p2A)) return "pending";
-      actual = p2H + p2A;
-    } else if (q3q4ReadyTot) {
-      actual = q3Home + q3Away + q4Home + q4Away;
-    } else {
-      return "pending";
-    }
   } else if (market === "winner") {
     if (sHome === sAway) {
       pick.actualScore = "Tie";
@@ -24932,16 +24697,6 @@ async function refreshTrackedPickResults() {
             const _rlAway = _rlCompetitors.find((c) => c.homeAway === "away");
             const _rlHomeScore = _rlHome ? parseFloat(_rlHome.score) || 0 : null;
             const _rlAwayScore = _rlAway ? parseFloat(_rlAway.score) || 0 : null;
-            const _rlHomeLS = (_rlHome?.linescores || []).map(
-              (l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0,
-            );
-            const _rlAwayLS = (_rlAway?.linescores || []).map(
-              (l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0,
-            );
-            const _rlQScores =
-              _rlHomeLS.length && _rlAwayLS.length
-                ? { home: _rlHomeLS, away: _rlAwayLS }
-                : _existingLive?.qScores || null;
             if (!(
               _existingLive?._expiredAt && Date.now() - _existingLive._expiredAt > 5 * 60 * 1000
             )) {
@@ -24955,7 +24710,6 @@ async function refreshTrackedPickResults() {
                 clockFrozen: false,
                 homeScore: _rlHomeScore,
                 awayScore: _rlAwayScore,
-                qScores: _rlQScores,
                 _expiredAt: _existingLive?._expiredAt ?? null,
               });
             }
@@ -25628,7 +25382,6 @@ function bbPreAdjustmentForMarket(mk, c) {
   switch (key) {
     case "ft": return f(c.preAdjustmentFtProj);
     case "h1": return f(c.preAdjustmentH1Proj);
-    case "h2": return f(c.preAdjustmentH2Proj);
     
     case "team_a": return f(c.preAdjustmentProjAFT);
     case "team_b": return f(c.preAdjustmentProjBFT);
@@ -25770,12 +25523,10 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
     const _t = getReconGapThreshold(200);
     assert(
       isReconGapSevere(_t - 0.01, _t) === false,
-      "isReconGapSevere must not trip just under the FT vs (H1+H2) reconciliation threshold",
-    );
+        );
     assert(
       isReconGapSevere(_t + 0.01, _t) === true,
-      "isReconGapSevere must trip just over the FT vs (H1+H2) reconciliation threshold",
-    );
+        );
   }
   if (typeof downgradeConfidenceForReconGap === "function") {
     assert(
@@ -25786,28 +25537,11 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
     );
   }
   if (typeof getPeriodAdvancedSeries === "function") {
-    const thinCtx = {
-      ortg10_h2: [110, 111, 112],
-      drtg10_h2: [105, 106, 107],
-      pace10_h2: [98, 99, 100],
-      ortg10: [112],
-      drtg10: [108],
-      pace10: [100],
-    };
-    const r = getPeriodAdvancedSeries(thinCtx, "h2");
-    assert(r.source === "none", "h2 with <5 samples must source=none (no FT leak)");
     const thinH1 = getPeriodAdvancedSeries(
       { ortg10_h1: [1, 2, 3, 4], drtg10_h1: [1, 2, 3, 4], ortg10: [110], drtg10: [105] },
       "h1",
     );
     assert(thinH1.source === "none", "h1 with <5 samples must source=none");
-    const fullCtx = {
-      ortg10_h2: [110, 111, 112, 113, 114],
-      drtg10_h2: [105, 106, 107, 108, 109],
-      pace10_h2: [98, 99, 100, 101, 102],
-    };
-    const r2 = getPeriodAdvancedSeries(fullCtx, "h2");
-    assert(r2.source === "h2" && r2.ortg.length >= 5, "h2 with ≥5 samples must be period-native");
   }
   if (typeof buildConfidenceFeatures === "function") {
     const fLive = buildConfidenceFeatures({
@@ -26009,8 +25743,9 @@ function getPeriodAdvancedSeries(ctx, marketKey) {
   const c = ctx || {};
   const mk = String(marketKey || "ft").toLowerCase();
   const none = { ortg: [], drtg: [], pace: [], source: "none", periodNative: false };
+  if (!["ft", "full", "h1"].includes(mk)) return none;
   const cutoff = bbAdvancedAsOfCutoff();
-  const sfx = mk === "ft" || mk === "full" ? "" : "_" + mk;
+  const sfx = mk === "ft" || mk === "full" ? "" : "_h1";
   const oDates = c["ortgDates10" + sfx];
   const mask = (vals, own) => bbMaskAdvancedByDate(vals, Array.isArray(own) && own.length ? own : oDates, cutoff);
   if (sfx === "") {
@@ -26107,13 +25842,6 @@ function validateLines(league, ftLine, h1Line, aLine, bLine) {
 function validateLinesFromExtracted(league, lines = {}) {
   validateLines(league, lines.ftLine, lines.h1Line, lines.aLine, lines.bLine);
   const bands = getLineSanityBands(league);
-  const value = Number(lines.h2Line);
-  const band = bands.h2 || bands.h1;
-  if (Number.isFinite(value) && Array.isArray(band) && (value < band[0] || value > band[1])) {
-    engineDebug("Book line outside sanity band — accepted as authoritative input", {
-      league, label: "2H Total", line: value, expectedRange: band,
-    });
-  }
   return [];
 }
 /* CALCULATION SECTION */
@@ -26484,7 +26212,7 @@ function bbLeagueHCA(league) {
 }
 function bbSeriesCount(id) { var el = typeof document !== "undefined" ? document.getElementById(id) : null; return el ? String(el.value || "").split(/[,\s]+/).filter(function (x) { return x !== "" && Number.isFinite(Number(x)); }).length : 0; }
 function bbMarginHCA(period, league, ctx) {
-  var scale = period === "h1" || period === "h2" ? 0.5 : /^q[1-4]$/.test(String(period)) ? 0.25 : 1;
+  var scale = period === "h1" ? 0.5 : 1;
   var root = ctx || (typeof AppState !== "undefined" && AppState.context ? AppState.context.data : null) || {};
   try { if (typeof isVenueNeutral === "function" && isVenueNeutral(root, null)) { window.__bbHCAInfo = { neutral: true, applied: 0, period: period }; return 0; } } catch (_n) {}
   var w = function (n) { try { return getVenueBlendWeights(n).wVenue; } catch (_e) { return 0; } };
@@ -26550,6 +26278,17 @@ function getMarginPick(edge, league, marketKey) {
   window.__bbLastMarginReason = "margin edge " + (signal > 0 ? "+" : "") + signal.toFixed(2) + " pts clears " + threshold.toFixed(2) + " pt threshold";
   return signal > 0 ? "HOME" : "AWAY";
 }
+window.bbRecordMarginReason = function bbRecordMarginReason(marketKey, noPlayReasons, pick) {
+  const key = String(marketKey || "winner");
+  const result = String(pick || "NO PLAY");
+  const reason = String((typeof window !== "undefined" && window.__bbLastMarginReason) || "");
+  if (noPlayReasons && typeof noPlayReasons === "object") {
+    if (result === "NO PLAY") noPlayReasons[key] = reason || "margin pick did not clear eligibility";
+    else delete noPlayReasons[key];
+  }
+  return result;
+};
+
 /* removed unused getMarginPick_LEGACY */
 /* CALCULATION SECTION */
 function getMarginConfidenceInputs(edge, referenceScale, combinedStdDev, marginVolLimit) {
@@ -26659,7 +26398,7 @@ function distributionWinProbability(meanEdge, leagueVolLimit, volRatio) {
 function selectedSideEdgeForProbability(edge, side) {
   if (!bbStrictFinite(edge)) return NaN;
   const s = String(side || "").toLowerCase();
-  return ["under","away","team_b","h1_team_b","h2_team_b"].includes(s) ? -Number(edge) : Number(edge);
+  return ["under","away","team_b","h1_team_b"].includes(s) ? -Number(edge) : Number(edge);
 }
 /* CALCULATION SECTION */
 function getDistributionWinProbabilityForPick(p, leagueKey) {
@@ -27516,7 +27255,7 @@ function readLooseSeries(id) {
   const raw = el?.value?.trim() || "";
   if (!raw) return [];
   const parts = raw.split(/[,;\s]+/).map((x) => x.trim()).filter(Boolean);
-  const _allowZero = /(?:q[1-4]|1h|2h)/i.test(String(id || "")) && !/ft/i.test(String(id || ""));
+  const _allowZero = /(?:1h|h1)/i.test(String(id || "")) && !/ft/i.test(String(id || ""));
   const out = [];
   for (const part of parts) {
     const value = Number(part);
@@ -27556,7 +27295,6 @@ function getFatigueMarketScale(marketKey, league) {
   const reg = league && typeof getLeagueRegulationMinutes === "function" ? Number(getLeagueRegulationMinutes(league)) : 48; /* BB-FIX #23 */
   const regFactor = Number.isFinite(reg) && reg > 0 ? reg / 48 : 1;
   if (mk === "ft" || mk === "full") return 1 * regFactor;
-  if (/^q[1-4]$/.test(mk) || mk === "q") return 0.25 * regFactor;
   return 0.5 * regFactor;
 }
 /* CALCULATION SECTION */
@@ -27850,7 +27588,7 @@ function annotateIntelligenceDiagnostics(picks, intelligencePack, league) {
     const restA = Number(intelligencePack.restDaysA);
     const restB = Number(intelligencePack.restDaysB);
     const _mk = String(p.marketKey || "ft").toLowerCase();
-    const _intelAppliedMarkets = new Set(["ft", "h1", "h2"]);
+    const _intelAppliedMarkets = new Set(["ft", "h1"]);
     const _eligible = _intelAppliedMarkets.has(_mk);
     let _rawIntelApplied = false;
     let _intelSignalA = null;
@@ -27936,16 +27674,10 @@ function clearSideFields(side) {
           "aFTAllowedHome",
           "aFTScoredAway",
           "aFTAllowedAway",
-          "a2HScored",
-          "a2HAllowed",
           "a1HScoredHome",
           "a1HAllowedHome",
           "a1HScoredAway",
           "a1HAllowedAway",
-          "a2HScoredHome",
-          "a2HAllowedHome",
-          "a2HScoredAway",
-          "a2HAllowedAway",
         ]
       : [
           "bFTScored",
@@ -27956,16 +27688,10 @@ function clearSideFields(side) {
           "bFTAllowedHome",
           "bFTScoredAway",
           "bFTAllowedAway",
-          "b2HScored",
-          "b2HAllowed",
           "b1HScoredHome",
           "b1HAllowedHome",
           "b1HScoredAway",
           "b1HAllowedAway",
-          "b2HScoredHome",
-          "b2HAllowedHome",
-          "b2HScoredAway",
-          "b2HAllowedAway",
         ];
   ids.forEach((id) => {
     const el = document.getElementById(id);
@@ -28957,7 +28683,6 @@ function isGameOnOrAfter2022(dateLike) {
 // ========== CALC-AUDIT-259: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — BEGIN ==========
 // AUDIT-NAV: members: fetchScheduleCore
 // AUDIT-NAV: calls other labeled calc code: _extractTeamBoxStatMap, _extractTeamBoxStatMapFromPlayers, _readBoxStat, bbStrictFinite
-// AUDIT-NAV: (cont.) calculateAdvancedMetrics, extractFirstHalf, extractMatchupFromBoxMaps, extractSecondHalf, filterEventsAsOf, getCurrentSeasonYear
 // AUDIT-NAV: (cont.) getLeagueRegulationMinutes, readVal, resolvePredictionAsOf
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFallback = true) {
@@ -29083,29 +28808,23 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
   const scoredDates10 = [];
   const h1Scored10 = [];
   const h1Allowed10 = [];
-  const h2Scored10 = [];
   const paintScoredArr = [];
   const paintAllowedArr = [];
   const fbScoredArr = [];
   const fbAllowedArr = [];
   const threePaArr = [];
   const threePctAllowedArr = [];
-  const h2Allowed10 = [];
-  const h2Scored10Dates = [];
   const h1Allowed10Dates = [];
-  const h2Allowed10Dates = [];
   const allowedDates10 = [];
   // CALC-AUDIT-259.W04 waypoint: declares _chosenForSummary (Math.* x1)
   const _chosenForSummary = chosen.slice(0, Math.min(chosen.length, 10));
-  // CALC-AUDIT-259.W05 waypoint: declares summaries (calls readVal, extractFirstHalf, extractSecondHalf, _extractTeamBoxStatMap, _readBoxStat, _extractTeamBoxStatMapFromPlayers, ...; Math.* x8)
+  // CALC-AUDIT-259.W05 waypoint: declares summaries (calls readVal, extractFirstHalf, box-score metric extraction)
   const summaries = await Promise.all(
     _chosenForSummary.map(async (ref) => {
       let ms = ref.rawS;
       let os = ref.rawA;
       let h1m = 0,
         h1o = 0;
-      let h2mStored = null,
-        h2oStored = null;
       let gotLS = false;
       let advanced = null;
       let boxMatchup = null;
@@ -29149,20 +28868,8 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
                   h1m = null;
                   h1o = null;
                 }
-                if (lm.length >= 4 && lo.length >= 4) {
-                  const _qm = [readVal(lm[0]), readVal(lm[1]), readVal(lm[2]), readVal(lm[3])];
-                  const _qo = [readVal(lo[0]), readVal(lo[1]), readVal(lo[2]), readVal(lo[3])];
-                  if (_qm.every((v) => Number.isFinite(v)) && _qo.every((v) => Number.isFinite(v))) {
-                    ref.qs = { m: _qm, o: _qo };
-                  }
-                }
               } else {
                 [h1m, h1o] = extractFirstHalf(lm, lo);
-                const _h2pair = extractSecondHalf(lm, lo);
-                if (Number.isFinite(_h2pair[0]) && Number.isFinite(_h2pair[1])) {
-                  h2mStored = Math.round(_h2pair[0]);
-                  h2oStored = Math.round(_h2pair[1]);
-                }
               }
             }
             if (boxscore && typeof boxscore === "object") {
@@ -29198,16 +28905,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         logDebug("fetchScheduleCore summary failed", e);
       }
       if (isNaN(ms) || isNaN(os) || ms <= 0 || os <= 0) return null;
-      let advancedH1 = null,
-        advancedH2 = null;
-      if (h2mStored == null && ref.qs && Array.isArray(ref.qs.m) && ref.qs.m.length >= 4) {
-        const _qm = ref.qs.m.map(Number);
-        const _qo = (ref.qs.o || []).map(Number);
-        if (Number.isFinite(_qm[2]) && Number.isFinite(_qm[3]) && Number.isFinite(_qo[2]) && Number.isFinite(_qo[3])) {
-          h2mStored = Math.round(_qm[2] + _qm[3]);
-          h2oStored = Math.round(_qo[2] + _qo[3]);
-        }
-      }
+      let advancedH1 = null;
       return {
         ms: Math.round(ms),
         os: Math.round(os),
@@ -29215,13 +28913,9 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         eventId: ref.id || null,
         h1m: gotLS && Number.isFinite(h1m) && h1m > 0 ? Math.round(h1m) : null,
         h1o: gotLS && Number.isFinite(h1o) && h1o > 0 ? Math.round(h1o) : null,
-        h2m: h2mStored,
-        h2o: h2oStored,
-        qs: ref.qs,
         advanced: advanced,
         matchup: boxMatchup || null,
         advancedH1: advancedH1,
-        advancedH2: advancedH2,
         date: ref.date || null,
         seasonType: ref.seasonType ?? null,
         competitionId: ref.competitionId || null,
@@ -29249,12 +28943,6 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
       h1Scored10Dates.push(game.date || null);
       h1Allowed10Dates.push(game.date || null);
     }
-    if (game.h2m !== null && game.h2o !== null && Number.isFinite(game.h2m) && Number.isFinite(game.h2o)) {
-      h2Scored10.push(game.h2m);
-      h2Allowed10.push(game.h2o);
-      h2Scored10Dates.push(game.date || null);
-      h2Allowed10Dates.push(game.date || null);
-    }
     if (game.matchup) {
       if (Number.isFinite(game.matchup.paintScored)) paintScoredArr.push(game.matchup.paintScored);
       if (Number.isFinite(game.matchup.paintAllowed)) paintAllowedArr.push(game.matchup.paintAllowed);
@@ -29270,10 +28958,6 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         allowed: allowed10.slice(0, 10),
         h1Scored: h1Scored10.slice(0, 10),
         h1Allowed: h1Allowed10.slice(0, 10),
-        h2Scored: h2Scored10.slice(0, 10),
-        h2Allowed: h2Allowed10.slice(0, 10),
-        h2ScoredDates: h2Scored10Dates.slice(0, 10),
-        h2AllowedDates: h2Allowed10Dates.slice(0, 10),
         eventIds: summaries.filter(Boolean).map((s) => s.eventId).slice(0, 10),
         ortg10: summaries.filter((s) => s && s.advanced).map((s) => s.advanced.ortg),
         drtg10: summaries.filter((s) => s && s.advanced).map((s) => s.advanced.drtg),
@@ -29284,15 +28968,9 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         ortgDates10_h1: summaries.filter((s) => s && s.advancedH1 && !s.advancedH1.synthetic).map((s) => s.date || null),
         drtgDates10_h1: summaries.filter((s) => s && s.advancedH1 && !s.advancedH1.synthetic).map((s) => s.date || null),
         paceDates10_h1: summaries.filter((s) => s && s.advancedH1 && !s.advancedH1.synthetic).map((s) => s.date || null),
-        ortgDates10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.date || null),
-        drtgDates10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.date || null),
-        paceDates10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.date || null),
         ortg10_h1: summaries.filter((s) => s && s.advancedH1 && !s.advancedH1.synthetic).map((s) => s.advancedH1.ortg),
         drtg10_h1: summaries.filter((s) => s && s.advancedH1 && !s.advancedH1.synthetic).map((s) => s.advancedH1.drtg),
         pace10_h1: summaries.filter((s) => s && s.advancedH1 && !s.advancedH1.synthetic).map((s) => s.advancedH1.pace),
-        ortg10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.advancedH2.ortg),
-        drtg10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.advancedH2.drtg),
-        pace10_h2: summaries.filter((s) => s && s.advancedH2 && !s.advancedH2.synthetic).map((s) => s.advancedH2.pace),
         scored10,
         allowed10,
         competitionTags: summaries.filter(Boolean).slice(0, 10).map((g) => ({
@@ -29316,8 +28994,6 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         h1Allowed10,
         h1ScoredDates: h1Scored10Dates,
         h1AllowedDates: h1Allowed10Dates,
-        h2ScoredDates: h2Scored10Dates, /* v2.5.1 */
-        h2AllowedDates: h2Allowed10Dates,
         lastGameDate: unique[0]?.date || null,
         lastGameCity: summaries.find(Boolean)?.venueCity || null,
         lastGameState: summaries.find(Boolean)?.venueState || null,
@@ -29329,7 +29005,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
 // ========== CALC-AUDIT-259: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — END ==========
 // ========== CALC-AUDIT-260: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — BEGIN ==========
 // AUDIT-NAV: members: fetchH2HCore
-// AUDIT-NAV: calls other labeled calc code: extractFirstHalf, extractSecondHalf, filterEventsAsOf, getCurrentSeasonYear, getParam, readVal
+ // AUDIT-NAV: calls other labeled calc code: extractFirstHalf, filterEventsAsOf, getCurrentSeasonYear, getParam, readVal
 // AUDIT-NAV: (cont.) resolvePredictionAsOf
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
@@ -29441,7 +29117,7 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
     }
   } catch (_eAsOfH2H) {}
   refs = refs.slice(0, 10);
-  // CALC-AUDIT-260.W05 waypoint: declares summaries (calls readVal, extractFirstHalf, extractSecondHalf; Math.* x6)
+  // CALC-AUDIT-260.W05 waypoint: declares summaries (calls readVal, extractFirstHalf; Math.* x6)
   const summaries = await Promise.all(
     refs.map(async (ref) => {
       try {
@@ -29480,17 +29156,12 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
         if (!isFinite(sA) || !isFinite(sB) || sA <= 0 || sB <= 0) return null;
         let h1A = NaN;
         let h1B = NaN;
-        let h2A = NaN;
-        let h2B = NaN;
         if (lA.length && lB.length) {
           if (rules.regulationPeriods >= 4) {
             h1A = lA.length >= 2 ? readVal(lA[0]) + readVal(lA[1]) : NaN;
             h1B = lB.length >= 2 ? readVal(lB[0]) + readVal(lB[1]) : NaN;
-            h2A = lA.length >= 4 ? readVal(lA[2]) + readVal(lA[3]) : NaN;
-            h2B = lB.length >= 4 ? readVal(lB[2]) + readVal(lB[3]) : NaN;
           } else {
             [h1A, h1B] = extractFirstHalf(lA, lB);
-            [h2A, h2B] = extractSecondHalf(lA, lB);
           }
         }
         return {
@@ -29501,8 +29172,6 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
           scoreB: Math.round(sB),
           h1A: Math.round(h1A),
           h1B: Math.round(h1B),
-          h2A: Math.round(h2A),
-          h2B: Math.round(h2B), 
           date: gameDate,
           seasonType: bbCoerceSeasonType(ref.seasonType) ?? bbCoerceSeasonType(data?.header?.season?.type),
         };
@@ -29648,118 +29317,44 @@ function euroleagueGameIsUpcoming(g) {
 function euroleagueGameIsLive(g) {
   if (!g || euroleagueGameIsPlayed(g)) return false;
   const st = String(g?.status || "").toLowerCase();
-  if (
-    st === "playing" ||
-    st === "live" ||
-    st === "inprogress" ||
-    st === "in_progress" ||
-    st === "in play" ||
-    st === "running" ||
-    st === "active"
-  )
-    return true;
+  if (["playing", "live", "inprogress", "in_progress", "in play", "running", "active"].includes(st)) return true;
   if (st === "confirmed" || st === "scheduled" || st === "fixture" || !st) {
-    if (g.quarter != null && String(g.quarter).trim() !== "") return true;
-    if (g.remainingTime != null && String(g.remainingTime).trim() !== "" && String(g.remainingTime) !== "00:00")
-      return true;
-    if (g.quarterMinute != null && String(g.quarterMinute).trim() !== "") return true;
     const hs = Number(g?.home?.score);
     const as = Number(g?.away?.score);
     if ((Number.isFinite(hs) && hs > 0) || (Number.isFinite(as) && as > 0)) return true;
   }
   return false;
 }
-function euroleagueQuarterToPeriod(g) {
-  const q = g?.quarter;
-  if (typeof q === "number" && Number.isFinite(q) && q > 0) return q;
-  const s = String(q || "").trim();
-  if (!s) {
-    if (euroleagueGameIsPlayed(g)) return 4;
-    return 0;
-  }
-  if (/ot|overtime/i.test(s)) {
-    const otm = s.match(/(\d+)/);
-    return 4 + (otm ? parseInt(otm[1], 10) || 1 : 1);
-  }
-  const m = s.match(/(\d+)/);
-  return m ? parseInt(m[1], 10) || 0 : 0;
-}
 function euroleagueDisplayClock(g) {
   const rem = g?.remainingTime != null ? String(g.remainingTime).trim() : "";
   if (rem) return rem;
-  const qm = g?.quarterMinute != null ? String(g.quarterMinute).trim() : "";
-  if (qm) return qm;
   const min = g?.minute != null ? String(g.minute).trim() : "";
   return min || "";
-}
-function euroleagueQuartersToLinescores(side) {
-  const q = side?.quarters || {};
-  const vals = [q.q1, q.q2, q.q3, q.q4];
-  const out = [];
-  for (let i = 0; i < vals.length; i++) {
-    const n = Number(vals[i]);
-    if (!Number.isFinite(n)) break;
-    out.push({ value: n });
-  }
-  for (let i = 1; i <= 5; i++) {
-    const ot = q["ot" + i];
-    if (ot == null) break;
-    const n = Number(ot);
-    if (!Number.isFinite(n)) break;
-    out.push({ value: n });
-  }
-  return out;
 }
 function incrowdGameToEspnCompetition(g) {
   if (!g) return null;
   const played = euroleagueGameIsPlayed(g);
   const live = !played && euroleagueGameIsLive(g);
-  const period = euroleagueQuarterToPeriod(g);
   const clock = euroleagueDisplayClock(g);
-  const half =
-    live &&
-    (period === 2 || period === 3) &&
-    (String(clock) === "0:00" ||
-      String(clock) === "00:00" ||
-      String(clock) === "0.0" ||
-      /half/i.test(String(g?.status || "")));
   const home = g.home || g.local || {};
   const away = g.away || g.road || {};
   const homeClub = home.club || home;
   const awayClub = away.club || away;
   const homeScore = home.score != null ? home.score : home.standingsScore;
   const awayScore = away.score != null ? away.score : away.standingsScore;
-  let homeLs = euroleagueQuartersToLinescores(home);
-  let awayLs = euroleagueQuartersToLinescores(away);
-  if (!homeLs.length && home.partials) {
-    const p = home.partials;
-    homeLs = [p.partials1, p.partials2, p.partials3, p.partials4]
-      .filter((v) => v != null && bbStrictFinite(v))
-      .map((v) => ({ value: Number(v) }));
-  }
-  if (!awayLs.length && away.partials) {
-    const p = away.partials;
-    awayLs = [p.partials1, p.partials2, p.partials3, p.partials4]
-      .filter((v) => v != null && bbStrictFinite(v))
-      .map((v) => ({ value: Number(v) }));
-  }
+  const homeLs = [];
+  const awayLs = [];
   return {
     id: String(g.id || g.identifier || g.code || ""),
     status: {
-      displayClock: half ? "HALF" : clock,
-      period: period,
+      displayClock: clock,
+      period: 0,
       type: {
         completed: !!played,
         state: played ? "post" : live ? "in" : "pre",
-        name: played
-          ? "STATUS_FINAL"
-          : live
-            ? half
-              ? "STATUS_HALFTIME"
-              : "STATUS_IN_PROGRESS"
-            : "STATUS_SCHEDULED",
-        description: played ? "Final" : live ? (half ? "Halftime" : "In Progress") : "Scheduled",
-        shortDetail: played ? "FINAL" : live ? (half ? "HALF" : clock) : "Sched",
+        name: played ? "STATUS_FINAL" : live ? "STATUS_IN_PROGRESS" : "STATUS_SCHEDULED",
+        description: played ? "Final" : live ? "In Progress" : "Scheduled",
+        shortDetail: played ? "FINAL" : live ? clock : "Sched",
       },
     },
     competitors: [
@@ -29810,7 +29405,6 @@ function normalizeApiLiveEuroGame(g) {
     status: played ? "result" : String(g.gameStatus || "confirmed").toLowerCase(),
     date: g.utcDate || g.date,
     minute: null,
-    quarter: null,
     remainingTime: null,
     home: g.local
       ? {
@@ -29818,8 +29412,6 @@ function normalizeApiLiveEuroGame(g) {
           name: g.local?.club?.name,
           abbreviatedName: g.local?.club?.abbreviatedName,
           score: g.local?.score,
-          quarters: {
-          },
         }
       : g.home,
     away: g.road
@@ -29828,8 +29420,6 @@ function normalizeApiLiveEuroGame(g) {
           name: g.road?.club?.name,
           abbreviatedName: g.road?.club?.abbreviatedName,
           score: g.road?.score,
-          quarters: {
-          },
         }
       : g.away,
   };
@@ -29898,20 +29488,8 @@ async function enrichIncrowdGameWithLiveHeader(g) {
     if (hdr.ScoreB != null) out.away.score = parseFloat(hdr.ScoreB) || out.away.score;
     if (hdr.RemainingPartialTime != null) out.remainingTime = String(hdr.RemainingPartialTime).trim();
     if (hdr.GameTime != null && !out.minute) out.minute = String(hdr.GameTime).trim();
-    if (hdr.Quarter != null && String(hdr.Quarter).trim()) {
-      const qm = String(hdr.Quarter).match(/(\d+)/);
-      out.quarter = qm ? parseInt(qm[1], 10) : hdr.Quarter;
-    }
     if (hdr.Live === true && String(out.status || "").toLowerCase() === "confirmed") {
       out.status = "playing";
-    }
-    const cA = [hdr.ScoreQuarter1A, hdr.ScoreQuarter2A, hdr.ScoreQuarter3A, hdr.ScoreQuarter4A];
-    const cB = [hdr.ScoreQuarter1B, hdr.ScoreQuarter2B, hdr.ScoreQuarter3B, hdr.ScoreQuarter4B];
-    if (cA.every((v) => v != null) && cB.every((v) => v != null)) {
-      out.home.quarters = {
-      };
-      out.away.quarters = {
-      };
     }
     return out;
   } catch (_e) {
@@ -29966,13 +29544,7 @@ async function pollIncrowdEuroLiveForLeague(league, eventIds, signal) {
       const awayC = competitors.find((c) => c.homeAway === "away");
       const homeScore = homeC ? parseFloat(homeC.score) || 0 : null;
       const awayScore = awayC ? parseFloat(awayC.score) || 0 : null;
-      const homeLs = (homeC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
-      const awayLs = (awayC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
       const existing = g_liveGameStatus.get(String(eid));
-      const qScores =
-        homeLs.length && awayLs.length
-          ? { home: homeLs, away: awayLs }
-          : existing?.qScores || null;
       if (!existing || existing.period !== period || existing.clock !== clock) {
         g_liveGameStatus.set(String(eid), {
           period,
@@ -29983,7 +29555,6 @@ async function pollIncrowdEuroLiveForLeague(league, eventIds, signal) {
           clockFrozen: false,
           homeScore,
           awayScore,
-          qScores,
           _expiredAt: existing?._expiredAt ?? null,
         });
         didChange = true;
@@ -29993,7 +29564,6 @@ async function pollIncrowdEuroLiveForLeague(league, eventIds, signal) {
           existing.awayScore = awayScore;
           didChange = true;
         }
-        if (qScores) existing.qScores = qScores;
         if (!existing.clockFrozen && clock !== "HALF") {
           existing.clockFrozen = true;
           didChange = true;
@@ -30149,16 +29719,6 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
       const isHome = hc === tCode;
       const me = isHome ? g.home : g.away;
       const opp = isHome ? g.away : g.home;
-      const mq = me?.quarters || {};
-      const oq = opp?.quarters || {};
-        const q1 = Number(mq.q1);
-        const q2 = Number(mq.q2);
-        const q3 = Number(mq.q3);
-        const q4 = Number(mq.q4);
-        const oq1 = Number(oq.q1);
-        const oq2 = Number(oq.q2);
-        const oq3 = Number(oq.q3);
-        const oq4 = Number(oq.q4);
       const ms = Number(me?.score);
       const os = Number(opp?.score);
       const venue = isHome ? "home" : "away";
@@ -30168,18 +29728,8 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
         venue,
         ms,
         os,
-        q1,
-        q2,
-        q3,
-        q4,
-        oq1,
-        oq2,
-        oq3,
-        oq4,
-        h1m: Number.isFinite(q1) && Number.isFinite(q2) ? q1 + q2 : null,
-        h1o: Number.isFinite(oq1) && Number.isFinite(oq2) ? oq1 + oq2 : null,
-        h2m: Number.isFinite(q3) && Number.isFinite(q4) ? q3 + q4 : null,
-        h2o: Number.isFinite(oq3) && Number.isFinite(oq4) ? oq3 + oq4 : null,
+        h1m: null,
+        h1o: null,
         venueName: g?.venue?.name || null,
         venueCity: null,
         venueState: null,
@@ -30232,10 +29782,6 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
   const h1Allowed = [];
   const h1ScoredDates = [];
   const h1AllowedDates = [];
-  const h2Scored = [];
-  const h2Allowed = [];
-  const h2ScoredDates = [];
-  const h2AllowedDates = [];
   const eventIds = [];
   // CALC-AUDIT-261.W02 waypoint: expression statement (Math.* x6)
   chosen.forEach((g) => {
@@ -30250,12 +29796,6 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
       h1ScoredDates.push(g.date || null);
       h1AllowedDates.push(g.date || null);
     }
-    if (g.h2m != null && g.h2o != null && Number.isFinite(g.h2m) && Number.isFinite(g.h2o)) {
-      h2Scored.push(Math.round(g.h2m));
-      h2Allowed.push(Math.round(g.h2o));
-      h2ScoredDates.push(g.date || null);
-      h2AllowedDates.push(g.date || null);
-    }
   });
   return {
     scored: scored.slice(0, 10),
@@ -30264,10 +29804,6 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
     allowed10: allowed.slice(0, 10),
     h1Scored: h1Scored.slice(0, 10),
     h1Allowed: h1Allowed.slice(0, 10),
-    h2Scored: h2Scored.slice(0, 10),
-    h2Allowed: h2Allowed.slice(0, 10),
-    h2ScoredDates: h2ScoredDates.slice(0, 10),
-    h2AllowedDates: h2AllowedDates.slice(0, 10),
     eventIds: eventIds.slice(0, 10),
     scoredDates: scoredDates.slice(0, 10),
     ftScoredDates: scoredDates.slice(0, 10),
@@ -30281,9 +29817,6 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
     ortg10_h1: [],
     drtg10_h1: [],
     pace10_h1: [],
-    ortg10_h2: [],
-    drtg10_h2: [],
-    pace10_h2: [],
     paintScored: [],
     paintAllowed: [],
     fbScored: [],
@@ -30323,16 +29856,6 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
       const homeIsA = hc === tA;
       const sideA = homeIsA ? g.home : g.away;
       const sideB = homeIsA ? g.away : g.home;
-      const aq = sideA?.quarters || {};
-      const bq = sideB?.quarters || {};
-      const q1A = Number(aq.q1);
-      const q2A = Number(aq.q2);
-      const q3A = Number(aq.q3);
-      const q4A = Number(aq.q4);
-      const q1B = Number(bq.q1);
-      const q2B = Number(bq.q2);
-      const q3B = Number(bq.q3);
-      const q4B = Number(bq.q4);
       const scoreA = Number(sideA?.score);
       const scoreB = Number(sideB?.score);
       const date = g.date || "";
@@ -30350,14 +29873,8 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
         teamBId: tB,
         scoreA: Math.round(scoreA),
         scoreB: Math.round(scoreB),
-        h1A:
-          Number.isFinite(q1A) && Number.isFinite(q2A) ? Math.round(q1A + q2A) : NaN,
-        h1B:
-          Number.isFinite(q1B) && Number.isFinite(q2B) ? Math.round(q1B + q2B) : NaN,
-        h2A:
-          Number.isFinite(q3A) && Number.isFinite(q4A) ? Math.round(q3A + q4A) : NaN,
-        h2B:
-          Number.isFinite(q3B) && Number.isFinite(q4B) ? Math.round(q3B + q4B) : NaN,
+        h1A: NaN,
+        h1B: NaN,
         date,
       };
     })
@@ -30662,8 +30179,6 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
     if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates, "scored");
     if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates, "scored");
     if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates, "scored");
-    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates, "scored");
-    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates, "scored");
     if (!aStats && !bStats)
       throw new Error(
         "No recent " + _euroLabel + " games found for " + _nameA + " (" + teamAId + ": " + _playedCount(teamAId) + " played) or " +
@@ -30725,10 +30240,6 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
         document.getElementById(prefix + "1HScored").value = stats.h1Scored.join(",");
       if (stats.h1Allowed?.length > 0)
         document.getElementById(prefix + "1HAllowed").value = stats.h1Allowed.join(",");
-      if (stats.h2Scored?.length > 0 && document.getElementById(prefix + "2HScored"))
-        document.getElementById(prefix + "2HScored").value = stats.h2Scored.join(",");
-      if (stats.h2Allowed?.length > 0 && document.getElementById(prefix + "2HAllowed"))
-        document.getElementById(prefix + "2HAllowed").value = stats.h2Allowed.join(",");
       const tag = document.getElementById(prefix === "a" ? "aAutoTag" : "bAutoTag");
       if (tag) tag.style.display = stats.scored.length >= 8 ? "inline" : "none";
       messages.push(safeText(name) + ": " + stats.scored.length + " games ✅");
@@ -30959,20 +30470,6 @@ function kblGameIsLive(g) {
 function kblGameIsUpcoming(g) {
   return !kblTruthy(g?.isStarted) && !kblTruthy(g?.isEnded);
 }
-function kblPlayingQuarterToPeriod(pq) {
-  const s = String(pq == null ? "" : pq).trim().toUpperCase();
-  if (!s || s === "X" || s === "-" || s === "NULL") return 0;
-  if (/OT|EQ|연장|OVERTIME/.test(s)) {
-    const otm = s.match(/(\d+)/);
-    return 4 + (otm ? parseInt(otm[1], 10) || 1 : 1);
-  }
-  if (/Q?1|1Q|1ST|FIRST/.test(s) && !/10|11|12/.test(s)) return 1;
-  if (/Q?2|2Q|2ND|SECOND/.test(s)) return 2;
-  if (/Q?3|3Q|3RD|THIRD/.test(s)) return 3;
-  if (/Q?4|4Q|4TH|FOURTH/.test(s)) return 4;
-  const m = s.match(/(\d+)/);
-  return m ? parseInt(m[1], 10) || 0 : 0;
-}
 function kblTeamDisplayName(g, side, teamMap) {
   const isHome = side === "home";
   const code = String(isHome ? g?.tcodeH : g?.tcodeA || "");
@@ -31015,18 +30512,15 @@ function kblNormalizeGame(raw, teamMap) {
     status: kblGameIsPlayed(raw) ? "result" : kblGameIsLive(raw) ? "playing" : "confirmed",
     isStarted: kblTruthy(raw.isStarted),
     isEnded: kblTruthy(raw.isEnded),
-    playingQuarter: raw.playingQuarter,
     home: {
       code: homeCode,
       name: homeName,
       score: Number.isFinite(hs) ? hs : null,
-      quarters: null,
     },
     away: {
       code: awayCode,
       name: awayName,
       score: Number.isFinite(as) ? as : null,
-      quarters: null,
     },
     venue: {
       name: raw.stadiumnameEn || raw.stadiumnameF || raw.stadiumname || "",
@@ -31034,95 +30528,41 @@ function kblNormalizeGame(raw, teamMap) {
     _raw: raw,
   };
 }
-function kblApplyDetailQuarters(norm, detail) {
+function kblApplyDetailScoreStatus(norm, detail) {
   if (!norm || !detail) return norm;
+  const g = detail.game || {};
   const tr = detail.teamrecords || detail.teamRecords || {};
   const homeTr = tr.home || {};
   const awayTr = tr.away || {};
-  function sideQs(trSide) {
-    const q1 = Number(trSide.scoreq1);
-    const q2 = Number(trSide.scoreq2);
-    const q3 = Number(trSide.scoreq3);
-    const q4 = Number(trSide.scoreq4);
-    const out = {};
-    if (Number.isFinite(q1)) out.q1 = q1;
-    if (Number.isFinite(q2)) out.q2 = q2;
-    if (Number.isFinite(q3)) out.q3 = q3;
-    if (Number.isFinite(q4)) out.q4 = q4;
-    const eqs = Array.isArray(trSide.scoreeq) ? trSide.scoreeq : [];
-    eqs.forEach((v, i) => {
-      const n = Number(v);
-      if (Number.isFinite(n)) out["ot" + (i + 1)] = n;
-    });
-    return Object.keys(out).length ? out : null;
-  }
-  const hq = sideQs(homeTr);
-  const aq = sideQs(awayTr);
-  if (hq) norm.home.quarters = hq;
-  if (aq) norm.away.quarters = aq;
-  const g = detail.game || {};
-  if (g.playingQuarter != null) norm.playingQuarter = g.playingQuarter;
+  const total = (side) => {
+    const v = side.score != null ? Number(side.score) : NaN;
+    return Number.isFinite(v) ? v : null;
+  };
+  if (norm.home.score == null) norm.home.score = total(homeTr);
+  if (norm.away.score == null) norm.away.score = total(awayTr);
   if (g.isStarted != null) norm.isStarted = kblTruthy(g.isStarted);
   if (g.isEnded != null) norm.isEnded = kblTruthy(g.isEnded);
   if (norm.isEnded) norm.status = "result";
   else if (norm.isStarted) norm.status = "playing";
-  norm.liveClock = detail.__bbLiveClock || null; /* P4-LIVECLOCK */
-  if (norm.home.score == null && hq && Number.isFinite(hq.q1)) {
-    norm.home.score = (hq.q1 || 0) + (hq.q2 || 0) + (hq.q3 || 0) + (hq.q4 || 0);
-    for (let i = 1; i <= 5; i++) {
-      if (hq["ot" + i] != null) norm.home.score += Number(hq["ot" + i]) || 0;
-    }
-  }
-  if (norm.away.score == null && aq && Number.isFinite(aq.q1)) {
-    norm.away.score = (aq.q1 || 0) + (aq.q2 || 0) + (aq.q3 || 0) + (aq.q4 || 0);
-    for (let i = 1; i <= 5; i++) {
-      if (aq["ot" + i] != null) norm.away.score += Number(aq["ot" + i]) || 0;
-    }
-  }
+  norm.liveClock = detail.__bbLiveClock || null;
   return norm;
 }
-function kblQuartersToLinescores(side) {
-  const q = side?.quarters || {};
-  const vals = [q.q1, q.q2, q.q3, q.q4];
-  const out = [];
-  for (let i = 0; i < vals.length; i++) {
-    const n = Number(vals[i]);
-    if (!Number.isFinite(n)) break;
-    out.push({ value: n });
-  }
-  for (let i = 1; i <= 5; i++) {
-    const ot = q["ot" + i];
-    if (ot == null) break;
-    const n = Number(ot);
-    if (!Number.isFinite(n)) break;
-    out.push({ value: n });
-  }
-  return out;
-}
+
 function kblGameToEspnCompetition(g) {
   if (!g) return null;
   const played = kblGameIsPlayed(g) || String(g.status || "").toLowerCase() === "result";
   const live = !played && (kblGameIsLive(g) || String(g.status || "").toLowerCase() === "playing");
-  /* P4-LIVECLOCK: displayClock used to be playingQuarter ("Q3"), so the tracker showed the quarter and never a time.
-     It is now "M:SS" from the latest text-cast event when that event belongs to the current quarter, else "" (the tracker
-     then shows the quarter only). */
-  const _pqPeriod = kblPlayingQuarterToPeriod(g.playingQuarter);
   const _lc = live && g.liveClock ? g.liveClock : null;
-  const _lcPeriod = _lc ? kblPlayingQuarterToPeriod(_lc.q) : 0;
-  const _lcSame = !!(_lc && _lcPeriod && (!_pqPeriod || _lcPeriod === _pqPeriod));
-  const period = _pqPeriod || _lcPeriod;
   const _lcText = _lc ? Math.max(0, Math.floor(_lc.m)) + ":" + String(Math.max(0, Math.floor(_lc.s))).padStart(2, "0") : "";
-  const clock = live && _lcSame ? _lcText : "";
-  const half =
-    live &&
-    ((period === 2 || period === 3) && /HALF|HT/i.test(String(g.playingQuarter || "")) ||
-      (_lc && _lcPeriod === 2 && _lcText === "0:00" && (_pqPeriod === 2 || _pqPeriod === 3)));
+  const clock = _lcText;
+  const half = false;
+  const period = 0;
   const home = g.home || {};
   const away = g.away || {};
   const homeScore = home.score;
   const awayScore = away.score;
-  const homeLs = kblQuartersToLinescores(home);
-  const awayLs = kblQuartersToLinescores(away);
+  const homeLs = [];
+  const awayLs = [];
   return {
     id: String(g.id || g.gmkey || ""),
     status: {
@@ -31131,15 +30571,9 @@ function kblGameToEspnCompetition(g) {
       type: {
         completed: !!played,
         state: played ? "post" : live ? "in" : "pre",
-        name: played
-          ? "STATUS_FINAL"
-          : live
-            ? half
-              ? "STATUS_HALFTIME"
-              : "STATUS_IN_PROGRESS"
-            : "STATUS_SCHEDULED",
-        description: played ? "Final" : live ? (half ? "Halftime" : "In Progress") : "Scheduled",
-        shortDetail: played ? "FINAL" : live ? (half ? "HALF" : clock) : "Sched",
+        name: played ? "STATUS_FINAL" : live ? "STATUS_IN_PROGRESS" : "STATUS_SCHEDULED",
+        description: played ? "Final" : live ? "In Progress" : "Scheduled",
+        shortDetail: played ? "FINAL" : live ? clock : "Sched",
       },
     },
     competitors: [
@@ -31266,7 +30700,7 @@ async function fetchKblMatchDetail(gmkey, opts) {
   try {
     const data = await kblProxyGet("/match/" + encodeURIComponent(id), 20000);
     /* P4-LIVECLOCK: /match/{id} has no game clock. While the game is live, read the clock of the latest
-       text-cast event (m = minutes, s = seconds left, q = quarter). A failure only loses the clock. */
+       text-cast event (m = minutes, s = seconds left). A failure only loses the clock. */
     try {
       const _g = (data && data.game) || {};
       if (kblTruthy(_g.isStarted) && !kblTruthy(_g.isEnded)) {
@@ -31274,7 +30708,7 @@ async function fetchKblMatchDetail(gmkey, opts) {
         const rows = Array.isArray(tc) ? tc : Array.isArray(tc && tc.data) ? tc.data : [];
         let last = null;
         rows.forEach((r) => { if (r && Number.isFinite(Number(r.m)) && Number.isFinite(Number(r.s)) && (!last || Number(r.n) >= Number(last.n))) last = r; });
-        if (last && data && typeof data === "object") data.__bbLiveClock = { m: Number(last.m), s: Number(last.s), q: String(last.q || ""), n: Number(last.n) };
+        if (last && data && typeof data === "object") data.__bbLiveClock = { m: Number(last.m), s: Number(last.s), n: Number(last.n) };
       }
     } catch (_tcErr) { logDebug("fetchKblMatchDetail text-cast failed", { gmkey: id, error: String(_tcErr && _tcErr.message || _tcErr) }); }
     _kblCache.set(cacheKey, { ts: Date.now(), detail: data });
@@ -31322,16 +30756,13 @@ async function loadKblGamesForStats() {
   });
   return out;
 }
-async function enrichKblGamesWithQuarters(games, limit) {
+async function enrichKblGamesWithDetails(games, limit) {
   const list = (games || []).slice(0, Math.max(0, Number(limit) || 12));
-  const results = await Promise.all(
-    list.map(async (g) => {
-      if (g?.home?.quarters && g?.away?.quarters) return g;
-      const detail = await fetchKblMatchDetail(g.id, { maxAgeMs: 30 * 60 * 1000 });
-      if (!detail) return g;
-      return kblApplyDetailQuarters(Object.assign({}, g), detail);
-    }),
-  );
+  const results = await Promise.all(list.map(async (g) => {
+    const detail = await fetchKblMatchDetail(g.id, { maxAgeMs: 30 * 60 * 1000 });
+    if (!detail) return g;
+    return kblApplyDetailScoreStatus(Object.assign({}, g), detail);
+  }));
   const byId = new Map(results.map((g) => [String(g.id), g]));
   return (games || []).map((g) => byId.get(String(g.id)) || g);
 }
@@ -31357,16 +30788,6 @@ function buildKblTeamStats(teamCode, allGames, requiredVenue) {
       const isHome = hc === tCode;
       const me = isHome ? g.home : g.away;
       const opp = isHome ? g.away : g.home;
-      const mq = me?.quarters || {};
-      const oq = opp?.quarters || {};
-        const q1 = Number(mq.q1);
-        const q2 = Number(mq.q2);
-        const q3 = Number(mq.q3);
-        const q4 = Number(mq.q4);
-        const oq1 = Number(oq.q1);
-        const oq2 = Number(oq.q2);
-        const oq3 = Number(oq.q3);
-        const oq4 = Number(oq.q4);
       const ms = Number(me?.score);
       const os = Number(opp?.score);
       return {
@@ -31375,18 +30796,8 @@ function buildKblTeamStats(teamCode, allGames, requiredVenue) {
         venue: isHome ? "home" : "away",
         ms,
         os,
-        q1,
-        q2,
-        q3,
-        q4,
-        oq1,
-        oq2,
-        oq3,
-        oq4,
-        h1m: Number.isFinite(q1) && Number.isFinite(q2) ? q1 + q2 : null,
-        h1o: Number.isFinite(oq1) && Number.isFinite(oq2) ? oq1 + oq2 : null,
-        h2m: Number.isFinite(q3) && Number.isFinite(q4) ? q3 + q4 : null,
-        h2o: Number.isFinite(oq3) && Number.isFinite(oq4) ? oq3 + oq4 : null,
+        h1m: null,
+        h1o: null,
         venueName: g?.venue?.name || null,
         venueCity: null,
         venueState: null,
@@ -31419,10 +30830,6 @@ function buildKblTeamStats(teamCode, allGames, requiredVenue) {
   const h1Allowed = [];
   const h1ScoredDates = [];
   const h1AllowedDates = [];
-  const h2Scored = [];
-  const h2Allowed = [];
-  const h2ScoredDates = [];
-  const h2AllowedDates = [];
   const eventIds = [];
   // CALC-AUDIT-264.W02 waypoint: expression statement (Math.* x6)
   chosen.forEach((g) => {
@@ -31437,12 +30844,6 @@ function buildKblTeamStats(teamCode, allGames, requiredVenue) {
       h1ScoredDates.push(g.date || null);
       h1AllowedDates.push(g.date || null);
     }
-    if (g.h2m != null && g.h2o != null && Number.isFinite(g.h2m) && Number.isFinite(g.h2o)) {
-      h2Scored.push(Math.round(g.h2m));
-      h2Allowed.push(Math.round(g.h2o));
-      h2ScoredDates.push(g.date || null);
-      h2AllowedDates.push(g.date || null);
-    }
   });
   return {
     scored: scored.slice(0, 10),
@@ -31451,10 +30852,6 @@ function buildKblTeamStats(teamCode, allGames, requiredVenue) {
     allowed10: allowed.slice(0, 10),
     h1Scored: h1Scored.slice(0, 10),
     h1Allowed: h1Allowed.slice(0, 10),
-    h2Scored: h2Scored.slice(0, 10),
-    h2Allowed: h2Allowed.slice(0, 10),
-    h2ScoredDates: h2ScoredDates.slice(0, 10),
-    h2AllowedDates: h2AllowedDates.slice(0, 10),
     eventIds: eventIds.slice(0, 10),
     scoredDates: scoredDates.slice(0, 10),
     ftScoredDates: scoredDates.slice(0, 10),
@@ -31490,16 +30887,6 @@ function buildKblH2H(teamACode, teamBCode, allGames) {
       const homeIsA = hc === tA;
       const sideA = homeIsA ? g.home : g.away;
       const sideB = homeIsA ? g.away : g.home;
-      const aq = sideA?.quarters || {};
-      const bq = sideB?.quarters || {};
-      const q1A = Number(aq.q1);
-      const q2A = Number(aq.q2);
-      const q3A = Number(aq.q3);
-      const q4A = Number(aq.q4);
-      const q1B = Number(bq.q1);
-      const q2B = Number(bq.q2);
-      const q3B = Number(bq.q3);
-      const q4B = Number(bq.q4);
       return {
         id: String(g.id || ""),
         competition: "korea_kbl",
@@ -31511,8 +30898,8 @@ function buildKblH2H(teamACode, teamBCode, allGames) {
         teamBId: tB,
         scoreA: Number(sideA?.score),
         scoreB: Number(sideB?.score),
-        h1A: Number.isFinite(q1A) && Number.isFinite(q2A) ? q1A + q2A : NaN,
-        h1B: Number.isFinite(q1B) && Number.isFinite(q2B) ? q1B + q2B : NaN,
+        h1A: NaN,
+        h1B: NaN,
       };
     })
     .filter((g) => Number.isFinite(g.scoreA) && Number.isFinite(g.scoreB) && g.scoreA > 0 && g.scoreB > 0)
@@ -31571,7 +30958,7 @@ async function findKblGameByEventId(eventId, opts) {
       let norm = kblNormalizeGame(hit, teamMap);
       if (kblGameIsLive(hit) || kblGameIsPlayed(hit)) {
         const detail = await fetchKblMatchDetail(eid, { maxAgeMs });
-        if (detail) norm = kblApplyDetailQuarters(norm, detail);
+        if (detail) norm = kblApplyDetailScoreStatus(norm, detail);
       }
       return norm;
     }
@@ -31592,7 +30979,7 @@ async function findKblGameByEventId(eventId, opts) {
     if (hit) {
       let norm = kblNormalizeGame(hit, teamMap);
       const detail = await _rdDetailP;
-      if (detail) norm = kblApplyDetailQuarters(norm, detail);
+      if (detail) norm = kblApplyDetailScoreStatus(norm, detail);
       return norm;
     }
   } catch (_e2) {}
@@ -31600,7 +30987,7 @@ async function findKblGameByEventId(eventId, opts) {
     const detail = await _rdDetailP;
     if (detail && detail.game) {
       let norm = kblNormalizeGame(detail.game, teamMap);
-      return kblApplyDetailQuarters(norm, detail);
+      return kblApplyDetailScoreStatus(norm, detail);
     }
   } catch (_e3) {}
   return null;
@@ -31625,7 +31012,7 @@ async function pollKblLiveForLeague(league, eventIds, signal) {
       norm = await findKblGameByEventId(eid, { maxAgeMs: 8000 });
     } else if (kblGameIsLive(raw) || kblGameIsPlayed(raw)) {
       const detail = await fetchKblMatchDetail(eid, { maxAgeMs: 8000 });
-      if (detail) norm = kblApplyDetailQuarters(norm, detail);
+      if (detail) norm = kblApplyDetailScoreStatus(norm, detail);
     }
     if (!norm) continue;
     const comp = kblGameToEspnCompetition(norm);
@@ -31649,13 +31036,7 @@ async function pollKblLiveForLeague(league, eventIds, signal) {
       const awayC = competitors.find((c) => c.homeAway === "away");
       const homeScore = homeC ? parseFloat(homeC.score) || 0 : null;
       const awayScore = awayC ? parseFloat(awayC.score) || 0 : null;
-      const homeLs = (homeC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
-      const awayLs = (awayC?.linescores || []).map((l) => parseFloat(l.value ?? l.displayValue ?? 0) || 0);
       const existing = g_liveGameStatus.get(String(eid));
-      const qScores =
-        homeLs.length && awayLs.length
-          ? { home: homeLs, away: awayLs }
-          : existing?.qScores || null;
       if (!existing || existing.period !== period || existing.clock !== clock) {
         g_liveGameStatus.set(String(eid), {
           period,
@@ -31664,10 +31045,9 @@ async function pollKblLiveForLeague(league, eventIds, signal) {
           league,
           capturedAt: Date.now(),
           clockFrozen: false,
-          clockSource: "last-play", /* P4-LIVECLOCK: KBL clock = time of the latest play, shown as-is (no countdown) */
+          clockSource: "last-play", /* KBL clock = time of the latest play, shown as-is (no countdown) */
           homeScore,
           awayScore,
-          qScores,
           _expiredAt: existing?._expiredAt ?? null,
         });
         didChange = true;
@@ -31677,7 +31057,6 @@ async function pollKblLiveForLeague(league, eventIds, signal) {
           existing.awayScore = awayScore;
           didChange = true;
         }
-        if (qScores) existing.qScores = qScores;
         if (!existing.clockFrozen && clock !== "HALF" && existing.clockSource !== "last-play") {
           existing.clockFrozen = true;
           didChange = true;
@@ -31856,7 +31235,7 @@ async function fetchKblCore(league, teamAName, teamBName) {
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
       .slice(0, 5)
       .forEach((g) => { if (!_kblH2hIds.has(String(g.id))) { _kblH2hIds.add(String(g.id)); teamGames.push(g); } });
-    const enrichedSlice = await enrichKblGamesWithQuarters(teamGames, teamGames.length);
+    const enrichedSlice = await enrichKblGamesWithDetails(teamGames, teamGames.length);
     const enrichById = new Map(enrichedSlice.map((g) => [String(g.id), g]));
     const allGames = (allGames0 || []).map((g) => enrichById.get(String(g.id)) || g);
     const selectedFixture = getSelectedFixtureOption();
@@ -31884,8 +31263,6 @@ async function fetchKblCore(league, teamAName, teamBName) {
     if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates, "scored");
     if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates, "scored");
     if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates, "scored");
-    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates, "scored");
-    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates, "scored");
     if (!aStats && !bStats) throw new Error("No recent KBL schedule data found for these teams.");
     AppState.injuries.A = defaultInjuryMeta();
     AppState.injuries.B = defaultInjuryMeta();
@@ -31942,10 +31319,6 @@ async function fetchKblCore(league, teamAName, teamBName) {
         document.getElementById(prefix + "1HScored").value = stats.h1Scored.join(",");
       if (stats.h1Allowed?.length > 0)
         document.getElementById(prefix + "1HAllowed").value = stats.h1Allowed.join(",");
-      if (stats.h2Scored?.length > 0 && document.getElementById(prefix + "2HScored"))
-        document.getElementById(prefix + "2HScored").value = stats.h2Scored.join(",");
-      if (stats.h2Allowed?.length > 0 && document.getElementById(prefix + "2HAllowed"))
-        document.getElementById(prefix + "2HAllowed").value = stats.h2Allowed.join(",");
       const tag = document.getElementById(prefix === "a" ? "aAutoTag" : "bAutoTag");
       if (tag) tag.style.display = stats.scored.length >= 8 ? "inline" : "none";
       messages.push(safeText(name) + ": " + stats.scored.length + " games ✅");
@@ -32265,7 +31638,6 @@ function pickFixture(homeName, homeId, awayName, awayId, eventDate) {
   const _pFlds = [
     "ftMarket",
     "h1Market",
-    "h2Market",
     "teamAMarket",
     "teamBMarket",
     "h1TeamAMarket",
@@ -32295,7 +31667,6 @@ async function fetchESPN_CORE() {
   const marketFields = [
     "ftMarket",
     "h1Market",
-    "h2Market",
     "teamAMarket",
     "teamBMarket",
     "h1TeamAMarket",
@@ -32497,8 +31868,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
     if (bStats?.ftScoredDates?.length) stashSeriesDates("B", "ft", bStats.ftScoredDates, "scored");
     if (aStats?.h1ScoredDates?.length) stashSeriesDates("A", "h1", aStats.h1ScoredDates, "scored");
     if (bStats?.h1ScoredDates?.length) stashSeriesDates("B", "h1", bStats.h1ScoredDates, "scored");
-    if (aStats?.h2ScoredDates?.length) stashSeriesDates("A", "h2", aStats.h2ScoredDates, "scored");
-    if (bStats?.h2ScoredDates?.length) stashSeriesDates("B", "h2", bStats.h2ScoredDates, "scored");
     if (!aStats && !bStats)
       throw new Error("No recent schedule data found from ESPN." + espnIntlSofaHint(league));
     AppState.injuries.A = defaultInjuryMeta();
@@ -32546,10 +31915,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         document.getElementById("a1HScored").value = aStats.h1Scored.join(",");
       if (aStats.h1Allowed?.length > 0)
         document.getElementById("a1HAllowed").value = aStats.h1Allowed.join(",");
-      if (aStats.h2Scored?.length > 0 && document.getElementById("a2HScored"))
-        document.getElementById("a2HScored").value = aStats.h2Scored.join(",");
-      if (aStats.h2Allowed?.length > 0 && document.getElementById("a2HAllowed"))
-        document.getElementById("a2HAllowed").value = aStats.h2Allowed.join(",");
       fillVenueMarketInputs("a", aVenueStats, teamAVenue);
     const aTag = document.getElementById("aAutoTag");
       if (aTag) aTag.style.display = aStats.scored.length >= 8 ? "inline" : "none";
@@ -32586,10 +31951,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         document.getElementById("b1HScored").value = bStats.h1Scored.join(",");
       if (bStats.h1Allowed?.length > 0)
         document.getElementById("b1HAllowed").value = bStats.h1Allowed.join(",");
-      if (bStats.h2Scored?.length > 0 && document.getElementById("b2HScored"))
-        document.getElementById("b2HScored").value = bStats.h2Scored.join(",");
-      if (bStats.h2Allowed?.length > 0 && document.getElementById("b2HAllowed"))
-        document.getElementById("b2HAllowed").value = bStats.h2Allowed.join(",");
       fillVenueMarketInputs("b", bVenueStats, teamBVenue);
     const bTag = document.getElementById("bAutoTag");
       if (bTag) bTag.style.display = (bStats.scored && bStats.scored.length >= 8) ? "inline" : "none";
@@ -32711,10 +32072,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
                h1ScoredDates10: aVenueStats.h1ScoredDates || [],
               h1Allowed10: aVenueStats.h1Allowed10 || aVenueStats.h1Allowed || [],
                h1AllowedDates10: aVenueStats.h1AllowedDates || [],
-              h2Scored10: aVenueStats.h2Scored10 || aVenueStats.h2Scored || [],
-               h2ScoredDates10: aVenueStats.h2ScoredDates || [],
-              h2Allowed10: aVenueStats.h2Allowed10 || aVenueStats.h2Allowed || [],
-               h2AllowedDates10: aVenueStats.h2AllowedDates || [],
             }
           : null, 
         ortg10: aStats?.ortg10 || [],
@@ -32723,9 +32080,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         ortg10_h1: aStats?.ortg10_h1 || [],
         drtg10_h1: aStats?.drtg10_h1 || [],
         pace10_h1: aStats?.pace10_h1 || [],
-        ortg10_h2: aStats?.ortg10_h2 || [],
-        drtg10_h2: aStats?.drtg10_h2 || [],
-        pace10_h2: aStats?.pace10_h2 || [],
         lastGameDate: aStats?.lastGameDate || "",
         lastGameCity: aStats?.lastGameCity || null,
         lastGameState: aStats?.lastGameState || null,
@@ -32760,10 +32114,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
               h1ScoredDates10: bVenueStats.h1ScoredDates || [],
               h1Allowed10: bVenueStats.h1Allowed10 || bVenueStats.h1Allowed || [],
               h1AllowedDates10: bVenueStats.h1AllowedDates || [],
-              h2Scored10: bVenueStats.h2Scored10 || bVenueStats.h2Scored || [],
-              h2ScoredDates10: bVenueStats.h2ScoredDates || [],
-              h2Allowed10: bVenueStats.h2Allowed10 || bVenueStats.h2Allowed || [],
-              h2AllowedDates10: bVenueStats.h2AllowedDates || [],
             }
           : null, 
         ortg10: bStats?.ortg10 || [],
@@ -32772,9 +32122,6 @@ async function fetchESPNCore(league, teamAName, teamBName) {
         ortg10_h1: bStats?.ortg10_h1 || [],
         drtg10_h1: bStats?.drtg10_h1 || [],
         pace10_h1: bStats?.pace10_h1 || [],
-        ortg10_h2: bStats?.ortg10_h2 || [],
-        drtg10_h2: bStats?.drtg10_h2 || [],
-        pace10_h2: bStats?.pace10_h2 || [],
         lastGameDate: bStats?.lastGameDate || "",
         lastGameCity: bStats?.lastGameCity || null,
         lastGameState: bStats?.lastGameState || null,
@@ -32939,7 +32286,7 @@ function getManualVenueSeriesForSide(side, marketKey, metric, parsed, contextRoo
   const rolePart = role === "home" ? "Home" : "Away";
   const fieldId = prefix + (
     market === "h1" ? "1H" :
-    market === "h2" ? "2H" : "FT"
+    "FT"
   ) + metricPart + rolePart;
   const clean = (arr) => Array.isArray(arr)
     ? arr.filter((n) => bbStrictFinite(n)).map(Number).slice(0, 10)
@@ -32962,7 +32309,7 @@ function getManualVenueSeriesForSide(side, marketKey, metric, parsed, contextRoo
 function applyVenueRoleVisibility(prefix, role, sectionId = null) {
   const sec = document.getElementById(sectionId || (prefix === "a" ? "aVenueSplitSection" : "bVenueSplitSection"));
   const roleName = prefix === "a" ? "Home" : prefix === "b" ? "Away" : "";
-  const markets = ["FT", "1H", "2H"];
+  const markets = ["FT", "1H"];
   if (sec) sec.style.display = roleName ? "block" : "none";
   markets.forEach((mk) => {
     ["Scored", "Allowed"].forEach((metric) => {
@@ -32983,7 +32330,7 @@ function fillVenueMarketInputs(prefix, venueStats, role) {
   applyVenueRoleVisibility(prefix, role);
   const expectedRole = prefix === "a" ? "Home" : "Away";
   const oppositeRole = expectedRole === "Home" ? "Away" : "Home";
-  ["FT", "1H", "2H"].forEach((mk) => {
+  ["FT", "1H"].forEach((mk) => {
     ["Scored", "Allowed"].forEach((metric) => {
       const opposite = document.getElementById(prefix + mk + metric + oppositeRole);
       if (opposite?.parentElement) { opposite.parentElement.hidden = true; opposite.parentElement.style.display = "none"; }
@@ -32993,7 +32340,6 @@ function fillVenueMarketInputs(prefix, venueStats, role) {
   const defs = [
     ["FT", "scored", "Scored"], ["FT", "allowed", "Allowed"],
     ["1H", "h1Scored", "Scored"], ["1H", "h1Allowed", "Allowed"],
-    ["2H", "h2Scored", "Scored"], ["2H", "h2Allowed", "Allowed"],
   ];
   defs.forEach(([marketCap, statKey, metricCap]) => {
     const el = document.getElementById(prefix + marketCap + metricCap + roleCap);
@@ -33440,13 +32786,11 @@ function getManualSeries(side, marketKey, parsed, contextRoot = null) {
   const prefix = side === "A" ? "a" : "b";
   let parsedKey = prefix + "FTScored";
   if (marketKey === "h1") parsedKey = prefix + "1HScored";
-  else if (marketKey === "h2") parsedKey = prefix + "2HScored";
   const manualValue = Array.isArray(parsed?.[parsedKey]) ? parsed[parsedKey] : null;
   if (manualValue) return manualValue.map(Number).filter(Number.isFinite);
   const ctx = root?.[side] || {};
   if (marketKey === "ft") return Array.isArray(ctx?.manualFTScored) ? ctx.manualFTScored.slice() : (Array.isArray(ctx?.overall?.ftScored10) ? ctx.overall.ftScored10.slice() : []);
   if (marketKey === "h1") return Array.isArray(ctx?.h1Scored) ? ctx.h1Scored.slice() : (Array.isArray(ctx?.overall?.h1Scored10) ? ctx.overall.h1Scored10.slice() : []);
-  if (marketKey === "h2") return Array.isArray(ctx?.h2Scored) ? ctx.h2Scored.slice() : (Array.isArray(ctx?.overall?.h2Scored10) ? ctx.overall.h2Scored10.slice() : []);
   return [];
 }
 /* CALCULATION SECTION */
@@ -33466,13 +32810,11 @@ function getManualAllowedSeries(side, marketKey, parsed, contextRoot = null) {
   const prefix = side === "A" ? "a" : "b";
   let key = prefix + "FTAllowed";
   if (marketKey === "h1") key = prefix + "1HAllowed";
-  else if (marketKey === "h2") key = prefix + "2HAllowed";
   const parsedValue = Array.isArray(parsed?.[key]) ? parsed[key] : null;
   if (parsedValue) return parsedValue.map(Number).filter(Number.isFinite);
   const ctx = root?.[side] || {};
   if (marketKey === "ft") return Array.isArray(ctx?.overall?.ftAllowed10) ? ctx.overall.ftAllowed10.slice() : [];
   if (marketKey === "h1") return Array.isArray(ctx?.h1Allowed) ? ctx.h1Allowed.slice() : (Array.isArray(ctx?.overall?.h1Allowed10) ? ctx.overall.h1Allowed10.slice() : []);
-  if (marketKey === "h2") return Array.isArray(ctx?.h2Allowed) ? ctx.h2Allowed.slice() : (Array.isArray(ctx?.overall?.h2Allowed10) ? ctx.overall.h2Allowed10.slice() : []);
   return [];
 }
 // ========== CALC-AUDIT-278: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — END ==========
@@ -33518,43 +32860,6 @@ function getH2HSeries(side, marketKey, parsed, contextRoot = null) {
   if (side === "B" && marketKey === "ft") return safeArr(parsed.bFTH2H) || [];
   if (side === "A" && marketKey === "h1") return safeArr(parsed.a1HH2H) || [];
   if (side === "B" && marketKey === "h1") return safeArr(parsed.b1HH2H) || [];
-  if (marketKey === "h2") {
-    const parsedH2Key = side === "A" ? "a2HH2H" : "b2HH2H";
-    if (!_asOfOn && parsed && Array.isArray(parsed[parsedH2Key]) && parsed[parsedH2Key].length >= 2) {
-      return safeArr(parsed[parsedH2Key]).slice(0, 10);
-    }
-    const _h2hRoot = contextRoot || (parsed && parsed.h2hGames ? parsed : null);
-    const gamesFromParsed =
-      parsed && Array.isArray(parsed.h2hGames) ? parsed.h2hGames : null;
-    const gamesFromCtx =
-      _h2hRoot && Array.isArray(_h2hRoot.h2hGames) ? _h2hRoot.h2hGames : null;
-    const gamesFromApp =
-      !_h2hRoot && AppState.context && Array.isArray(AppState.context.data?.h2hGames)
-        ? AppState.context.data.h2hGames
-        : [];
-    const games = (gamesFromParsed && gamesFromParsed.length)
-      ? gamesFromParsed
-      : (gamesFromCtx && gamesFromCtx.length ? gamesFromCtx : (contextRoot ? [] : gamesFromApp));
-    const tId = String(
-      (games[0] && (side === "A" ? games[0].teamAId : games[0].teamBId)) ||
-        (contextRoot && contextRoot.fixtureMeta && (side === "A" ? contextRoot.fixtureMeta.teamAId : contextRoot.fixtureMeta.teamBId)) ||
-        (contextRoot && !contextRoot.h2hGames ? "" : (side === "A" ? selectedTeamIds?.A : selectedTeamIds?.B)) ||
-        "",
-    );
-    if (games.length && tId) {
-      const fromGames = [];
-      for (const g of games) {
-        const gTA = String(g.teamAId || "");
-        const gTB = String(g.teamBId || "");
-        let v = NaN;
-        if (gTA === tId) v = Number(g.h2A);
-        else if (gTB === tId) v = Number(g.h2B);
-        if (isFinite(v) && v > 0) fromGames.push(v);
-      }
-      if (fromGames.length >= 2) return fromGames.slice(0, 10);
-    }
-    return [];
-  }
   return [];
 }
 // ========== CALC-AUDIT-279: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — END ==========
@@ -33863,7 +33168,7 @@ function formatEdge(edge, line) {
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 /* CALCULATION SECTION */
 function getMarketKeyFromName(name, marketKeyOverride) {
-  const validKeys = ["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b", "player", "winner", "htft", "margin_team", "margin_any", "w_ou", "race", "h1_teams"];
+  const validKeys = ["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b", "player", "winner", "htft", "margin_team", "margin_any", "w_ou", "race", "h1_teams"];
   if (validKeys.includes(String(marketKeyOverride || "").toLowerCase())) return String(marketKeyOverride).toLowerCase();
   const n = String(name || "");
   if (n.startsWith("Winner & Total")) return "w_ou";
@@ -33871,7 +33176,6 @@ function getMarketKeyFromName(name, marketKeyOverride) {
   if (n.startsWith("1H Individual")) return "h1_teams";
   if (n.startsWith("FT Total")) return "ft";
   if (n.startsWith("1H Total")) return "h1";
-  if (n.startsWith("2H Total")) return "h2";
   if (n === "Winner" || n.startsWith("Winner ")) return "winner";
   if (n.startsWith("Team A Total")) return "team_a";
   if (n.startsWith("Team B Total")) return "team_b";
@@ -33955,8 +33259,8 @@ function sanitizePredictionResult(result, marketKey = "ft", reason = "non_finite
      "no line yet", not a broken projection. Previously any NaN edge replaced the WHOLE FT/H1/H2 result with a
      NO PLAY stub (all projections null), so a blank line wiped finite projections (unsupported markets do not pass
      through here, stayed finite). Projections must be finite; edge-type keys may be NaN but never ±Infinity. */
-  const projectionKeys = ["projection", "proj", "ftProj", "projAFT", "projBFT", "h1Proj", "projA1H", "projB1H", "h2Proj", "projA2H", "projB2H"];
-  const lineDependentKeys = ["edge", "ftEdge", "h1Edge", "h2Edge", "confidence", "winProbability"];
+  const projectionKeys = ["projection", "proj", "ftProj", "projAFT", "projBFT", "h1Proj", "projA1H", "projB1H"];
+  const lineDependentKeys = ["edge", "ftEdge", "h1Edge", "confidence", "winProbability"];
   const badProjection = projectionKeys.some((k) => result[k] != null && typeof result[k] !== "string" && !bbStrictFinite(result[k]));
   const badLineDependent = lineDependentKeys.some((k) => typeof result[k] === "number" && !Number.isNaN(result[k]) && !Number.isFinite(result[k]));
   if (badProjection || badLineDependent) return noPlayProjectionResult(marketKey, reason);
@@ -33974,7 +33278,7 @@ function sanitizePredictionResult(result, marketKey = "ft", reason = "non_finite
 function noPlayProjectionResult(marketKey, reason = "required_full_statistics_unavailable") {
   const mk = String(marketKey || "ft").toLowerCase();
   const out = { pick: "NO PLAY", status: "NO PLAY", noPlay: true, noPlayReason: reason, marketKey: mk, confidence: null };
-  ["proj","edge","ftProj","ftEdge","projAFT","projBFT","h1Proj","h1Edge","projA1H","projB1H","h2Proj","h2Edge","projA2H","projB2H"].forEach((k) => { out[k] = null; });
+  ["proj","edge","ftProj","ftEdge","projAFT","projBFT","h1Proj","h1Edge","projA1H","projB1H"].forEach((k) => { out[k] = null; });
   return out;
 }
 // ========== CALC-AUDIT-289: CALCULATION-RELATED DEPENDENCIES (PARAMETER ACCESS, VALIDATION GATES, EXPORTS) — BEGIN ==========
@@ -33986,7 +33290,7 @@ function validateAdvancedObservationAlignment(ctx, marketKey, sideLabel) {
   const c = ctx || {};
   const mk = String(marketKey || "ft").toLowerCase();
   const series = getPeriodAdvancedSeries(c, mk);
-  /* BB-FIX2: period-specific date arrays are not reused across FT/H1/H2. */
+  /* BB-FIX2: period-specific date arrays are not reused across FT/H1. */
   const sfx = mk === "ft" || mk === "full" ? "" : "_" + mk;
   const ortgDates = c["ortgDates10" + sfx], drtgDates = c["drtgDates10" + sfx], paceDates = c["paceDates10" + sfx];
   const rawOrtg = c["ortg10" + sfx], rawDrtg = c["drtg10" + sfx], rawPace = c["pace10" + sfx];
@@ -34049,7 +33353,7 @@ function getAdvancedStatsEligibility(league, ctxA, ctxB, marketKey = "ft", conte
   const paceAAvg = avgOrNaN(paceA), paceBAvg = avgOrNaN(paceB);
   counts.paceA = paceA.length; counts.paceB = paceB.length;
   if (paceA.length < 5 || paceB.length < 5) return { eligible: false, reason: "pace sample requires at least 5 finite values per team", market: mk, counts };
-  const _paceFrac = /^q[1-4]$/.test(String(mk)) ? 0.25 : (mk === "h1" || mk === "h2") ? 0.5 : 1;
+  const _paceFrac = mk === "h1" ? 0.5 : 1;
   const _paceObsOk = (ser) => ser.every((v) => bbStrictFinite(v) && Number(v) >= 30 * _paceFrac && Number(v) <= 140 * _paceFrac);
   if (!_paceObsOk(paceA) || !_paceObsOk(paceB)) return { eligible: false, reason: "pace observation outside plausibility band", market: mk, counts };
   if (!isPlausibleBasketballPace(paceAAvg, _paceFrac) || !isPlausibleBasketballPace(paceBAvg, _paceFrac)) return { eligible: false, reason: "pace average is implausible", market: mk, counts };
@@ -34240,7 +33544,7 @@ function bbTmExtractGames(picks, aliases) {
     {
       /* FIX SC3: scorelines are stored Team A first for every market (manual and automatic) */
       const sl = bbTmParseScoreline(p.actualScore);
-      const per = (mk === "h1" || mk.indexOf("h1_") === 0) ? "h1" : mk === "h2" ? "h2" : "ft";
+      const per = (mk === "h1" || mk.indexOf("h1_") === 0) ? "h1" : "ft";
       if (sl && mk !== "htft") {
         if (per === "ft") { set("actA", sl.a); set("actB", sl.b); }
         else if (per === "h1") { set("actH1A", sl.a); set("actH1B", sl.b); }
@@ -34773,7 +34077,6 @@ function bbRenderTeamMemorySection() {
    These notes do not run. Removing them does not change a projection, a grade, or a pick.
    Section 1: Full-game projection (computeFTProjection) lines 37846-38359. Builds Team A, Team B, and the full-game total before grade and lock.
    Section 2: 1st-half projection (compute1HProjection) lines 38360-38717. Same blend as full game, on 1st-half series only.
-   Section 3: 2nd-half projection (compute2HProjection) lines 38718-39069. Same blend as full game, on 2nd-half series only.
    Section 5: Fixed 50/50 blend weights (getDynamicWeights) lines 6679-6690. Offense scored and opponent allowed are locked at 0.50 / 0.50.
    Section 6: Injury opponent boost (injuryOpponentBoostMultiplier) lines 6691-6699. Caps the boost given to the other team when one side is short-handed.
    Section 7: Fatigue signal (applyDampedIntelSignal) lines 6700-6706. Returns the projection unchanged. Fatigue does not move the number.
@@ -35718,7 +35021,6 @@ function compute1HProjection({
 }
 // ========== CALC-AUDIT-305: SCORE PROJECTIONS — END ==========
 // ========== CALC-AUDIT-306: SCORE PROJECTIONS — BEGIN ==========
-// AUDIT-NAV: members: compute2HProjection
 // AUDIT-NAV: calls other labeled calc code: anchorProjection, applyDampedIntelSignal, assertInvariant, avgOrNaN, bbH2HBlend, bbPreAdjustmentPair
 // AUDIT-NAV: (cont.) bbStrictFinite, buildTeamMarketIntelSignal, clampNumber, clipProjectionToBaseline, computeVenueBlend, finiteCount
 // AUDIT-NAV: (cont.) getAdvancedStatsEligibility, getCombinedOffDefVolatilityRatio, getDateAwareOrFallbackAverage, getFatigueMarketScale, getH2HSeries
@@ -35729,384 +35031,9 @@ function compute1HProjection({
 /* ============================================================
    AUDIT SECTION 3 — Calculation part only.
    Continue the audit at Section 3.
-   Part: 2nd-half projection.
-   Function: compute2HProjection.
-   Role: Same blend as full game, on 2nd-half series only.
    Chunks below are numbered one statement at a time. Nothing in this section is grouped past a single statement.
    ============================================================ */
-function compute2HProjection({
-  league,
-  parsed,
-  lines,
-  injMultA = 1,
-  injMultB = 1,
-  config = {},
-  contextData = null,
-}) {
-  const _ctxRoot2H =
-    contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {};
-  // CALC-AUDIT-306.W01 waypoint: declares _requiredData2H (calls validateRequiredPredictionData)
-  const _requiredData2H = validateRequiredPredictionData(league, "h2", parsed, _ctxRoot2H);
-  if (!_requiredData2H.ok) {
-    if (typeof engineDebug === "function") engineDebug("NO PLAY: required H2 full statistics unavailable", _requiredData2H);
-    return { ...noPlayProjectionResult("h2", _requiredData2H.reason), h2SampleTier: "insufficient", h2ProjectionOnly: false, h2FullModel: false, aVol2: NaN, bVol2: NaN, aS2: NaN, bS2: NaN };
-  }
-  g_currentLiveComputeMarket = "h2";
-  // CALC-AUDIT-306.W02 waypoint: declares eb (calls getLeagueScoreBase)
-  const eb = getLeagueScoreBase(league);
-  // CALC-AUDIT-306.W03 waypoint: declares volLimit (calls getMarketVolLimit)
-  const volLimit = getMarketVolLimit(league, "h2");
-  // CALC-AUDIT-306.W04 waypoint: declares aS2 (calls getManualSeries)
-  let aS2 = getManualSeries("A", "h2", parsed, _ctxRoot2H);
-  // CALC-AUDIT-306.W05 waypoint: declares bS2 (calls getManualSeries)
-  let bS2 = getManualSeries("B", "h2", parsed, _ctxRoot2H);
-  // CALC-AUDIT-306.W06 waypoint: declares aA2 (calls getManualAllowedSeries)
-  let aA2 = getManualAllowedSeries("A", "h2", parsed, _ctxRoot2H);
-  // CALC-AUDIT-306.W07 waypoint: declares bA2 (calls getManualAllowedSeries)
-  let bA2 = getManualAllowedSeries("B", "h2", parsed, _ctxRoot2H);
-  // CALC-AUDIT-306.W08 waypoint: declares _dateAwareAvgA2 (calls getDateAwareOrFallbackAverage)
-  const _dateAwareAvgA2 = getDateAwareOrFallbackAverage(aS2, "A", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null);
-  // CALC-AUDIT-306.W09 waypoint: declares _dateAwareAvgB2 (calls getDateAwareOrFallbackAverage)
-  const _dateAwareAvgB2 = getDateAwareOrFallbackAverage(bS2, "B", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null);
-  // CALC-AUDIT-306.W10 waypoint: declares h2SampleTier (calls getSampleTier)
-  let h2SampleTier = getSampleTier(aS2, bS2);
-  if (h2SampleTier === "insufficient") {
-    return {
-      h2Proj: NaN,
-      h2Edge: NaN,
-      projA2H: NaN,
-      projB2H: NaN,
-      h2SampleTier,
-      h2HasH2H: false,
-      h2ProjectionOnly: true,
-      h2FullModel: false,
-      paceGapRisk: false,
-      defensiveFloorFlag: false,
-      aVol2: NaN,
-      bVol2: NaN,
-      aS2: NaN,
-      bS2: NaN,
-    };
-  }
-  const _venueNeutral2H = typeof isVenueNeutral === "function" ? isVenueNeutral(_ctxRoot2H, config) : false;
-  // CALC-AUDIT-306.W11 waypoint: declares aVenueH2S (calls getResolvedVenueSeries)
-  const aVenueH2S = _venueNeutral2H ? [] : getResolvedVenueSeries("A", "h2", "scored", _ctxRoot2H, parsed);
-  // CALC-AUDIT-306.W12 waypoint: declares bVenueH2S (calls getResolvedVenueSeries)
-  const bVenueH2S = _venueNeutral2H ? [] : getResolvedVenueSeries("B", "h2", "scored", _ctxRoot2H, parsed);
-  // CALC-AUDIT-306.W13 waypoint: declares aVenueH2A (calls getResolvedVenueSeries)
-  const aVenueH2A = _venueNeutral2H ? [] : getResolvedVenueSeries("A", "h2", "allowed", _ctxRoot2H, parsed);
-  // CALC-AUDIT-306.W14 waypoint: declares bVenueH2A (calls getResolvedVenueSeries)
-  const bVenueH2A = _venueNeutral2H ? [] : getResolvedVenueSeries("B", "h2", "allowed", _ctxRoot2H, parsed);
-  // CALC-AUDIT-306.W15 waypoint: declares aScoredBlend2 (calls computeVenueBlend, getDateAwareOrFallbackAverage, getResolvedSeriesCount)
-  const aScoredBlend2 = computeVenueBlend(_dateAwareAvgA2, getDateAwareOrFallbackAverage(aVenueH2S, "A", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null, "venue"), getResolvedSeriesCount(aVenueH2S, "A", "h2", _ctxRoot2H, "venue", "scored"));
-  // CALC-AUDIT-306.W16 waypoint: declares bScoredBlend2 (calls computeVenueBlend, getDateAwareOrFallbackAverage, getResolvedSeriesCount)
-  const bScoredBlend2 = computeVenueBlend(_dateAwareAvgB2, getDateAwareOrFallbackAverage(bVenueH2S, "B", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null, "venue"), getResolvedSeriesCount(bVenueH2S, "B", "h2", _ctxRoot2H, "venue", "scored"));
-  // CALC-AUDIT-306.W17 waypoint: declares aAllowedBlend2 (calls computeVenueBlend, getDateAwareOrFallbackAverage, getResolvedSeriesCount)
-  const aAllowedBlend2 = computeVenueBlend(getDateAwareOrFallbackAverage(aA2, "A", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null), getDateAwareOrFallbackAverage(aVenueH2A, "A", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null, "venue"), getResolvedSeriesCount(aVenueH2A, "A", "h2", _ctxRoot2H, "venue", "allowed"));
-  // CALC-AUDIT-306.W18 waypoint: declares bAllowedBlend2 (calls computeVenueBlend, getDateAwareOrFallbackAverage, getResolvedSeriesCount)
-  const bAllowedBlend2 = computeVenueBlend(getDateAwareOrFallbackAverage(bA2, "B", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null), getDateAwareOrFallbackAverage(bVenueH2A, "B", "h2", _ctxRoot2H, league, config?.recencyWeights ?? null, "venue"), getResolvedSeriesCount(bVenueH2A, "B", "h2", _ctxRoot2H, "venue", "allowed"));
-  // CALC-AUDIT-306.W19 waypoint: declares sampleSize (calls finiteCount; Math.* x1)
-  const sampleSize = Math.min(finiteCount(aS2), finiteCount(bS2));
-  /* FIX IND-1: H2 prior is the H2 series only. It is not 1 - halfShareH1. */
-  const leagueBase2H = (Number.isFinite(aScoredBlend2.value) && Number.isFinite(bScoredBlend2.value))
-    ? (aScoredBlend2.value + bScoredBlend2.value) / 2
-    : (Number.isFinite(aScoredBlend2.value) ? aScoredBlend2.value : bScoredBlend2.value);
-  // CALC-AUDIT-306.W20 waypoint: declares aS_pre (calls anchorProjection)
-  let aS_pre = anchorProjection(aScoredBlend2.value, sampleSize, leagueBase2H);
-  // CALC-AUDIT-306.W21 waypoint: declares bS_pre (calls anchorProjection)
-  let bS_pre = anchorProjection(bScoredBlend2.value, sampleSize, leagueBase2H);
-  let aAllowed = aAllowedBlend2.value;
-  let bAllowed = bAllowedBlend2.value;
-  // CALC-AUDIT-306.W22 waypoint: declares _aAllowedCount2H (calls finiteCount)
-  const _aAllowedCount2H = finiteCount(aA2);
-  // CALC-AUDIT-306.W23 waypoint: declares _bAllowedCount2H (calls finiteCount)
-  const _bAllowedCount2H = finiteCount(bA2);
-  if (_aAllowedCount2H === 0) aAllowed = NaN;
-  if (_bAllowedCount2H === 0) bAllowed = NaN;
-  if ((_aAllowedCount2H > 0 && _aAllowedCount2H < 5) || (_bAllowedCount2H > 0 && _bAllowedCount2H < 5)) h2SampleTier = "thin";
-  // CALC-AUDIT-306.W24 waypoint: if-block (calls anchorProjection)
-  if (isFinite(aAllowed)) aAllowed = anchorProjection(aAllowed, _aAllowedCount2H, leagueBase2H);
-  // CALC-AUDIT-306.W25 waypoint: if-block (calls anchorProjection)
-  if (isFinite(bAllowed)) bAllowed = anchorProjection(bAllowed, _bAllowedCount2H, leagueBase2H);
-  const leaguePaceBase = LEAGUE_PACE_BASES[league] || LEAGUE_PACE_BASES.default || 74;
-  const leagueRatingBase =
-    LEAGUE_RATING_BASES[league] ||
-    LEAGUE_RATING_BASES.default *
-      ((LEAGUE_BASES[league] || LEAGUE_BASES.unknown) / LEAGUE_BASES.unknown) ||
-    110;
-  const ctxA = _ctxRoot2H.A || {};
-  const ctxB = _ctxRoot2H.B || {};
-  // CALC-AUDIT-306.W26 waypoint: declares _advA2 (calls getPeriodAdvancedSeries)
-  const _advA2 = typeof getPeriodAdvancedSeries === "function"
-    ? getPeriodAdvancedSeries(ctxA, "h2")
-    : { ortg: [], drtg: [], pace: [], source: "none" };
-  // CALC-AUDIT-306.W27 waypoint: declares _advB2 (calls getPeriodAdvancedSeries)
-  const _advB2 = typeof getPeriodAdvancedSeries === "function"
-    ? getPeriodAdvancedSeries(ctxB, "h2")
-    : { ortg: [], drtg: [], pace: [], source: "none" };
-  // CALC-AUDIT-306.W28 waypoint: declares _advEligibilityH2 (calls getAdvancedStatsEligibility)
-  const _advEligibilityH2 = getAdvancedStatsEligibility(league, ctxA, ctxB, "h2", _ctxRoot2H);
-  const _nativeAdvH2 = _advEligibilityH2.eligible;
-  // CALC-AUDIT-306.W29 waypoint: declares _pA2 (calls avgOrNaN, getPaceSeriesValue)
-  const _pA2 = avgOrNaN(getPaceSeriesValue(_advA2.pace, _advA2.paceUnit || "possessions_per_48"));
-  // CALC-AUDIT-306.W30 waypoint: declares _pB2 (calls avgOrNaN, getPaceSeriesValue)
-  const _pB2 = avgOrNaN(getPaceSeriesValue(_advB2.pace, _advB2.paceUnit || "possessions_per_48"));
-  const avgPaceA = Number.isFinite(_pA2) && _pA2 > 0 ? _pA2 : NaN;
-  const avgPaceB = Number.isFinite(_pB2) && _pB2 > 0 ? _pB2 : NaN;
-  let hasRealPace = Number.isFinite(avgPaceA) && Number.isFinite(avgPaceB);
-  let synPace = hasRealPace ? (avgPaceA + avgPaceB) / 2 : leaguePaceBase;
-  const hasRealRatings = _nativeAdvH2;
-  let projA2H, projB2H;
-  const _tw2 = FIXED_BLEND.offenseWeight;
-  const _ow2 = FIXED_BLEND.defenseWeight;
-  const _missingDefenseA2 = !isFinite(bAllowed);
-  const _missingDefenseB2 = !isFinite(aAllowed);
-  let _tw2EffA = _tw2;
-  let _ow2EffA = _ow2;
-  let _tw2EffB = _tw2;
-  let _ow2EffB = _ow2;
-  const projA2H_points =
-    isFinite(aS_pre) && isFinite(bAllowed) ? aS_pre * _tw2EffA + bAllowed * _ow2EffA : NaN;
-  const projB2H_points =
-    isFinite(bS_pre) && isFinite(aAllowed) ? bS_pre * _tw2EffB + aAllowed * _ow2EffB : NaN;
-  projA2H = projA2H_points;
-  projB2H = projB2H_points;
-  // CALC-AUDIT-306.W31 waypoint: if-block (calls avgOrNaN, getLeagueRegulationMinutes, getParam, clampNumber; arithmetic ops x10)
-  if (_nativeAdvH2 && hasRealPace) {
-    const _ortgA2 = avgOrNaN(_advA2.ortg);
-    const _drtgA2 = avgOrNaN(_advA2.drtg);
-    const _ortgB2 = avgOrNaN(_advB2.ortg);
-    const _drtgB2 = avgOrNaN(_advB2.drtg);
-    const _ratingA2 = _ortgA2 + _drtgB2 - leagueRatingBase;
-    const _ratingB2 = _ortgB2 + _drtgA2 - leagueRatingBase;
-    const _regMins2 = getLeagueRegulationMinutes(league) || 48;
-    const _halfDivisor2 = 200 * (48 / _regMins2);
-    const _projAAdv2 = synPace * _ratingA2 / _halfDivisor2;
-    const _projBAdv2 = synPace * _ratingB2 / _halfDivisor2;
-    const _advTotal2 = _projAAdv2 + _projBAdv2;
-    const _advSane2 = Number.isFinite(_advTotal2) && _advTotal2 >= leagueBase2H * 1.4 && _advTotal2 <= leagueBase2H * 2.6 && Number.isFinite(_projAAdv2) && Number.isFinite(_projBAdv2);
-    const _advW2Raw = isFinite(config?.advancedBlendWeight) ? Number(config.advancedBlendWeight) : Number(getParam("advancedBlendWeight", league) ?? 0.45);
-    const _advW2 = clampNumber(_advW2Raw, 0, 1);
-    /* FIX CALC-ADV: H2 advanced stats remain diagnostics only. */
-    projA2H = projA2H_points;
-    projB2H = projB2H_points;
-  }
-  const _bbPreInjA_H2 = projA2H; /* BB-FIX #3 */
-  const _bbPreInjB_H2 = projB2H;
-  projA2H *= injMultA;
-  projB2H *= injMultB;
-  // CALC-AUDIT-306.W32 waypoint: declares _injOppBoostFactorH2 (calls getParam)
-  const _injOppBoostFactorH2 =
-    getParam("injuryOppBoostFactor", league) ?? INJURY_OPPONENT_BOOST_FACTOR;
-  // CALC-AUDIT-306.W33 waypoint: if-block (calls injuryOpponentBoostMultiplier)
-  if (injMultA < 1) projB2H *= injuryOpponentBoostMultiplier(injMultA, _injOppBoostFactorH2);
-  // CALC-AUDIT-306.W34 waypoint: if-block (calls injuryOpponentBoostMultiplier)
-  if (injMultB < 1) projA2H *= injuryOpponentBoostMultiplier(injMultB, _injOppBoostFactorH2);
-  // CALC-AUDIT-306.W35 waypoint: declares aVol2 (calls getCombinedOffDefVolatilityRatio)
-  const aVol2 = getCombinedOffDefVolatilityRatio(aS2, bA2, volLimit);
-  // CALC-AUDIT-306.W36 waypoint: declares bVol2 (calls getCombinedOffDefVolatilityRatio)
-  const bVol2 = getCombinedOffDefVolatilityRatio(bS2, aA2, volLimit);
-  const _aTotalSd2 = Number(aVol2) * Number(volLimit);
-  const _bTotalSd2 = Number(bVol2) * Number(volLimit);
-  // CALC-AUDIT-306.W37 waypoint: declares _h2TotalSd (Math.* x1; arithmetic ops x2)
-  const _h2TotalSd = Math.sqrt(
-    (isFinite(_aTotalSd2) ? _aTotalSd2 * _aTotalSd2 : 0) +
-      (isFinite(_bTotalSd2) ? _bTotalSd2 * _bTotalSd2 : 0),
-  );
-  // CALC-AUDIT-306.W38 waypoint: declares combinedVol2 (calls clampNumber; Math.* x1; arithmetic ops x1)
-  let combinedVol2 =
-    isFinite(_h2TotalSd) && isFinite(volLimit) && volLimit > 0
-      ? clampNumber(_h2TotalSd / volLimit, 0.5, 2.5)
-      : Math.max(aVol2 || 0, bVol2 || 0);
-  // CALC-AUDIT-306.W39 waypoint: if-block (calls clampNumber; arithmetic ops x1)
-  if (_missingDefenseA2 || _missingDefenseB2) combinedVol2 = clampNumber(combinedVol2 * 1.15, 0.5, 2.5);
-  // CALC-AUDIT-306.W40 waypoint: declares aH2H (calls getH2HSeries)
-  const aH2H = getH2HSeries("A", "h2", parsed, _ctxRoot2H);
-  // CALC-AUDIT-306.W41 waypoint: declares bH2H (calls getH2HSeries)
-  const bH2H = getH2HSeries("B", "h2", parsed, _ctxRoot2H);
-  // CALC-AUDIT-306.W42 waypoint: declares h2HasH2H (calls finiteCount)
-  const h2HasH2H =
-    maybeReadH2HEnabled("h2", _ctxRoot2H?.h2hToggleSnapshot) &&
-    finiteCount(aH2H) >= 2 &&
-    finiteCount(bH2H) >= 2;
-  const _preH2H_A2 = projA2H;
-  const _preH2H_B2 = projB2H;
-  let hw;
-  let _h2PreAdjHw = 0, _h2PreAdjAvgA = NaN, _h2PreAdjAvgB = NaN; /* BB-FIX #3 */
-  // CALC-AUDIT-306.W43 waypoint: if-block (calls getMassacreH2HSeries, avgOrNaN, getH2HWeight, assertInvariant, bbH2HBlend; Math.* x6; arithmetic ops x13)
-  if (h2HasH2H) {
-    const massacreH2H = getMassacreH2HSeries(
-      "h2",
-      _ctxRoot2H.fixtureMeta || getCurrentFixtureMeta(),
-      parsed,
-      _ctxRoot2H,
-      config?.recencyWeights ?? null,
-    );
-    const decayH2HA = massacreH2H.A.length >= 2 ? massacreH2H.A : aH2H;
-    const decayH2HB = massacreH2H.B.length >= 2 ? massacreH2H.B : bH2H;
-    const _h2H2hFactor = 1.0;
-    const _h2H2hW = massacreH2H.weights;
-    const avgH2HA =
-      _h2H2hW && _h2H2hW.length === decayH2HA.length
-        ? (() => {
-            let sv = 0,
-              sw = 0;
-            for (let i = 0; i < decayH2HA.length; i++) {
-              const v = Number(decayH2HA[i]),
-                w = Number(_h2H2hW[i]);
-              if (isFinite(v) && isFinite(w) && w > 0) {
-                sv += v * w;
-                sw += w;
-              }
-            }
-            return sw > 0 ? sv / sw : avgOrNaN(decayH2HA);
-          })()
-        : avgOrNaN(decayH2HA);
-    const avgH2HB =
-      _h2H2hW && _h2H2hW.length === decayH2HB.length
-        ? (() => {
-            let sv = 0,
-              sw = 0;
-            for (let i = 0; i < decayH2HB.length; i++) {
-              const v = Number(decayH2HB[i]),
-                w = Number(_h2H2hW[i]);
-              if (isFinite(v) && isFinite(w) && w > 0) {
-                sv += v * w;
-                sw += w;
-              }
-            }
-            return sw > 0 ? sv / sw : avgOrNaN(decayH2HB);
-          })()
-        : avgOrNaN(decayH2HB);
-    const _modelTotalForH2H2 =
-      isFinite(projA2H) && isFinite(projB2H) ? Number(projA2H) + Number(projB2H) : NaN;
-    const _h2hTotalForDivergence2 =
-      isFinite(avgH2HA) && isFinite(avgH2HB) ? Number(avgH2HA) + Number(avgH2HB) : NaN;
-    const _h2hDivergence2 =
-      isFinite(_modelTotalForH2H2) && isFinite(_h2hTotalForDivergence2)
-        ? Math.abs(_h2hTotalForDivergence2 - _modelTotalForH2H2)
-        : 0;
-    const _h2PreH2HTotal =
-      isFinite(projA2H) && isFinite(projB2H) ? Number(projA2H) + Number(projB2H) : NaN;
-    hw = getH2HWeight(
-      decayH2HA.length,
-      decayH2HB.length,
-      "h2",
-      h2SampleTier,
-      _h2hDivergence2,
-      league,
-      (isFinite(leagueBase2H) ? leagueBase2H * 2 : leagueBase2H),
-      _h2H2hFactor,
-      {
-        enabled: h2HasH2H,
-        injMultA,
-        injMultB,
-        volRatio: combinedVol2,
-        blowoutGap: Math.abs(projA2H - projB2H),
-        paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
-      },
-    );
-    assertInvariant(isFinite(hw) && hw >= 0 && hw <= 1, "h2.h2hWeight out of [0,1]", {
-      hw,
-      league,
-      decayHA: decayH2HA.length,
-      decayHB: decayH2HB.length,
-    });
-    const _h2hCanTiltH2 = isFinite(projA2H) && isFinite(projB2H) && isFinite(hw) && hw > 0;
-    projA2H = _h2hCanTiltH2 && isFinite(avgH2HA) ? bbH2HBlend(projA2H, avgH2HA, hw, "h2", "A") : projA2H;
-    projB2H = _h2hCanTiltH2 && isFinite(avgH2HB) ? bbH2HBlend(projB2H, avgH2HB, hw, "h2", "B") : projB2H;
-    /* BB-FIX #3: injury-free H2H weight */
-    try {
-      const _h2NoInjTot = isFinite(_bbPreInjA_H2) && isFinite(_bbPreInjB_H2) ? Number(_bbPreInjA_H2) + Number(_bbPreInjB_H2) : NaN;
-      const _h2NoInjDiv = isFinite(_h2NoInjTot) && isFinite(_h2hTotalForDivergence2) ? Math.abs(_h2hTotalForDivergence2 - _h2NoInjTot) : 0;
-      _h2PreAdjHw = getH2HWeight(decayH2HA.length, decayH2HB.length, "h2", h2SampleTier, _h2NoInjDiv, league, (isFinite(leagueBase2H) ? leagueBase2H * 2 : leagueBase2H), _h2H2hFactor, {
-        enabled: h2HasH2H, injMultA: 1, injMultB: 1, volRatio: combinedVol2, blowoutGap: Math.abs(_bbPreInjA_H2 - _bbPreInjB_H2),
-        paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
-      });
-    } catch (_pae2) { _h2PreAdjHw = hw; }
-    _h2PreAdjAvgA = avgH2HA; _h2PreAdjAvgB = avgH2HB;
-    var _h2H2HContribution = 0;
-    if (isFinite(_h2PreH2HTotal) && isFinite(projA2H) && isFinite(projB2H)) {
-      _h2H2HContribution = (Number(projA2H) + Number(projB2H)) - _h2PreH2HTotal;
-    }
-  }
-  // CALC-AUDIT-306.W44 waypoint: declares _preAdjH2 (calls bbPreAdjustmentPair)
-  const _preAdjH2 = bbPreAdjustmentPair(_bbPreInjA_H2, _bbPreInjB_H2, h2HasH2H ? _h2PreAdjHw : 0, _h2PreAdjAvgA, _h2PreAdjAvgB); /* BB-FIX #3: before fatigue AND injuries */
-  let h2Proj = isFinite(projA2H) && isFinite(projB2H) ? projA2H + projB2H : NaN;
-  // CALC-AUDIT-306.W45 waypoint: expression statement (calls assertInvariant)
-  assertInvariant(isFinite(h2Proj) && h2Proj >= 0, "h2.h2Proj invalid", {
-    h2Proj,
-    advancedStatsDiagnostic: { market: "h2", enabled: !!(_nativeAdvH2 && hasRealPace), reason: _advEligibilityH2.reason, fallback: _nativeAdvH2 && hasRealPace ? "none" : "STANDARD PROJECTION", counts: _advEligibilityH2.counts || null },
-    projA2H,
-    projB2H,
-    league,
-  });
-  // CALC-AUDIT-306.W46 waypoint: statement (calls bbStrictFinite, getFatigueMarketScale, buildTeamMarketIntelSignal, applyDampedIntelSignal)
-  {
-    const _restA2 = bbStrictFinite(config?.restDaysA) ? Number(config.restDaysA)
-      : (bbStrictFinite((_ctxRoot2H.A || {}).restDays) ? Number((_ctxRoot2H.A || {}).restDays) : null);
-    const _restB2 = bbStrictFinite(config?.restDaysB) ? Number(config.restDaysB)
-      : (bbStrictFinite((_ctxRoot2H.B || {}).restDays) ? Number((_ctxRoot2H.B || {}).restDays) : null);
-    const _intelPack2 = { restDaysA: _restA2, restDaysB: _restB2, marketScale: getFatigueMarketScale("h2", typeof league !== "undefined" ? league : null), previousGapDaysA: (_ctxRoot2H.A||{}).previousGapDays, previousGapDaysB: (_ctxRoot2H.B||{}).previousGapDays };
-    const _volR2 = Number.isFinite(combinedVol2) ? combinedVol2 : 1;
-    if (typeof applyDampedIntelSignal === "function" && typeof buildTeamMarketIntelSignal === "function") {
-      const _h2SA = buildTeamMarketIntelSignal(_intelPack2, "A"), _h2SB = buildTeamMarketIntelSignal(_intelPack2, "B");
-      var _fatDiagH2 = { A: { raw: _h2SA.rawSignal, scale: _h2SA.marketScale, damped: _h2SA.dampedSignal }, B: { raw: _h2SB.rawSignal, scale: _h2SB.marketScale, damped: _h2SB.dampedSignal } };
-      var _preFatigueH2Proj = isFinite(projA2H) && isFinite(projB2H) ? projA2H + projB2H : NaN;
-      projA2H = applyDampedIntelSignal(projA2H, _h2SA.signal, _volR2);
-      projB2H = applyDampedIntelSignal(projB2H, _h2SB.signal, _volR2);
-      h2Proj = isFinite(projA2H) && isFinite(projB2H) ? projA2H + projB2H : NaN;
-    }
-  }
-  // CALC-AUDIT-306.W47 waypoint: expression statement (calls clipProjectionToBaseline)
-  projA2H = clipProjectionToBaseline(projA2H, _preH2H_A2, volLimit);
-  // CALC-AUDIT-306.W48 waypoint: expression statement (calls clipProjectionToBaseline)
-  projB2H = clipProjectionToBaseline(projB2H, _preH2H_B2, volLimit);
-  h2Proj = isFinite(projA2H) && isFinite(projB2H) ? projA2H + projB2H : NaN;
-  /* TEAM MEMORY: half share of the FT adjustment (live runs only) */
-  let teamMemoryApplied = null;
-  // CALC-AUDIT-306.W49 waypoint: if-block (calls bbStrictFinite)
-  if (false && config && config.teamMemoryAdj && isFinite(projA2H) && isFinite(projB2H)) {
-    const _tmdA = bbStrictFinite(config.teamMemoryAdj.dA) ? Number(config.teamMemoryAdj.dA) : 0;
-    const _tmdB = bbStrictFinite(config.teamMemoryAdj.dB) ? Number(config.teamMemoryAdj.dB) : 0;
-    teamMemoryApplied = { baseA: projA2H, baseB: projB2H, baseTotal: h2Proj, dA: _tmdA, dB: _tmdB };
-    projA2H = projA2H + _tmdA;
-    projB2H = projB2H + _tmdB;
-    h2Proj = projA2H + projB2H;
-  }
-  const h2Edge =
-    isFinite(h2Proj) && isFinite(lines.h2Line) && lines.h2Line > 0 ? h2Proj - lines.h2Line : NaN;
-  // CALC-AUDIT-306.W50 waypoint: return (calls sanitizePredictionResult, avgOrNaN; Math.* x1; arithmetic ops x3)
-  return sanitizePredictionResult({
-    h2Proj,
-    h2Edge,
-    projA2H,
-    teamMemoryApplied,
-    projB2H,
-    h2Method: "independent",
-    h2TargetSource: "compute2HProjection",
-    h2SampleTier,
-    h2HasH2H,
-    h2hWeightApplied: typeof hw !== "undefined" && isFinite(hw) ? hw : 0,
-    h2hContribution: typeof _h2H2HContribution !== "undefined" ? _h2H2HContribution : 0,
-    h2ProjectionOnly: !h2HasH2H && h2SampleTier === "thin",
-    h2FullModel: h2SampleTier === "full" && !_missingDefenseA2 && !_missingDefenseB2,
-    paceGapRisk: (typeof hasRealPace !== "undefined" && hasRealPace) ? Math.abs(avgPaceA - avgPaceB) > 6 : false,
-    defensiveFloorFlag:
-      (isFinite(aAllowed) && aAllowed <= leagueBase2H * 0.92) ||
-      (isFinite(bAllowed) && bAllowed <= leagueBase2H * 0.92),
-    aVol2,
-    bVol2,
-    h2VolRatio: combinedVol2,
-    fatigueDiag: typeof _fatDiagH2 !== "undefined" ? _fatDiagH2 : null,
-    preFatigueH2Proj: typeof _preFatigueH2Proj !== "undefined" ? _preFatigueH2Proj : NaN,
-    preAdjustmentProjA2H: _preAdjH2.a,
-    preAdjustmentProjB2H: _preAdjH2.b,
-    preAdjustmentH2Proj: _preAdjH2.total,
-    aS2: avgOrNaN(aS2),
-    bS2: avgOrNaN(bS2),
-  }, "h2");
-}
+
 // ========== CALC-AUDIT-306: SCORE PROJECTIONS — END ==========
 // ========== CALC-AUDIT-307: TOTALS AND LINE-RANGE CALCULATIONS — BEGIN ==========
 // AUDIT-NAV: members: getMarketVolLimit
@@ -36126,8 +35053,6 @@ function getMarketVolLimit(league, marketKey) {
   const key = String(marketKey || "").toLowerCase();
   if (key === "h1" || key === "h1_team_a" || key === "h1_team_b")
     return base * (getParam("h1VolScale", league) ?? 0.7071);
-  if (key === "h2")
-    return base * (getParam("h2VolScale", league) ?? getParam("h1VolScale", league) ?? 0.7071);
   if (key === "team_a" || key === "team_b") return base * (getParam("teamVolScale", league) ?? 0.5);
   return base;
 }
@@ -36274,9 +35199,6 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
         B: parsed && parsed.b1HH2H ? safeArr(parsed.b1HH2H) : [],
       };
     }
-    if (marketKey === "h2") {
-      return { A: [], B: [] };
-    }
     return { A: [], B: [] };
   }
   const _recentEventIds = new Set();
@@ -36336,9 +35258,7 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
         ? isTeamA ? g.scoreA : g.scoreB
         : marketKey === "h1"
           ? isTeamA ? g.h1A : g.h1B
-          : marketKey === "h2"
-                    ? isTeamA ? g.h2A : g.h2B
-                    : 0;
+          : 0;
     const valueB =
       marketKey === "ft"
         ? isTeamA ? g.scoreB : g.scoreA
@@ -36347,8 +35267,6 @@ function getMassacreH2HSeries(marketKey, fixtureMeta, parsed, contextData = null
           : 0;
     const vA = Number(valueA);
     const vB = Number(valueB);
-    const _mk = String(marketKey || "").toLowerCase();
-    const _periodMkt = _mk === "h1" || _mk === "h2" || /^q[1-4]$/.test(_mk);
     const _okA = isFinite(vA) && vA > 0;
     const _okB = isFinite(vB) && vB > 0;
     if (_okA && _okB) {
@@ -36578,7 +35496,7 @@ function calibrateConfidenceModel() {
   };
   const models = {};
   const modelSampleSizes = {};
-  const _families = ["TOTAL", "TOTAL_H1", "TOTAL_H2", "TEAM", "Q", "MARGIN"];
+  const _families = ["TOTAL", "TOTAL_H1", "TEAM", "MARGIN"];
   // CALC-AUDIT-313.W07 waypoint: declares _scopeForPick (calls getConfidenceModelScopeKey)
   const _scopeForPick = (p) => getConfidenceModelScopeKey(p.league || "global", p.marketKey || "ft");
   const _globalFamilyScope = (family) => "global::" + family;
@@ -36604,7 +35522,7 @@ function calibrateConfidenceModel() {
       const lm = runGD(ld);
       const base = models[_globalFamilyScope(family)];
       if (lm && base) {
-        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TOTAL_H1" ? "h1" : family === "TOTAL_H2" ? "h2" : family === "TEAM" ? "team_a" : "winner");
+        const key = getConfidenceModelScopeKey(league, family === "TOTAL" ? "ft" : family === "TOTAL_H1" ? "h1" : family === "TEAM" ? "team_a" : "winner");
         models[key] = empiricalBayesShrink(lm, ld.length, base, 40);
         modelSampleSizes[key] = ld.length;
       } else if (lm) {
@@ -37025,26 +35943,19 @@ function buildTrackedPickPayload({
         aFTScoredAway: readLooseSeries("aFTScoredAway"),
         aFTAllowedAway: readLooseSeries("aFTAllowedAway"),
         a1HScoredHome: readLooseSeries("a1HScoredHome"), a1HAllowedHome: readLooseSeries("a1HAllowedHome"), a1HScoredAway: readLooseSeries("a1HScoredAway"), a1HAllowedAway: readLooseSeries("a1HAllowedAway"),
-        a2HScoredHome: readLooseSeries("a2HScoredHome"), a2HAllowedHome: readLooseSeries("a2HAllowedHome"), a2HScoredAway: readLooseSeries("a2HScoredAway"), a2HAllowedAway: readLooseSeries("a2HAllowedAway"),
         bFTScoredHome: readLooseSeries("bFTScoredHome"),
         bFTAllowedHome: readLooseSeries("bFTAllowedHome"),
         bFTScoredAway: readLooseSeries("bFTScoredAway"),
         bFTAllowedAway: readLooseSeries("bFTAllowedAway"),
         b1HScoredHome: readLooseSeries("b1HScoredHome"), b1HAllowedHome: readLooseSeries("b1HAllowedHome"), b1HScoredAway: readLooseSeries("b1HScoredAway"), b1HAllowedAway: readLooseSeries("b1HAllowedAway"),
-        b2HScoredHome: readLooseSeries("b2HScoredHome"), b2HAllowedHome: readLooseSeries("b2HAllowedHome"), b2HScoredAway: readLooseSeries("b2HScoredAway"), b2HAllowedAway: readLooseSeries("b2HAllowedAway"),
         aFTAllowed: readLooseSeries("aFTAllowed"),
         bFTAllowed: readLooseSeries("bFTAllowed"),
         a1HAllowed: readLooseSeries("a1HAllowed"),
         b1HAllowed: readLooseSeries("b1HAllowed"),
-        a2HScored: readLooseSeries("a2HScored"),
-        b2HScored: readLooseSeries("b2HScored"),
-        a2HAllowed: readLooseSeries("a2HAllowed"),
-        b2HAllowed: readLooseSeries("b2HAllowed"),
       };
       const linesSnapshot = {
         ftLine: parseMarketLine(document.getElementById("ftMarket")?.value || ""),
         h1Line: parseMarketLine(document.getElementById("h1Market")?.value || ""),
-        h2Line: parseMarketLine(document.getElementById("h2Market")?.value || ""),
         aLine: parseMarketLine(document.getElementById("teamAMarket")?.value || ""),
         bLine: parseMarketLine(document.getElementById("teamBMarket")?.value || ""),
       };
@@ -37079,9 +35990,6 @@ function buildTrackedPickPayload({
                   h1ScoredDates10: Array.isArray(sideObj.overall.h1ScoredDates10)
                     ? sideObj.overall.h1ScoredDates10.slice(0, 10)
                     : (Array.isArray(sideObj.overall.h1ScoredDates) ? sideObj.overall.h1ScoredDates.slice(0,10) : []),
-                  h2Scored10: Array.isArray(sideObj.overall.h2Scored10)
-                    ? sideObj.overall.h2Scored10.slice(0, 10)
-                    : [],
                 }
               : null,
             venue: sideObj.venue
@@ -37098,16 +36006,8 @@ function buildTrackedPickPayload({
                   h1Allowed10: Array.isArray(sideObj.venue.h1Allowed10)
                     ? sideObj.venue.h1Allowed10.slice(0, 10)
                     : [],
-                  h2Scored10: Array.isArray(sideObj.venue.h2Scored10)
-                    ? sideObj.venue.h2Scored10.slice(0, 10)
-                    : [],
-                  h2Allowed10: Array.isArray(sideObj.venue.h2Allowed10)
-                    ? sideObj.venue.h2Allowed10.slice(0, 10)
-                    : [],
                   h1ScoredDates10: Array.isArray(sideObj.venue.h1ScoredDates10) ? sideObj.venue.h1ScoredDates10.slice(0,10) : [],
                   h1AllowedDates10: Array.isArray(sideObj.venue.h1AllowedDates10) ? sideObj.venue.h1AllowedDates10.slice(0,10) : [],
-                  h2ScoredDates10: Array.isArray(sideObj.venue.h2ScoredDates10) ? sideObj.venue.h2ScoredDates10.slice(0,10) : [],
-                  h2AllowedDates10: Array.isArray(sideObj.venue.h2AllowedDates10) ? sideObj.venue.h2AllowedDates10.slice(0,10) : [],
                   ftScoredDates10: Array.isArray(sideObj.venue.ftScoredDates10)
                     ? sideObj.venue.ftScoredDates10.slice(0, 10)
                     : [],
@@ -37132,8 +36032,6 @@ function buildTrackedPickPayload({
                   scoreB: g.scoreB,
                   h1A: g.h1A,
                   h1B: g.h1B,
-                  h2A: g.h2A,
-                  h2B: g.h2B,
                   teamAId: g.teamAId,
                   teamBId: g.teamBId,
                 };
@@ -37215,7 +36113,7 @@ function buildTrackedPickPayload({
       market === "h1_team_b"
     )
       return dx.h1SampleTier || "unknown";
-    if (market === "h2") return dx.h2SampleTier || "unknown";
+    
     return "unknown";
   }
   function getProjectionOnlyForMarket(market, dx = {}) {
@@ -37224,7 +36122,7 @@ function buildTrackedPickPayload({
     if (market === "h1" || market === "h1_team_a" || market === "h1_team_b")
       return !!dx.h1ProjectionOnly;
     if (market === "winner") return !!dx.ftProjectionOnly;
-    if (market === "h2") return !!dx.h2ProjectionOnly;
+    
     
     return false;
   }
@@ -37252,9 +36150,7 @@ function buildTrackedPickPayload({
     ) {
       return Number(pickRow.volatility) / _ftVolLimitForBucket;
     }
-    if (market === "h2" && pickRow && isFinite(Number(pickRow.volatility))) {
-      return Number(pickRow.volatility) / (getMarketVolLimit(league, "h2") || 1);
-    }
+    
     return 0;
   }
   function getVolatilityBucket(value = 0) {
@@ -37298,11 +36194,7 @@ function buildTrackedPickPayload({
       if (line < 95) return "h1_mid";
       return "h1_high";
     }
-    if (market === "h2") {
-      if (line < 70) return "h2_low";
-      if (line < 95) return "h2_mid";
-      return "h2_high";
-    }
+    
     if (market === "team_a" || market === "team_b") {
       if (line < 70) return "team_low";
       if (line < 90) return "team_mid";
@@ -37314,15 +36206,13 @@ function buildTrackedPickPayload({
   function getPaceRiskForMarket(market, dx = {}) {
     if (market === "h1" || market === "h1_team_a" || market === "h1_team_b")
       return !!dx.h1PaceGapRisk;
-    if (market === "h2")
-      return !!(dx.h2PaceGapRisk != null ? dx.h2PaceGapRisk : dx.paceGapRisk);
+    
     return !!dx.paceGapRisk;
   }
   function getDefFloorForMarket(market, dx = {}) {
     if (market === "h1" || market === "h1_team_a" || market === "h1_team_b")
       return !!dx.h1DefensiveFloorFlag;
-    if (market === "h2")
-      return !!(dx.h2DefensiveFloorFlag != null ? dx.h2DefensiveFloorFlag : dx.defensiveFloorFlag);
+    
     return !!dx.defensiveFloorFlag;
   }
   const sampleTier = getSampleTierForMarket(marketKey, diagnostics);
@@ -37570,9 +36460,9 @@ function getAllowedMarketsForLeague(league) {
     return new Set(["ft", "h1", "team_a", "team_b", "winner"]);
   }
   if (key === "ncaa" || key === "ncaaw") {
-    return new Set(["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner"]);
+    return new Set(["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner"]);
   }
-  return new Set(["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner"]);
+  return new Set(["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner"]);
 }
 // ========== CALC-AUDIT-317: CALCULATION-RELATED DEPENDENCIES (PARAMETER ACCESS, VALIDATION GATES, EXPORTS) — END ==========
 // ========== CALC-AUDIT-318: PICK AND SIGNAL EVALUATION — BEGIN ==========
@@ -37894,7 +36784,6 @@ function extractInputs(league) {
   }
   const h1Line = readLine("h1Market");
   const ftLine = readLine("ftMarket");
-  const h2Line = readLine("h2Market");
   const parsed = {
     aFTScored: readSeries("aFTScored"),
     aFTAllowed: readSeries("aFTAllowed"),
@@ -37904,10 +36793,6 @@ function extractInputs(league) {
     a1HAllowed: readSeries("a1HAllowed"),
     b1HScored: readSeries("b1HScored"),
     b1HAllowed: readSeries("b1HAllowed"),
-    a2HScored: readSeries("a2HScored"),
-    a2HAllowed: readSeries("a2HAllowed"),
-    b2HScored: readSeries("b2HScored"),
-    b2HAllowed: readSeries("b2HAllowed"),
     aFTH2H: readSeries("aFTH2H"),
     bFTH2H: readSeries("bFTH2H"),
     a1HH2H: readSeries("a1HH2H"),
@@ -37917,18 +36802,15 @@ function extractInputs(league) {
     aFTScoredAway: readSeries("aFTScoredAway"),
     aFTAllowedAway: readSeries("aFTAllowedAway"),
         a1HScoredHome: readSeries("a1HScoredHome"), a1HAllowedHome: readSeries("a1HAllowedHome"), a1HScoredAway: readSeries("a1HScoredAway"), a1HAllowedAway: readSeries("a1HAllowedAway"),
-        a2HScoredHome: readSeries("a2HScoredHome"), a2HAllowedHome: readSeries("a2HAllowedHome"), a2HScoredAway: readSeries("a2HScoredAway"), a2HAllowedAway: readSeries("a2HAllowedAway"),
     bFTScoredHome: readSeries("bFTScoredHome"),
     bFTAllowedHome: readSeries("bFTAllowedHome"),
     bFTScoredAway: readSeries("bFTScoredAway"),
     bFTAllowedAway: readSeries("bFTAllowedAway"),
         b1HScoredHome: readSeries("b1HScoredHome"), b1HAllowedHome: readSeries("b1HAllowedHome"), b1HScoredAway: readSeries("b1HScoredAway"), b1HAllowedAway: readSeries("b1HAllowedAway"),
-        b2HScoredHome: readSeries("b2HScoredHome"), b2HAllowedHome: readSeries("b2HAllowedHome"), b2HScoredAway: readSeries("b2HScoredAway"), b2HAllowedAway: readSeries("b2HAllowedAway"),
   };
   const lines = {
     ftLine,
     h1Line,
-    h2Line,
     aLine: readLine("teamAMarket"),
     bLine: readLine("teamBMarket"),
     h1aLine: readLine("h1TeamAMarket"),
@@ -37959,7 +36841,7 @@ function validateInputIntegrityForRun(extracted, league) {
         if (!rows.length || rowIds.size !== rows.length) errors.push("Team " + side + ": canonical game-row event IDs are missing or duplicated.");
         const rowComplete = rows.every((r) => {
           if (r && r.noPeriods) return r.eventId && [r.myFT, r.oppFT].every(Number.isFinite); /* v2.5: FT-only row */
-          const nums = [r.myFT, r.oppFT, r.h1, r.oh1, r.h2, r.oh2];
+          const nums = [r.myFT, r.oppFT, r.h1, r.oh1];
           return r?.eventId && nums.every(Number.isFinite);
         });
         if (!rowComplete) errors.push("Team " + side + ": at least one canonical game row is incomplete.");
@@ -37991,9 +36873,7 @@ function validateInputIntegrityForRun(extracted, league) {
       const arr = name => Array.isArray(p[name]) ? p[name].map(Number).filter(Number.isFinite) : [];
       const ftFetched = isFetchedAuthoritative(side, root, "ft");
       const h1Fetched = isFetchedAuthoritative(side, root, "h1");
-      const h2Fetched = isFetchedAuthoritative(side, root, "h2");
       const h1 = h1Fetched ? [] : arr(pre + "1HScored");
-      const h2 = h2Fetched ? [] : arr(pre + "2HScored");
     });
   }
   return { ok: errors.length === 0, errors };
@@ -38036,10 +36916,6 @@ function validateExtractedInputs(extracted, league) {
   chk(parsed.bFTH2H, "FT H2H (B)");
   chk(parsed.a1HH2H, "1H H2H (A)");
   chk(parsed.b1HH2H, "1H H2H (B)");
-  [1, 2, 3, 4].forEach((i) => {
-    chk(parsed[`aQ${i}H2H`], "Q" + i + " H2H (A)");
-    chk(parsed[`bQ${i}H2H`], "Q" + i + " H2H (B)");
-  }); 
   const lineWarnings = validateLinesFromExtracted(league, extracted.lines || {});
   lineWarnings.forEach((w) => errors.push(w));
   if (errors.length)
@@ -38055,7 +36931,6 @@ function validateExtractedInputs(extracted, league) {
 try {
   if (typeof computeFTProjection === "function") window.computeFTProjection = computeFTProjection;
   if (typeof compute1HProjection === "function") window.compute1HProjection = compute1HProjection;
-  if (typeof compute2HProjection === "function") window.compute2HProjection = compute2HProjection;
   if (typeof getPick === "function") window.getPick = getPick;
   if (typeof getConfidenceGrade === "function") window.getConfidenceGrade = getConfidenceGrade;
   if (typeof getH2HWeight === "function") window.getH2HWeight = getH2HWeight;
@@ -38089,7 +36964,7 @@ function scrollResultsIntoViewNow(table) {
 // AUDIT-NAV: calls other labeled calc code: annotateIntelligenceDiagnostics, applyAvailabilityLayer, applyBBMarketGate, applyEdgeMult
 // AUDIT-NAV: (cont.) applySiblingMarketContradictionGate, applySmartLineToPick, applySoftTrackerInfluenceToPicks, avgOrNaN, bbAdvSeries
 // AUDIT-NAV: (cont.) bbApplyBetLimits, bbApplyTeamMemoryAvoid, bbEvalForPick, bbLrApplyToPicks, bbPreAdjustmentForMarket, bbRecordMarginReason
-// AUDIT-NAV: (cont.) bbStrictFinite, buildResultRows, buildWideRangeGateState, clampNumber, compute1HProjection, compute2HProjection
+// AUDIT-NAV: (cont.) bbStrictFinite, buildResultRows, buildWideRangeGateState, clampNumber, compute1HProjection
 // AUDIT-NAV: (cont.) computeCombinedMarginVolatility, computeFTProjection, computeIntelligencePack, (+48 more)
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 /* ============================================================
@@ -38149,14 +37024,9 @@ async function runEngine() {
     typeof hasLockedConfig === "function" && currentLeagueForRun
       ? hasLockedConfig(currentLeagueForRun, "h1")
       : false;
-  // CALC-AUDIT-324.W05 waypoint: declares _lockH2 (calls hasLockedConfig)
-  const _lockH2 =
-    typeof hasLockedConfig === "function" && currentLeagueForRun
-      ? hasLockedConfig(currentLeagueForRun, "h2")
-      : false;
-  window.__liveLockActive = { league: currentLeagueForRun, ft: _lockFt, h1: _lockH1, h2: _lockH2 };
+  window.__liveLockActive = { league: currentLeagueForRun, ft: _lockFt, h1: _lockH1 };
   // CALC-AUDIT-324.W06 waypoint: if-block (calls getLockedParam, getLockedConfigMeta)
-  if (_lockFt || _lockH1 || _lockH2) {
+  if (_lockFt || _lockH1) {
     const _lockFtWeights =
       _lockFt && typeof getLockedParam === "function"
         ? getLockedParam("recencyWeights", currentLeagueForRun, "ft")
@@ -38165,10 +37035,6 @@ async function runEngine() {
       _lockH1 && typeof getLockedParam === "function"
         ? getLockedParam("recencyWeights", currentLeagueForRun, "h1")
         : null;
-    const _lockH2Weights =
-      _lockH2 && typeof getLockedParam === "function"
-        ? getLockedParam("recencyWeights", currentLeagueForRun, "h2")
-        : null;
     window.__phase2FTRecencyWeights = Array.isArray(_lockFtWeights) && _lockFtWeights.length
       ? _lockFtWeights
       : null;
@@ -38176,9 +37042,6 @@ async function runEngine() {
     window.__phase2H1RecencyWeights = Array.isArray(_lockH1Weights) && _lockH1Weights.length
       ? _lockH1Weights
       : window.__phase2FTRecencyWeights;
-    window.__phase2H2RecencyWeights = Array.isArray(_lockH2Weights) && _lockH2Weights.length
-      ? _lockH2Weights
-      : null;
     if (typeof engineDebug === "function") {
       engineDebug("PHASE 7: using Lock Store", {
         league: currentLeagueForRun,
@@ -38226,7 +37089,6 @@ async function runEngine() {
           window.__phase2FTRecencyWeights = null;
           window.__phase2PaceAdjustment = "standard";
           window.__phase2H1RecencyWeights = null;
-          window.__phase2H2RecencyWeights = null; 
         }
       } catch (e) {
         engineDebug(
@@ -38236,7 +37098,6 @@ async function runEngine() {
         window.__phase2FTRecencyWeights = null;
         window.__phase2PaceAdjustment = "standard";
         window.__phase2H1RecencyWeights = null;
-        window.__phase2H2RecencyWeights = null; 
       }
     } catch (e) {
       engineDebug("runEngine failed during phase2 tuning setup: " + (e?.message || String(e)), {
@@ -38245,7 +37106,6 @@ async function runEngine() {
       window.__phase2FTRecencyWeights = null;
       window.__phase2PaceAdjustment = null;
       window.__phase2H1RecencyWeights = null;
-      window.__phase2H2RecencyWeights = null; 
     }
   g_engineDebugLog.unshift(
     `[${new Date().toLocaleTimeString([], { hour12: false })}] ══ NEW RUN ══`,
@@ -38344,7 +37204,7 @@ async function runEngine() {
       return out;
     };
     const getMarginPickForLeague = (edge, marketKey) =>
-      marketAllowedForLeague(marketKey) ? bbRecordMarginReason(marketKey, _liveNoPlayReasons, getMarginPick(edge, league, marketKey)) : ((_liveNoPlayReasons[marketKey] = "market not allowed for league"), "NO PLAY"); /* FIX_GUIDE step 6 */
+      marketAllowedForLeague(marketKey) ? window.bbRecordMarginReason(marketKey, _liveNoPlayReasons, getMarginPick(edge, league, marketKey)) : ((_liveNoPlayReasons[marketKey] = "market not allowed for league"), "NO PLAY"); /* FIX_GUIDE step 6 */
     if (!league) {
       engineDebug("run blocked missing league");
       showRunError(table, "⚠ Select a league first.");
@@ -38393,7 +37253,6 @@ async function runEngine() {
     });
     let verifiedFtConfig = getVerifiedConfig(league, "ft");
     let verifiedH1Config = getVerifiedConfig(league, "h1");
-    let verifiedH2Config = getVerifiedConfig(league, "h2");
     const _runFTWeights =
       window.__phase2FTRecencyWeights || getLeagueRecencyDefaults(currentLeagueForRun);
     const _runH1Weights = window.__phase2H1RecencyWeights || _runFTWeights;
@@ -38426,7 +37285,6 @@ async function runEngine() {
     const finalLines = Object.freeze({
       ftLine: baseLines.ftLine,
       h1Line: baseLines.h1Line,
-      h2Line: lines.h2Line,
       aLine: baseLines.aLine,
       bLine: baseLines.bLine,
       h1aLine: lines.h1aLine,
@@ -38460,15 +37318,11 @@ async function runEngine() {
     }
     let ftConfigOverride = {};
     let h1ConfigOverride = {};
-    let h2ConfigOverride = {};
     if (verifiedFtConfig && verifiedFtConfig.configKey) {
       ftConfigOverride = buildConfigFromVerifiedKey(verifiedFtConfig.configKey);
     }
     if (verifiedH1Config && verifiedH1Config.configKey) {
       h1ConfigOverride = buildConfigFromVerifiedKey(verifiedH1Config.configKey);
-    }
-    if (verifiedH2Config && verifiedH2Config.configKey) {
-      h2ConfigOverride = buildConfigFromVerifiedKey(verifiedH2Config.configKey);
     }
     MODEL_TUNING.recencyWeights = ftConfigOverride.recencyProfile || _runFTWeights;
     const _dynWeights = getDynamicWeights(
@@ -38522,7 +37376,6 @@ async function runEngine() {
     MODEL_TUNING.recencyWeights = h1ConfigOverride.recencyProfile || _runH1Weights;
     /* FIX IND-1: halves do not inherit a slice of the FT team-memory adjustment */
     const _bbTmH1Cfg = null;
-    const _bbTmH2Cfg = null;
     const _h1PreSampleA = getManualSeries("A", "h1", parsed, AppState.context?.data || null);
     const _h1PreSampleB = getManualSeries("B", "h1", parsed, AppState.context?.data || null);
     const _h1PreAllowedA = getManualAllowedSeries("A", "h1", parsed, AppState.context?.data || null);
@@ -38565,44 +37418,6 @@ async function runEngine() {
       },
       contextData: AppState.context?.data || null, 
     }) : { h1Proj: NaN, h1Edge: NaN, aS1: NaN, bS1: NaN, projA1H: NaN, projB1H: NaN, sampleTier1H: "invalid", volatilityError: true };
-    const _h2PreSampleA = getManualSeries("A", "h2", parsed, AppState.context?.data || null);
-    const _h2PreSampleB = getManualSeries("B", "h2", parsed, AppState.context?.data || null);
-    const _h2PreAllowedA = getManualAllowedSeries("A", "h2", parsed, AppState.context?.data || null);
-    const _h2PreAllowedB = getManualAllowedSeries("B", "h2", parsed, AppState.context?.data || null);
-    const _h2VolRatio = (function () {
-      try {
-        const volLim = getMarketVolLimit(league, "h2");
-        const aVol = getCombinedOffDefVolatilityRatio(_h2PreSampleA, _h2PreAllowedB, volLim);
-        const bVol = getCombinedOffDefVolatilityRatio(_h2PreSampleB, _h2PreAllowedA, volLim);
-        if (!bbStrictFinite(aVol) || !bbStrictFinite(bVol)) return NaN; /* BB-FIX #26: missing volatility is unavailable, never 0 */
-        return clampNumber(
-          Math.sqrt(Number(aVol) ** 2 + Number(bVol) ** 2),
-          0.5,
-          2.5,
-        );
-      } catch (e) {
-        engineDebug("H2 volatility calculation failed; H2 forced NO PLAY", { error: e?.message || String(e) });
-        return NaN;
-      }
-    })();
-    const _dynWeightsH2 = getDynamicWeights(
-      getSampleTier(_h2PreSampleA, _h2PreSampleB),
-      _h2VolRatio,
-      league,
-    );
-    const _safeH2W = _dynWeightsH2 || { teamWeight: 0.50, oppWeight: 0.50 };
-    const _runH2Weights = window.__phase2H2RecencyWeights || getLeagueRecencyDefaults(currentLeagueForRun);
-    MODEL_TUNING.recencyWeights = _runH2Weights;
-        /* CALCULATION SECTION */
-    const h2Calc = Number.isFinite(_h2VolRatio) ? compute2HProjection({
-      league,
-      parsed,
-      lines: finalLines,
-      injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
-      injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      config: { ...h2ConfigOverride, teamWeight: _safeH2W.teamWeight, oppWeight: _safeH2W.oppWeight, recencyWeights: h2ConfigOverride.recencyProfile || _runH2Weights, intel: computeIntelligencePack(league, finalLines, parsed, "h2"), h2hFactor: h2ConfigOverride.h2hFactor, teamMemoryAdj: null },
-      contextData: AppState.context?.data || null, 
-    }) : { h2Proj: NaN, h2Edge: NaN, projA2H: NaN, projB2H: NaN, h2SampleTier: "invalid", volatilityError: true };
     MODEL_TUNING.recencyWeights = _runFTWeights;
     /* TEAM MEMORY: hidden audit record for the tracked payload (base = pre-memory projections, used for learning) */
     try {
@@ -38637,21 +37452,6 @@ async function runEngine() {
         };
       }
     } catch (_tmRec) {}
-    const _h2ReconFT = isFinite(ftCalc.ftProj) ? ftCalc.ftProj : NaN;
-    const _h2ReconH1 = isFinite(h1Calc.h1Proj) ? h1Calc.h1Proj : NaN;
-    const _h2ReconH2 = isFinite(h2Calc.h2Proj) ? h2Calc.h2Proj : NaN;
-    const _h2ReconGap =
-      isFinite(_h2ReconFT) && isFinite(_h2ReconH1) && isFinite(_h2ReconH2)
-        ? _h2ReconFT - (_h2ReconH1 + _h2ReconH2)
-        : NaN;
-    if (isFinite(_h2ReconGap) && typeof engineDebug === "function") {
-      engineDebug("2H reconciliation diagnostic (FT − (H1+2H))", {
-        ftProj: _h2ReconFT,
-        h1Proj: _h2ReconH1,
-        h2Proj: _h2ReconH2,
-        gap: _h2ReconGap,
-      });
-    }
     engineDebug("line resolution", {
       resolvedLines: finalLines,
     });
@@ -38659,18 +37459,10 @@ async function runEngine() {
     engineDebug("projection pass 2", {
       ft: summarizeCalcForDebug(ftCalc),
       h1: summarizeCalcForDebug(h1Calc),
-      h2: {
-        h2Proj: h2Calc.h2Proj,
-        projA2H: h2Calc.projA2H,
-        projB2H: h2Calc.projB2H,
-        h2SampleTier: h2Calc.h2SampleTier,
-        reconGap: _h2ReconGap,
-      },
     });
     if (typeof applyEdgeMult === "function") {
       if (Number.isFinite(ftCalc.ftEdge)) ftCalc.ftEdge = applyEdgeMult(ftCalc.ftEdge, league);
       if (Number.isFinite(h1Calc.h1Edge)) h1Calc.h1Edge = applyEdgeMult(h1Calc.h1Edge, league);
-      if (Number.isFinite(h2Calc.h2Edge)) h2Calc.h2Edge = applyEdgeMult(h2Calc.h2Edge, league);
       if (Number.isFinite(ftCalc.aEdge)) ftCalc.aEdge = applyEdgeMult(ftCalc.aEdge, league);
       if (Number.isFinite(ftCalc.bEdge)) ftCalc.bEdge = applyEdgeMult(ftCalc.bEdge, league);
     }
@@ -38692,15 +37484,6 @@ async function runEngine() {
       _edgeAlreadyScaled: true,
     }));
     if (!Number.isFinite(_h1VolRatio)) _liveNoPlayReasons.h1 = "no 1H data entered (or fewer than 3 values per team)";
-    g_currentLiveComputeMarket = "h2";
-    const h2Line = finalLines.h2Line;
-    let h2Pick = !Number.isFinite(_h2VolRatio) ? "NO PLAY" : (rangeBlocks("h2") ? "NO PLAY" : getPickForLeague(h2Calc.h2Edge, h2Line, "h2", {
-      aSc: h2Calc.aS2,
-      bSc: h2Calc.bS2,
-      blowoutGap: (Number.isFinite(h2Calc.projA2H) && Number.isFinite(h2Calc.projB2H) ? Math.abs(h2Calc.projA2H - h2Calc.projB2H) : NaN),
-      _edgeAlreadyScaled: true,
-    }));
-    if (!Number.isFinite(_h2VolRatio)) _liveNoPlayReasons.h2 = "no 2H data entered (or fewer than 3 values per team)";
     g_currentLiveComputeMarket = "team_a";
     let aPick = rangeBlocks("team_a") ? "NO PLAY" : getPickForLeague(ftCalc.aEdge, aLine, "team_a", {
       teamSc: ftCalc.aS,
@@ -38755,12 +37538,6 @@ async function runEngine() {
       _liveNoPlayReasons.h1_team_b = "Insufficient 1H sample";
       h1Calc.h1Proj = NaN;
       h1Calc.h1Edge = NaN;
-    }
-    if (h2Calc && h2Calc.h2SampleTier === "insufficient") {
-      h2Pick = "NO PLAY";
-      _liveNoPlayReasons.h2 = "Insufficient 2H sample";
-      h2Calc.h2Proj = NaN;
-      h2Calc.h2Edge = NaN;
     }
     engineDebug("pick decisions", {
       ft: summarizePickDecisionForDebug(
@@ -38870,52 +37647,6 @@ async function runEngine() {
       league,
     });
     let h1ConfidenceFinal = h1Confidence;
-    const h2VolatilityForConf =
-      (isFinite(h2Calc.h2VolRatio)
-        ? h2Calc.h2VolRatio
-        : Math.max(h2Calc.aVol2 || 0, h2Calc.bVol2 || 0)) * getMarketVolLimit(league, "h2");
-    let h2Trap = marketAllowedForLeague("h2")
-      ? detectTrap(h2Calc.h2Edge, h2Line, h2Pick, league, "h2", h2VolatilityForConf)
-      : false;
-    let h2Confidence = marketAllowedForLeague("h2") ? getConfidenceGrade({
-      pick: h2Pick,
-      note: null,
-      line: h2Line,
-      edge: h2Calc.h2Edge,
-      sampleTier: h2Calc.h2SampleTier,
-      projectionOnly: h2Calc.h2ProjectionOnly,
-      fullModel: h2Calc.h2FullModel,
-      trap: h2Trap,
-      hasH2H: h2Calc.h2HasH2H,
-      paceGapRisk: h2Calc.paceGapRisk,
-      blowoutGap: (Number.isFinite(h2Calc.projA2H) && Number.isFinite(h2Calc.projB2H) ? Math.abs(h2Calc.projA2H - h2Calc.projB2H) : NaN),
-      defensiveFloorFlag: h2Calc.defensiveFloorFlag,
-      volatility: h2VolatilityForConf,
-      volLimit: getMarketVolLimit(league, "h2"),
-      marketKey: "h2",
-      lineupQuality: _lqiShared,
-      injMultA: clampNumber(Number(g_injA?.scoringMult ?? 1), 0.3, 1),
-      injMultB: clampNumber(Number(g_injB?.scoringMult ?? 1), 0.3, 1),
-      injuryFetchFailed: !!(g_injA?.fetchFailed || g_injB?.fetchFailed || g_injA?.emptyFeed || g_injB?.emptyFeed),
-      league,
-    }) : "NaN";
-    const _reconGapThreshold = getReconGapThreshold(ftCalc.ftProj);
-    const _reconGapSevere = isReconGapSevere(_h2ReconGap, _reconGapThreshold);
-    if (_reconGapSevere) {
-      engineDebug("confidence downgraded + trap set: FT vs (H1+H2) reconciliation gap exceeds threshold", {
-        gap: _h2ReconGap,
-        threshold: _reconGapThreshold,
-        ftConfidenceBefore: ftConfidence,
-        h1ConfidenceBefore: h1ConfidenceFinal,
-        h2ConfidenceBefore: h2Confidence,
-      });
-      ftConfidence = downgradeConfidenceForReconGap(ftConfidence);
-      h1ConfidenceFinal = downgradeConfidenceForReconGap(h1ConfidenceFinal);
-      h2Confidence = downgradeConfidenceForReconGap(h2Confidence);
-      ftTrap = true;
-      h1Trap = true;
-      h2Trap = true;
-    }
     const _teamAVolLim = getMarketVolLimit(league, "team_a");
     const _teamBVolLim = getMarketVolLimit(league, "team_b");
     const _aVolTeamScale = Number.isFinite(ftCalc.aVol)
@@ -39136,35 +37867,7 @@ async function runEngine() {
         aVenueAdjustment: h1Calc.aVenueAdjustment,
         bVenueAdjustment: h1Calc.bVenueAdjustment,
       },
-      {
-        _idx: 2,
-        name: "2H Total",
-        marketKey: "h2",
-        marketType: "h2",
-        league,
-        context: { aSc: h2Calc.aS2, bSc: h2Calc.bS2 },
-        line: h2Line,
-        proj: h2Calc.h2Proj,
-        edge: h2Calc.h2Edge,
-        pick: h2Pick,
-        confidence: h2Confidence,
-        note: null,
-        fullModel: h2Calc.h2FullModel,
-        sampleTier: h2Calc.h2SampleTier,
-        hasH2H: h2Calc.h2HasH2H,
-        trap: h2Trap,
-        h2Method: h2Calc.h2Method,
-        h2hWeightApplied: h2Calc.h2hWeightApplied,
-        h2hContribution: h2Calc.h2hContribution,
-        modelType: getConfidenceModelProvenance(league, "h2").modelType,
-        fallbackReason: getConfidenceModelProvenance(league, "h2").fallbackReason,
-        settledResults: getConfidenceModelProvenance(league, "h2").settledResults,
-        requiredResults: getConfidenceModelProvenance(league, "h2").requiredResults,
-        volatility: h2VolatilityForConf,
-        volLimit: getMarketVolLimit(league, "h2"),
-        coeffFitted: _coeffFitted,
-      },
-      {
+            {
         _idx: 3,
         name: "Team A Total" + aBadge,
         marketKey: "team_a",
@@ -39340,7 +38043,6 @@ async function runEngine() {
       : {
           ft: 1,
           h1: 2,
-          h2: 3,
           team_a: 4,
           team_b: 5,
           h1_team_a: 6,
@@ -39364,12 +38066,12 @@ async function runEngine() {
     finalPicksForDisplay.forEach((p) => {
       if (!p) return;
       const mk = String(p.marketKey || "").toLowerCase();
-      const calcMap = { ft: ftCalc, h1: h1Calc, h2: h2Calc, team_a: ftCalc, team_b: ftCalc, h1_team_a: h1Calc, h1_team_b: h1Calc };
+      const calcMap = { ft: ftCalc, h1: h1Calc, team_a: ftCalc, team_b: ftCalc, h1_team_a: h1Calc, h1_team_b: h1Calc };
       const c = calcMap[mk];
       /* BB-FIX #16 (mixed-competition note) removed: H2H is strictly same-competition. */
       if (p.effectiveThreshold == null && Number.isFinite(_liveEffectiveThresholds[p.marketKey])) p.effectiveThreshold = _liveEffectiveThresholds[p.marketKey]; /* BB-FIX: display-only; read by getDisplayedEdgeThreshold */
       if (c && c.fatigueDiag) p.fatigueDiag = c.fatigueDiag; /* BB-FIX #24 */
-      /* BB-FIX #3 (T10): preAdjustmentProj = projection before fatigue AND before injuries, for every market (incl. h2).
+      /* BB-FIX #3 (T10): preAdjustmentProj = projection before fatigue AND before injuries, for every supported market.
          Never falls back to the preFatigue* fields (those still contain injury effects). Missing -> null -> T10 WARN for Unders. */
       p.preAdjustmentProj = bbPreAdjustmentForMarket(mk, c);
     });
@@ -39444,7 +38146,7 @@ async function runEngine() {
     const _bbCapGrade = (p, g) => {
       if (!g || g === "NaN") return g;
       let out = g;
-      if (_reconGapSevere && ["ft", "h1", "h2"].includes(String(p.marketKey || "")) && typeof downgradeConfidenceForReconGap === "function") {
+      if (_reconGapSevere && ["ft", "h1"].includes(String(p.marketKey || "")) && typeof downgradeConfidenceForReconGap === "function") {
         out = downgradeConfidenceForReconGap(out);
       }
       const cap = p.integrityConfidenceCap;
@@ -39601,22 +38303,6 @@ async function runEngine() {
           p.confidence = null;
           return;
         }
-        if (key === "h2") {
-          if ((p.h2Method || h2Calc?.h2Method || "independent") !== "independent") {
-            errors.push("h2: undocumented calculation method");
-          }
-          const expectedRawEdge = finite(p.proj) && finite(p.line) ? Number(p.proj) - Number(p.line) : NaN;
-          const expectedEdge = finite(expectedRawEdge) && typeof applyEdgeMult === "function"
-            ? applyEdgeMult(expectedRawEdge, leagueKey)
-            : expectedRawEdge;
-          if (finite(expectedEdge) && Math.abs(Number(p.edge) - Number(expectedEdge)) > 0.000001) {
-            errors.push("h2: edge does not derive from displayed target/line path");
-          }
-          if (p.h2Method === "derived" && finite(ftCalc.ftProj) && finite(h1Calc.h1Proj) &&
-              Math.abs(Number(p.proj) - (Number(ftCalc.ftProj) - Number(h1Calc.h1Proj))) > 0.01) {
-            errors.push("h2: derived target violates FT-H1");
-          }
-        }
         if (!["logistic", "fallback"].includes(String(p.modelType || ""))) {
           p.modelType = "fallback";
           p.fallbackReason = p.fallbackReason || "default_priors_settled_not_required";
@@ -39633,15 +38319,6 @@ async function runEngine() {
           p.confidenceTrace.modelType = p.modelType;
         }
       });
-      const h2Row = rows.find((x) => x && x.marketKey === "h2");
-      if (h2Row && h2Row.pick !== "NO PLAY" && h2Row.h2Method === "independent") {
-        const independentGap = finite(ftCalc.ftProj) && finite(h1Calc.h1Proj) && finite(h2Row.proj)
-          ? Number(ftCalc.ftProj) - Number(h1Calc.h1Proj) - Number(h2Row.proj)
-          : NaN;
-        if (finite(independentGap) && Math.abs(independentGap) > getReconGapThreshold(ftCalc.ftProj)) {
-          warnings.push("independent FT/H1/H2 gap " + independentGap.toFixed(2) + " (diagnostic only; H2 kept — markets do not share)");
-        }
-      }
       const eventDateAvailable = !!(meta && meta.eventDate);
       if (!eventDateAvailable) warnings.push("event timestamp/date unavailable; retained as null metadata");
       return {
@@ -39769,16 +38446,13 @@ async function runEngine() {
         h1SampleTier: h1Calc.h1SampleTier,
         ftProjectionOnly: ftCalc.ftProjectionOnly,
         h1ProjectionOnly: h1Calc.h1ProjectionOnly,
-        h2ProjectionOnly: h2Calc.h2ProjectionOnly,
         ftHasH2H: ftCalc.ftHasH2H,
         h1HasH2H: h1Calc.h1HasH2H,
         pace: ftCalc.pace,
         paceGapRisk: ftCalc.paceGapRisk,
         h1PaceGapRisk: h1Calc.paceGapRisk,
-        h2PaceGapRisk: h2Calc.paceGapRisk, 
         defensiveFloorFlag: ftCalc.defensiveFloorFlag,
         h1DefensiveFloorFlag: h1Calc.defensiveFloorFlag,
-        h2DefensiveFloorFlag: h2Calc.defensiveFloorFlag, 
         blowoutGap: ftCalc.blowoutGap,
         volatilityBlock: ftCalc.volatilityBlock,
         trap: ftTrap,
@@ -40120,43 +38794,26 @@ function onLeagueChange() {
   if (_espnEl) _espnEl.style.display = _isEspnAuto ? "block" : "none";
   const _sofaEl = document.getElementById("sofascoreManualSection");
   if (_sofaEl) _sofaEl.style.display = !league || _isEspnAuto ? "none" : "block";
+  const _marketLookupEl = document.getElementById("sportyLinesSection");
+  const _allAutoFetch = !!(league && typeof isAutoFetchLeague === "function" && isAutoFetchLeague(league));
+  if (_marketLookupEl) { _marketLookupEl.hidden = _allAutoFetch; _marketLookupEl.style.display = _allAutoFetch ? "none" : "block"; }
   ["a1HSection", "b1HSection", "h2h1HSection"].forEach((id) => {
     const el = document.getElementById(id);
     if (el) el.style.display = leagueVal ? "block" : "none";
   });
-  ["a2HSection", "b2HSection"].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el) el.style.display = leagueVal && !isWnba ? "block" : "none";
-  });
-  const h2h2HSection = document.getElementById("h2h2HSection");
-  if (h2h2HSection) h2h2HSection.style.display = "none";
   const marketCoreGrid = document.getElementById("marketCoreGrid");
   const ftMarketCell = document.getElementById("ftMarketCell");
   const h1MarketEl = document.getElementById("h1MarketSection");
-  const h2MarketEl = document.getElementById("h2MarketSection");
   if (marketCoreGrid && ftMarketCell && h1MarketEl) {
-    if (isWnba) {
-      marketCoreGrid.style.gridTemplateAreas = '"ft h1"';
-      ftMarketCell.style.gridArea = "ft";
-      h1MarketEl.style.gridArea = "h1";
-    } else {
-      marketCoreGrid.style.gridTemplateAreas = '"ft h1" "h2 h2"';
-      ftMarketCell.style.gridArea = "ft";
-      h1MarketEl.style.gridArea = "h1";
-    }
+    marketCoreGrid.style.gridTemplateAreas = '"ft h1"';
+    ftMarketCell.style.gridArea = "ft";
+    h1MarketEl.style.gridArea = "h1";
   }
   if (h1MarketEl) h1MarketEl.style.display = leagueVal ? "block" : "none";
   const h1TeamEl = document.getElementById("h1TeamMarketSection");
   if (h1TeamEl) h1TeamEl.style.display = leagueVal && !isWnba ? "grid" : "none";
   const h1MarketElManual = document.getElementById("h1MarketSection");
   if (h1MarketElManual) h1MarketElManual.style.display = leagueVal ? "block" : "none";
-  const h2Input = document.getElementById("h2Market");
-  if (h2MarketEl) h2MarketEl.style.display = leagueVal && !isWnba ? "block" : "none";
-  if (h2Input) {
-    h2Input.disabled = !!isWnba || !leagueVal;
-    if (isWnba || !leagueVal) h2Input.value = "";
-  }
-  if (h2MarketEl) h2MarketEl.style.gridArea = "h2";
   if (!_isEspnAuto) {
     ["aAutoTag", "bAutoTag", "h2hAutoTag"].forEach((id) => {
       const el = document.getElementById(id);
@@ -40503,20 +39160,17 @@ const fixtureSelect = document.getElementById("fixtureSelect");
   });
   const bucketMap = {};
   [
-    "aFTScored","aFTAllowed","a1HScored","a1HAllowed","a2HScored","a2HAllowed",
+    "aFTScored","aFTAllowed","a1HScored","a1HAllowed",
     "aFTScoredHome","aFTAllowedHome","aFTScoredAway","aFTAllowedAway",
     "a1HScoredHome","a1HAllowedHome","a1HScoredAway","a1HAllowedAway",
-    "a2HScoredHome","a2HAllowedHome","a2HScoredAway","a2HAllowedAway",
-    "bFTScored","bFTAllowed","b1HScored","b1HAllowed","b2HScored","b2HAllowed",
+    "bFTScored","bFTAllowed","b1HScored","b1HAllowed",
     "bFTScoredHome","bFTAllowedHome","bFTScoredAway","bFTAllowedAway",
     "b1HScoredHome","b1HAllowedHome","b1HScoredAway","b1HAllowedAway",
-    "b2HScoredHome","b2HAllowedHome","b2HScoredAway","b2HAllowedAway",
   ].forEach(function(id){
     const side = id.charAt(0) === "a" ? "A" : "B";
     const rest = id.slice(1);
     let market = "ft";
     if (/^1H/i.test(rest)) market = "h1";
-    else if (/^2H/i.test(rest)) market = "h2";
     bucketMap[id] = [side, market];
   });
   Object.entries(bucketMap).forEach(([id, [side, bucket]]) => {
@@ -40553,7 +39207,6 @@ const fixtureSelect = document.getElementById("fixtureSelect");
     "teamAMarket",
     "teamBMarket",
     "h1Market",
-    "h2Market",
     "h1TeamAMarket",
     "h1TeamBMarket",
   ].forEach((id) => {
@@ -40611,8 +39264,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
         "teamBName",
         "ftMarket",
         "h1Market",
-        "h2Market",
-        "teamAMarket",
+            "teamAMarket",
         "teamBMarket",
         "h1TeamAMarket",
         "h1TeamBMarket",
