@@ -1,4 +1,12 @@
 <!--
+BB ENGINE FIX RECORD v9 (11 Oct 2026)
+- FIXED the crash "runEngine crashed: Can't find variable: _h1": applySiblingMarketContradictionGate used _h1 without declaring it.
+- RESTORED bbIsFriendlyEvent (was never defined; every caller threw) and the body of ssProcessTeamEvents_LEGACY (section was empty; rebuilt from its consumers, FT/1H only).
+- REMOVED leftovers of removed features: recon-gap (FT vs 1H+2H) code and tests, edgeH2PointThreshold, h2_team_b, hcp handicap specifier in the SportyBet line picker, H2 wording.
+- REMOVED the HT/FT market (it settled on the second-half result) and dead hooks to helpers that never existed (_ssEventStatsCache, g_historicalGamesStore, bbLinesAfterRun, gradeFromWinProb).
+- FIXED 1H for 2-period leagues in bbPerVal (was period1+period2 = full game). Removed dead call to undefined bbApplyMoveWarn.
+-->
+<!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
 - Removed bookmaker-price eligibility and staking; edge thresholds plus existing secondary gates determine live picks.
@@ -294,6 +302,20 @@ function bbStoreSave(s) {
     localStorage.setItem(BB_STORE_KEY, JSON.stringify(s));
   } catch (_e) {}
 }
+/* RESTORED: bbIsFriendlyEvent had no definition anywhere, so every caller threw a ReferenceError
+   (bbStoreIngest swallowed it per event and stored nothing; ssProcessTeamEvents and the H2H paste path crashed). */
+function bbIsFriendlyEvent(ev) {
+  try {
+    if (!ev) return false;
+    var lg = "";
+    try { lg = String((document.getElementById("leagueSelect") || {}).value || "").toLowerCase(); } catch (_eL) {}
+    if (lg === "intl_friendly" || lg === "club_friendly") return false; /* analysing a friendly league: its own games are the sample */
+    var ut = (ev.tournament && ev.tournament.uniqueTournament) || {};
+    var txt = [ev.tournament && ev.tournament.name, ev.tournament && ev.tournament.slug, ut.name, ut.slug, ev.season && ev.season.name, ev.roundInfo && ev.roundInfo.name]
+      .map(function (x) { return String(x || ""); }).join(" ").toLowerCase();
+    return /friendl|exhibition|all-?star/.test(txt);
+  } catch (_e) { return false; }
+}
 // ========== CALC-AUDIT-020: EXPECTED VALUE AND BETTING CALCULATIONS — BEGIN ==========
 // AUDIT-NAV: members: bbRegScore
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
@@ -351,7 +373,13 @@ function bbPerVal(rec, isHome, period) {
   if (period === "ft") return isHome ? rec.hr : rec.ar;
   var p = isHome ? rec.hp : rec.ap; if (!p) return NaN;
   var g = function (i) { return p[i] == null ? NaN : p[i]; };
-  if (period === "h1") return g(0) + g(1);
+  if (period === "h1") {
+    /* 2-period leagues (e.g. NCAA men) store only period1/period2 and no period3/4: the first half is period1 alone.
+       Detected by the two stored periods adding up to the regulation score; a 4-period game with missing data never matches. */
+    var reg = isHome ? rec.hr : rec.ar;
+    if (p[2] == null && p[3] == null && Number.isFinite(g(0)) && Number.isFinite(g(1)) && Math.abs(g(0) + g(1) - reg) < 0.5) return g(0);
+    return g(0) + g(1);
+  }
   return NaN;
 }
 // ========== CALC-AUDIT-022: CORE NUMERIC HELPERS — END ==========
@@ -592,9 +620,9 @@ function bbSportyPickLine(markets, id, wantLine) {
   var list = (markets || []).filter(function (m) {
     return String(m.id) === String(id) &&
       (m.status == null || Number(m.status) === 0 || Number(m.status) === 1) &&
-      /(?:total|hcp)=-?[\d.]+/.test(String(m.specifier || ""));
+      /total=-?[\d.]+/.test(String(m.specifier || ""));
   }).map(function (m) {
-    var mt = /(?:total|hcp)=(-?[\d.]+)/.exec(String(m.specifier || ""));
+    var mt = /total=(-?[\d.]+)/.exec(String(m.specifier || ""));
     return mt ? { line: Number(mt[1]), specifier: String(m.specifier || "") } : null;
   }).filter(function (x) { return x && Number.isFinite(x.line); });
   if (!list.length) return null;
@@ -5262,8 +5290,133 @@ function ssProcessTeamEvents(events, teamId, label, fixtureTournamentId, predict
 // ========== CALC-AUDIT-046: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — BEGIN ==========
 // AUDIT-NAV: members: ssProcessTeamEvents_LEGACY [MIXED]
 // AUDIT-NAV: [MIXED] = also touches DOM, storage, network or timers; calculation and non-calculation code intentionally NOT separated.
-// AUDIT-NAV: calls other labeled calc code: filterEventsAsOf, resolvePredictionAsOf, ssFinalFtPoints, updateLeagueVolCache
+// AUDIT-NAV: calls other labeled calc code: filterEventsAsOf, resolvePredictionAsOf, ssFinalFtPoints
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
+/* RESTORED: the body of ssProcessTeamEvents_LEGACY was missing (empty audit section) while ssProcessTeamEvents still called it,
+   so pasting SofaScore events crashed. Rebuilt from what its consumers read (updateTeamUIFromStats, bbAdjustTeamStats,
+   validateInputIntegrityForRun, setTeamInputIntegrityTag). FT/1H only: no handicap, quarter or 2H data is produced. */
+function ssProcessTeamEvents_LEGACY(events, teamId, label, fixtureTournamentId, predictionAsOf) {
+  const tid = String(teamId == null ? "" : teamId).trim();
+  if (!tid || !Array.isArray(events) || !events.length) return null;
+  let evs = events.filter(function (ev) { return ev && ev.id != null && ev.homeTeam && ev.awayTeam; });
+  try {
+    const asOf = predictionAsOf || (typeof resolvePredictionAsOf === "function" ? resolvePredictionAsOf(null, null) : null);
+    if (asOf && typeof filterEventsAsOf === "function") evs = filterEventsAsOf(evs, asOf);
+  } catch (_eAsOf) {}
+  let regP = 4;
+  try {
+    const lg = String((document.getElementById("leagueSelect") || {}).value || "");
+    if (typeof LEAGUE_FETCH_RULES !== "undefined" && LEAGUE_FETCH_RULES[lg]) regP = Number(LEAGUE_FETCH_RULES[lg].regulationPeriods) || 4;
+  } catch (_eReg) {}
+  const twoP = regP <= 2;
+  const perN = function (o, k) {
+    if (!o || o[k] == null || o[k] === "") return NaN;
+    const n = Number(o[k]);
+    return Number.isFinite(n) ? n : NaN;
+  };
+  /* first half = period1 (2-period leagues) or period1 + period2 (4-period leagues); overtime is never included */
+  const firstHalf = function (o) {
+    const p1 = perN(o, "period1");
+    if (twoP) return p1;
+    const p2 = perN(o, "period2");
+    return Number.isFinite(p1) && Number.isFinite(p2) ? p1 + p2 : NaN;
+  };
+  const seen = new Set();
+  const rows = [];
+  evs.forEach(function (ev) {
+    const sType = String((ev.status && ev.status.type) || "");
+    if (!(sType === "finished" || sType === "afterExtraTime" || (ev.status && ev.status.finished === true))) return;
+    const sport = String((ev.tournament && ev.tournament.category && ev.tournament.category.sport && ev.tournament.category.sport.slug) || "basketball");
+    if (sport !== "basketball") return;
+    const hId = String(ev.homeTeam.id == null ? "" : ev.homeTeam.id);
+    const aId = String(ev.awayTeam.id == null ? "" : ev.awayTeam.id);
+    if (hId === aId || (hId !== tid && aId !== tid)) return;
+    const id = String(ev.id);
+    if (seen.has(id)) return;
+    seen.add(id);
+    if (bbIsFriendlyEvent(ev)) return;
+    const ts = Number(ev.startTimestamp) || 0;
+    if (ts && typeof isGameOnOrAfter2022 === "function" && !isGameOnOrAfter2022(ts)) return;
+    const isHome = hId === tid;
+    const mine = isHome ? ev.homeScore : ev.awayScore;
+    const opp = isHome ? ev.awayScore : ev.homeScore;
+    const myFT = ssFinalFtPoints(mine);
+    const oppFT = ssFinalFtPoints(opp);
+    if (!(myFT > 0 && oppFT > 0)) return;
+    const h1 = firstHalf(mine);
+    const oh1 = firstHalf(opp);
+    const hasH1 = Number.isFinite(h1) && Number.isFinite(oh1) && h1 > 0 && oh1 > 0;
+    rows.push({
+      eventId: id,
+      ts: ts,
+      date: ts ? new Date(ts * 1000).toISOString() : null,
+      venue: isHome ? "home" : "away",
+      myFT: myFT,
+      oppFT: oppFT,
+      h1: hasH1 ? h1 : NaN,
+      oh1: hasH1 ? oh1 : NaN,
+      noPeriods: !hasH1,
+    });
+  });
+  rows.sort(function (a, b) { return b.ts - a.ts; });
+  if (rows.length < 2) return null;
+  const top10 = function (arr) { return arr.slice(0, 10); };
+  const overall = top10(rows);
+  const homeRows = top10(rows.filter(function (r) { return r.venue === "home"; }));
+  const awayRows = top10(rows.filter(function (r) { return r.venue === "away"; }));
+  const h1Rows = top10(rows.filter(function (r) { return !r.noPeriods; }));
+  const h1HomeRows = top10(rows.filter(function (r) { return r.venue === "home" && !r.noPeriods; }));
+  const h1AwayRows = top10(rows.filter(function (r) { return r.venue === "away" && !r.noPeriods; }));
+  const col = function (arr, k) { return arr.map(function (r) { return r[k]; }); };
+  const completeOverall = overall.filter(function (r) {
+    return Number.isFinite(r.myFT) && Number.isFinite(r.oppFT) && (r.noPeriods || (Number.isFinite(r.h1) && Number.isFinite(r.oh1)));
+  }).length;
+  const uniqueIds = new Set(overall.map(function (r) { return r.eventId; })).size === overall.length;
+  return {
+    label: label,
+    teamId: tid,
+    scoredList: col(overall, "myFT"),
+    allowedList: col(overall, "oppFT"),
+    eventIds: col(overall, "eventId"),
+    ftScoredDates: col(overall, "date"),
+    ftAllowedDates: col(overall, "date"),
+    lastGameDate: overall[0].date || null,
+    homeScoredList: col(homeRows, "myFT"),
+    homeAllowedList: col(homeRows, "oppFT"),
+    homeScoredDates: col(homeRows, "date"),
+    homeAllowedDates: col(homeRows, "date"),
+    awayScoredList: col(awayRows, "myFT"),
+    awayAllowedList: col(awayRows, "oppFT"),
+    awayScoredDates: col(awayRows, "date"),
+    awayAllowedDates: col(awayRows, "date"),
+    h1ScoredList: col(h1Rows, "h1"),
+    h1AllowedList: col(h1Rows, "oh1"),
+    h1ScoredDates: col(h1Rows, "date"),
+    h1AllowedDates: col(h1Rows, "date"),
+    h1HomeScoredList: col(h1HomeRows, "h1"),
+    h1HomeAllowedList: col(h1HomeRows, "oh1"),
+    h1HomeScoredDates: col(h1HomeRows, "date"),
+    h1HomeAllowedDates: col(h1HomeRows, "date"),
+    h1AwayScoredList: col(h1AwayRows, "h1"),
+    h1AwayAllowedList: col(h1AwayRows, "oh1"),
+    h1AwayScoredDates: col(h1AwayRows, "date"),
+    h1AwayAllowedDates: col(h1AwayRows, "date"),
+    overallGameRows: overall,
+    venueGameRows: { home: homeRows, away: awayRows },
+    periodGameRows: h1Rows,
+    venuePeriodGameRows: { home: h1HomeRows, away: h1AwayRows },
+    inputIntegrity: {
+      ok: completeOverall >= 8 && uniqueIds,
+      overallAligned: uniqueIds,
+      completeOverall: completeOverall,
+      overallGameRows: overall,
+    },
+    ortg10: [],
+    drtg10: [],
+    pace10: [],
+    venueReliable: homeRows.length >= 2 || awayRows.length >= 2,
+  };
+}
 // ========== CALC-AUDIT-046: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — END ==========
 /* removed unused ssIsNcaaSofaLeague */
 function ssRenderPaceStatus() {
@@ -7249,7 +7402,7 @@ const TUNABLE_PARAM_REGISTRY = {
     scope: "global",
     appliesTo: ["ft"],
     description:
-      "Weight given to the ESPN-boxscore-derived pace/ortg/drtg blend vs. the points-path projection. H1/H2 are points-only and do not consume this parameter.",
+      "Weight given to the ESPN-boxscore-derived pace/ortg/drtg blend vs. the points-path projection. The 1H market is points-only and does not consume this parameter.",
     lastVerifiedAt: null,
   },
   confidenceAThresh: {
@@ -7328,7 +7481,7 @@ const TUNABLE_PARAM_REGISTRY = {
     type: "scalar",
     scope: "league",
     appliesTo: ["ft"],
-    description: "ESPN advanced-ratings offense weight used by the FT advanced path. H1/H2 are points-only.",
+    description: "ESPN advanced-ratings offense weight used by the FT advanced path. 1H is points-only.",
     lastVerifiedAt: null,
   },
   advBetaDefense: {
@@ -7338,7 +7491,7 @@ const TUNABLE_PARAM_REGISTRY = {
     type: "scalar",
     scope: "league",
     appliesTo: ["ft"],
-    description: "ESPN advanced-ratings opponent-defense weight used by the FT advanced path. H1/H2 are points-only.",
+    description: "ESPN advanced-ratings opponent-defense weight used by the FT advanced path. 1H is points-only.",
     lastVerifiedAt: null,
   },
   edgeMult: {
@@ -7854,7 +8007,6 @@ function getTunerConfigSnapshot(league, marketKey) {
     "injuryOppBoostFactor",
     "edgeFTPointThreshold",
     "edgeH1PointThreshold",
-    "edgeH2PointThreshold",
     "edgeTeamPointThreshold",
     "confidenceAThresh",
     "confidenceBThresh",
@@ -9229,7 +9381,7 @@ function validateLockedConfig(league, market, games, opts) {
   }
   let gameList = Array.isArray(games) ? games : null;
   if (!gameList) {
-    const historicalStore = typeof g_historicalGamesStore !== "undefined" ? g_historicalGamesStore : [];
+    const historicalStore = [];
     gameList = (Array.isArray(historicalStore) ? historicalStore : []).filter(
       function (g) {
         return String(g.league || "nba").toLowerCase() === lk;
@@ -10364,7 +10516,7 @@ function actualForMarket(pick) {
   const mk = String(pick.marketKey || pick.snapshot?.marketKey || "").toLowerCase();
   const raw = pick.actualScore;
   if (raw == null || raw === "") return NaN;
-  if (mk === "winner" || mk === "htft" || mk.indexOf("margin") === 0) return NaN;
+  if (mk === "winner" || mk.indexOf("margin") === 0) return NaN;
   if (typeof raw === "number" && Number.isFinite(raw)) return raw;
   const s = String(raw).trim();
   const parsed = typeof parseFinalScore === "function" ? parseFinalScore(s) : { total: parseFloat(s), home: NaN, away: NaN };
@@ -10384,7 +10536,7 @@ function actualForMarket(pick) {
     const n = /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/.test(s) ? Number(s) : NaN;
     return Number.isFinite(n) ? n : NaN;
   }
-  if (mk === "winner" || mk === "htft" || mk.indexOf("margin") === 0) return NaN;
+  if (mk === "winner" || mk.indexOf("margin") === 0) return NaN;
   return Number.isFinite(parsed.total) ? parsed.total : NaN;
 }
 // ========== CALC-AUDIT-082: CALIBRATION, TUNING AND BACKTESTING — END ==========
@@ -13636,7 +13788,6 @@ function getLiveConfigFingerprint(league) {
       "recencyWeights",
       "edgeMult",
       "injuryMult",
-      "edgeH2PointThreshold",
       "pickBlowoutThresholdMult",
       "h2hBlowoutGapThreshold",
     ];
@@ -13713,7 +13864,7 @@ function isPickEligibleForLearning(pick) {
       ? parseFinalScore(pick.actualScore)
       : { total: parseFloat(pick.actualScore) };
   const mkt = String(pick.marketKey || "").toLowerCase();
-  if (mkt === "winner" || mkt === "htft") {
+  if (mkt === "winner") {
     if (pick.actualScore == null || pick.actualScore === "") return false;
   } else if (typeof actualForMarket === "function") {
     if (!Number.isFinite(actualForMarket(pick))) return false;
@@ -15809,10 +15960,6 @@ const AFDB = (function () {
     if (typeof _schedCache !== "undefined") _schedCache.clear();
     if (typeof _summaryCache !== "undefined") _summaryCache.clear();
     try {
-      if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
-        _ssEventStatsCache.clear();
-    } catch (_eSs2) {}
-    try {
       if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
         _proxyFetchCache.clear();
     } catch (_ePf2) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _ePf2); }
@@ -17883,7 +18030,7 @@ function applySiblingMarketContradictionGate(picks, rawMarketInputs) {
   if (_fin(_ta) && _fin(_tb) && _fin(_ft)) {
     blockOutlier(["team_a", "team_b", "ft"], "Market contradiction: Team A + Team B vs FT lines");
   }
-  const _h1a = lineOf("h1_team_a"), _h1b = lineOf("h1_team_b");
+  const _h1 = lineOf("h1"), _h1a = lineOf("h1_team_a"), _h1b = lineOf("h1_team_b");
   if (_fin(_h1a) && _fin(_h1b) && _fin(_h1)) {
     blockOutlier(["h1_team_a", "h1_team_b", "h1"], "Market contradiction: 1H Team A + 1H Team B vs 1H lines");
   }
@@ -24256,7 +24403,7 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
   const marketLine = parseFloat(pick.line);
   if (
     isNaN(marketLine) &&
-    !["winner", "margin_team", "margin_any", "htft", "player"].includes(market)
+    !["winner", "margin_team", "margin_any", "player"].includes(market)
   )
     return "pending";
   let actual = 0;
@@ -24350,17 +24497,6 @@ function _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSe
     if (!isTeamAHome && String(pick.homeId || "") === "") return "pending";
     if (!Number.isFinite(h1Home) || !Number.isFinite(h1Away)) return "pending";
     actual = isTeamAHome ? h1Away : h1Home;
-  } else if (market === "htft") {
-    if ((!isFinite(h1Home) || !isFinite(h1Away) || (h1Home === 0 && h1Away === 0))) return "pending";
-    const _hf = bbTeamAIsAway; /* AUDIT-FIX F4: HT/FT text is in Team A (= "Home") frame */
-    const _h1H = _hf ? h1Away : h1Home, _h1A = _hf ? h1Home : h1Away, _fH = _hf ? sAway : sHome, _fA = _hf ? sHome : sAway;
-    const h1Lead = _h1H > _h1A ? "Home" : _h1H < _h1A ? "Away" : "Tie";
-    const ftLead = _fH > _fA ? "Home" : _fH < _fA ? "Away" : "Tie";
-    const actualStr = (h1Lead + "/" + ftLead).toUpperCase();
-    pick.actualScore = actualStr;
-    const isWin = actualStr === String(pick.predictionText).toUpperCase();
-    pick.engineResultStatus = isWin ? "win" : "loss";
-    return isWin ? "win" : "loss";
   } else if (market === "margin_any" || market === "margin_team") {
     const diff = Math.abs(sHome - sAway);
     const winner = (bbTeamAIsAway ? sAway > sHome : sHome > sAway) ? "Home" : (bbTeamAIsAway ? sAway < sHome : sHome < sAway) ? "Away" : "Tie"; /* AUDIT-FIX F4 */
@@ -25453,30 +25589,13 @@ function getCombinedOffDefVolatilityRatio(scoredSeries, allowedSeries, leagueVol
   return Math.min(2.5, Math.sqrt(0.50 * sdS * sdS + 0.50 * sdA * sdA) / limit);
 }
 // ========== CALC-AUDIT-213: OFFENSIVE AND DEFENSIVE MODELING AND ADJUSTMENTS — END ==========
-// ========== CALC-AUDIT-214: PICK AND SIGNAL EVALUATION — BEGIN ==========
-// AUDIT-NAV: members: getReconGapThreshold, isReconGapSevere, downgradeConfidenceForReconGap
-// AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
-/* CALCULATION SECTION */
-function getReconGapThreshold(ftProj) {
-  return Math.max(6, (isFinite(ftProj) ? ftProj : 0) * 0.04);
-}
-/* CALCULATION SECTION */
-function isReconGapSevere(reconGap, threshold) {
-  return isFinite(reconGap) && isFinite(threshold) && Math.abs(reconGap) > threshold;
-}
-/* CALCULATION SECTION */
-function downgradeConfidenceForReconGap(grade) {
-  if (grade === "A") return "B";
-  if (grade === "B") return "C";
-  return grade;
-}
-// ========== CALC-AUDIT-214: PICK AND SIGNAL EVALUATION — END ==========
+/* removed recon-gap helpers: they compared FT with 1H+2H, and 2H no longer exists */
 // ========== CALC-AUDIT-215: CALIBRATION, TUNING AND BACKTESTING — BEGIN ==========
 // AUDIT-NAV: members: window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() { cons [MIXED]
 // AUDIT-NAV: [MIXED] = also touches DOM, storage, network or timers; calculation and non-calculation code intentionally NOT separated.
 // AUDIT-NAV: calls other labeled calc code: buildConfidenceFeatures, clipProjectionToBaseline, derivePeriodAdvanced, distributionWinProbability
-// AUDIT-NAV: (cont.) downgradeConfidenceForReconGap, getConfidenceGrade, getMarketVolLimit, getPeriodAdvancedSeries, getReconGapThreshold, getSampleTier
-// AUDIT-NAV: (cont.) isReconGapSevere, resolveConfidenceGradeFromWinProbability
+// AUDIT-NAV: (cont.) getConfidenceGrade, getMarketVolLimit, getPeriodAdvancedSeries, getSampleTier
+// AUDIT-NAV: (cont.) resolveConfidenceGradeFromWinProbability
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
   const fails = [];
@@ -25517,23 +25636,6 @@ window.__BB_RUN_MATH_TESTS__ = function __BB_RUN_MATH_TESTS__() {
     assert(
       clipProjectionToBaseline(50, [90, 100, 110], 12, "nba") === 50,
       "clipProjectionToBaseline must preserve a legitimate low-tail projection rather than hard-clipping it",
-    );
-  }
-  if (typeof isReconGapSevere === "function" && typeof getReconGapThreshold === "function") {
-    const _t = getReconGapThreshold(200);
-    assert(
-      isReconGapSevere(_t - 0.01, _t) === false,
-        );
-    assert(
-      isReconGapSevere(_t + 0.01, _t) === true,
-        );
-  }
-  if (typeof downgradeConfidenceForReconGap === "function") {
-    assert(
-      downgradeConfidenceForReconGap("A") === "B" &&
-        downgradeConfidenceForReconGap("B") === "C" &&
-        downgradeConfidenceForReconGap("C") === "C",
-      "downgradeConfidenceForReconGap must step A→B→C and never raise a grade back up",
     );
   }
   if (typeof getPeriodAdvancedSeries === "function") {
@@ -25975,7 +26077,7 @@ function computeEffectivePointThreshold(league, marketKey, signedEdge, context) 
   let pointThreshold = getLeagueEdgePointThreshold(league, marketKey);
   const baseThreshold = pointThreshold;
   /* BB-FIX (Under factor alignment): the main gate now also honours the per-market factor the T10 / warning gates already use
-     (bbUnderEdgeFactor: 1.6 for h2, team_a/b, h1_team_a/b while underEdgeFactor is untuned at 1.5).
+     (bbUnderEdgeFactor: 1.6 for team_a/b, h1_team_a/b while underEdgeFactor is untuned at 1.5).
      The factor is max(legacy factor, per-market factor), so this can only make an Under stricter, never easier; tuned values, league/market
      overrides and the 1.3 floor resolve exactly as before. An explicit context.underEdgeFactorOverride (tuner / backtest candidate) is used as-is. */
   const _uefLegacyRaw = context?.underEdgeFactorOverride != null
@@ -26096,7 +26198,7 @@ function getLineMoveAgainstSide(league, marketType, currentLine, side) {
   if (Math.abs(delta) < 0.25)
     return { available: true, delta: delta, adverse: false, openLine: mem.openLine };
   const s = String(side || "").toLowerCase();
-  const commonLineConvention = !(mk === "team_b" || mk === "h1_team_b" || mk === "h2_team_b");
+  const commonLineConvention = !(mk === "team_b" || mk === "h1_team_b");
   const adverse = commonLineConvention
     ? (s === "over" || s === "away" ? delta < -0.25 : s === "under" || s === "home" ? delta > 0.25 : false)
     : (s === "over" || s === "home" ? delta < -0.25 : s === "under" || s === "away" ? delta > 0.25 : false);
@@ -26449,7 +26551,7 @@ function buildConfidenceFeatures(pickOrArgs) {
   const edgeUnit = String(p.edgePctUnit || p.godsEyeMemory?.edgePctUnit || "").toLowerCase();
   if (Number.isFinite(edgeFrac)) {
     if (edgeUnit === "percent" || edgeUnit === "percentage_points") edgeFrac /= 100;
-    else if (edgeUnit === "fraction") edgeFrac = edgeFrac;
+    else if (edgeUnit === "fraction") { /* already a fraction: keep as is */ }
     else if (Math.abs(edgeFrac) > 0.15) edgeFrac /= 100;
   }
   /* Missing edge stays NaN; unknown edge is not a valid zero-edge training feature. */
@@ -31222,7 +31324,7 @@ async function fetchKblCore(league, teamAName, teamBName) {
       })
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0))
       .slice(0, 24);
-    /* KBL source detail: list rows can omit period scores; match detail fills the source scores for correct FT/H1/H2 totals.
+    /* KBL source detail: list rows can omit period scores; match detail fills the source scores for correct FT/H1 totals.
        most recent A-or-B games were enriched, so older head-to-head meetings had no H1/Q values. Also enrich
        the 5 most recent A-vs-B meetings. */
     const _kblH2hIds = new Set(teamGames.map((g) => String(g.id)));
@@ -31354,7 +31456,7 @@ async function fetchKblCore(league, teamAName, teamBName) {
     }
     /* FIX KBL-CTX: g_fetchMeta marks KBL inputs as fetched-authoritative, so the engine reads series from
        AppState.context.data[side].overall — which this path never built (left null / stale from the previous
-       match). Every FT/H1/H2/team market was "Insufficient FT sample" with 10 games in the boxes. Build the same
+       match). Every FT/H1/team market was "Insufficient FT sample" with 10 games in the boxes. Build the same
        context shape as the EuroLeague path. */
     {
       const _kblEventDate = String(selectedFixture?.dataset?.eventDate || "");
@@ -32532,7 +32634,7 @@ function filterNumericSeriesWithParallelDates(values, dates, predictionDate) {
 }
 // ========== CALC-AUDIT-271: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — END ==========
 /* CALCULATION SECTION */
-/* BB-FIX #14: competition tags aligned to one series by date (a short H1/H2/Q series no longer loses its tags) */
+/* BB-FIX #14: competition tags aligned to one series by date (a short 1H series no longer loses its tags) */
 function bbTagsForSeries(ctx, arr, dates) {
   const tags = Array.isArray(ctx && ctx.competitionTags) ? ctx.competitionTags : null;
   if (!tags || !Array.isArray(arr) || !arr.length) return null;
@@ -33168,7 +33270,7 @@ function formatEdge(edge, line) {
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 /* CALCULATION SECTION */
 function getMarketKeyFromName(name, marketKeyOverride) {
-  const validKeys = ["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b", "player", "winner", "htft", "margin_team", "margin_any", "w_ou", "race", "h1_teams"];
+  const validKeys = ["ft", "h1", "team_a", "team_b", "h1_team_a", "h1_team_b", "player", "winner", "margin_team", "margin_any", "w_ou", "race", "h1_teams"];
   if (validKeys.includes(String(marketKeyOverride || "").toLowerCase())) return String(marketKeyOverride).toLowerCase();
   const n = String(name || "");
   if (n.startsWith("Winner & Total")) return "w_ou";
@@ -33181,7 +33283,6 @@ function getMarketKeyFromName(name, marketKeyOverride) {
   if (n.startsWith("Team B Total")) return "team_b";
   if (n.startsWith("Team A 1H")) return "h1_team_a";
   if (n.startsWith("Team B 1H")) return "h1_team_b";
-  if (n.startsWith("HT/FT")) return "htft";
   if (n.startsWith("Winning Margin (Team)")) return "margin_team";
   if (n.startsWith("Winning Margin (Any)")) return "margin_any";
   return "other";
@@ -33256,7 +33357,7 @@ function isPlausibleBasketballPace(value, fraction = 1) {
 function sanitizePredictionResult(result, marketKey = "ft", reason = "non_finite_prediction") {
   if (!result || typeof result !== "object") return noPlayProjectionResult(marketKey, reason);
   /* FIX PROJ-NaN: edges (and confidence / winProbability) are NaN whenever the market line is blank. That means
-     "no line yet", not a broken projection. Previously any NaN edge replaced the WHOLE FT/H1/H2 result with a
+     "no line yet", not a broken projection. Previously any NaN edge replaced the WHOLE FT/H1 result with a
      NO PLAY stub (all projections null), so a blank line wiped finite projections (unsupported markets do not pass
      through here, stayed finite). Projections must be finite; edge-type keys may be NaN but never ±Infinity. */
   const projectionKeys = ["projection", "proj", "ftProj", "projAFT", "projBFT", "h1Proj", "projA1H", "projB1H"];
@@ -33545,7 +33646,7 @@ function bbTmExtractGames(picks, aliases) {
       /* FIX SC3: scorelines are stored Team A first for every market (manual and automatic) */
       const sl = bbTmParseScoreline(p.actualScore);
       const per = (mk === "h1" || mk.indexOf("h1_") === 0) ? "h1" : "ft";
-      if (sl && mk !== "htft") {
+      if (sl) {
         if (per === "ft") { set("actA", sl.a); set("actB", sl.b); }
         else if (per === "h1") { set("actH1A", sl.a); set("actH1B", sl.b); }
       }
@@ -35559,9 +35660,7 @@ function calibrateConfidenceModel() {
     try {
       if (typeof _proposedWinProb === "function") {
         const wp = _proposedWinProb(p);
-        if (Number.isFinite(wp) && typeof gradeFromWinProb === "function") {
-          grade = String(gradeFromWinProb(wp, p) || grade).toUpperCase();
-        } else if (Number.isFinite(wp)) {
+        if (Number.isFinite(wp)) {
           grade = wp >= 0.72 ? "A" : wp >= 0.64 ? "B" : wp >= 0.56 ? "C" : "D";
         }
       }
@@ -35897,7 +35996,6 @@ function buildTrackedPickPayload({
     "player",
     "w_ou",
     "race",
-    "htft",
     "margin_team",
     "margin_any",
     "other",
@@ -36662,7 +36760,7 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
       }
       const details = buildPickExplanationDetails(p, isLock);
       details.open = false;
-      try { tdPred.setAttribute("data-bb-mk", String(p.marketKey || "")); const _bbCell = { p: p, td: tdPred, details: details, span: predSpan }; (window.__bbPlayCells = window.__bbPlayCells || []).push(_bbCell); if (p.lineMoveWarn) bbApplyMoveWarn(_bbCell, p.lineMoveWarn); } catch (_bbPc) {} /* v2.7 line-move WARN */
+      try { tdPred.setAttribute("data-bb-mk", String(p.marketKey || "")); } catch (_bbPc) {}
       predSpan.addEventListener("click", function (e) {
         e.stopPropagation();
         details.open = !details.open;
@@ -38142,13 +38240,10 @@ async function runEngine() {
           : "informational_only_for_fallback";
       });
     }
-    /* FIX N2: caps that must survive any re-grade from probability (recon-gap downgrade, integrity cap) */
+    /* FIX N2: caps that must survive any re-grade from probability (integrity cap) */
     const _bbCapGrade = (p, g) => {
       if (!g || g === "NaN") return g;
       let out = g;
-      if (_reconGapSevere && ["ft", "h1"].includes(String(p.marketKey || "")) && typeof downgradeConfidenceForReconGap === "function") {
-        out = downgradeConfidenceForReconGap(out);
-      }
       const cap = p.integrityConfidenceCap;
       if (cap && typeof getConfidenceRank === "function" && /^[ABCD]/.test(String(out)) && getConfidenceRank(String(out).charAt(0)) > getConfidenceRank(cap)) out = cap;
       return out;
@@ -38477,7 +38572,6 @@ async function runEngine() {
         intelligencePackSummary: intelligencePack,
       },
     });
-    try { const _bbCells = window.__bbPlayCells || []; window.__bbPlayCells = []; if (_bbCells.length && typeof bbLinesAfterRun === "function") setTimeout(function () { bbLinesAfterRun(_bbCells).catch(function () {}); }, 400); } catch (_bbLa) {} /* v2.7: line-move WARN for this run's PLAY cells */
     scrollResultsIntoViewNow(table);
     engineDebug(
       "final picks for display",
@@ -38683,10 +38777,6 @@ async function runEngine() {
   _schedCache.clear();
   _summaryCache.clear();
   try {
-    if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
-      _ssEventStatsCache.clear();
-  } catch (_eSs) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _eSs); }
-  try {
     if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
       _proxyFetchCache.clear();
   } catch (_ePf) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _ePf); }
@@ -38835,10 +38925,6 @@ function onLeagueChange() {
   setDisplayValues(FIELD_GROUPS.autoTags, "none");
   _schedCache.clear();
   _summaryCache.clear();
-  try {
-    if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear)
-      _ssEventStatsCache.clear();
-  } catch (_eSs) { if (typeof reportSoftFailure === "function") reportSoftFailure("empty-catch", _eSs); }
   try {
     if (typeof _proxyFetchCache !== "undefined" && _proxyFetchCache && _proxyFetchCache.clear)
       _proxyFetchCache.clear();
