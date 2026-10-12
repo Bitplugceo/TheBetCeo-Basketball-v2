@@ -958,9 +958,9 @@ async function bbFetchWithSporty(core, self, args) {
   if (!bbIsAutoLeague(lk)) return core.apply(self, args);
   var home = String((document.getElementById("teamAName") || {}).value || "").trim(), away = String((document.getElementById("teamBName") || {}).value || "").trim();
   var pending = home && away ? bbSportyLookup(home, away, bbFixtureStartMs()).catch(function (e) { return { ok: false, reason: "fetch failed (" + String(e && e.message || e) + ")" }; }) : null;
-  var out;
+  var out, _gen = window.__bbMatchGen || 0; /* MATCH-WIPE: lines from a previous match's lookup must never land on a new match */
   try { out = await core.apply(self, args); }
-  finally { if (pending) { try { await bbSportyRun({ pending: pending }); } catch (_e) {} } }
+  finally { if (pending && (window.__bbMatchGen || 0) === _gen) { try { await bbSportyRun({ pending: pending }); } catch (_e) {} } }
   return out;
 }
 /* Manual inputs-JSON paste: match the fixture and fill market lines only; only numeric market-line data is read and stored. */
@@ -18664,9 +18664,12 @@ const _bbRdInflight = new Map();
 function proxyFetch(url, timeoutMs = 12000) {
   const key = String(url == null ? "" : url);
   const hit = key && _bbRdInflight.get(key);
-  if (hit) return hit;
+  /* MATCH-WIPE race fix: never join an in-flight request that belongs to an aborted (previous-match) fetch;
+     it will reject with AbortError and the new match would see "no recent games". */
+  if (hit && !(hit.__bbSig && hit.__bbSig.aborted)) return hit;
   const p = _bbRdProxyFetchNet(url, timeoutMs);
   if (!key) return p;
+  try { p.__bbSig = window.__abortSignal || null; } catch (_e) {}
   _bbRdInflight.set(key, p);
   const clear = () => { if (_bbRdInflight.get(key) === p) _bbRdInflight.delete(key); };
   p.then(clear, clear);
@@ -33521,7 +33524,7 @@ async function loadFixtures(offsetOrDate = 0) {
   setFixtureDay(isAbs ? offsetOrDate : offset);
   sel.innerHTML = '<option value="">Loading matches...</option>';
   sel.value = "";
-  selectedTeamIds = { A: null, B: null };
+  bbWipeMatchState("fixture list reload (league / Today / Tomorrow)"); /* MATCH-WIPE */
   if (typeof resetCardExtrasOnMatchChange === "function") resetCardExtrasOnMatchChange();
   _lastCardFixtureKey = "";
   validateFetchSection();
@@ -33664,10 +33667,60 @@ async function loadFixturesESPN(league, offset, myToken, absoluteDateKey) {
     sel.innerHTML = '<option value="">Unable to load matches</option>';
   }
 }
+/* MATCH-WIPE: one place that removes everything tied to the previous match. Called on match change, "— Select match —",
+   Today/Tomorrow switch and league change. Tracker history, settings and thresholds are never touched.
+   Bumps a match generation so any in-flight fetch / line lookup / run from the previous match is discarded. */
+function bbWipeMatchState(reason) {
+  window.__bbMatchGen = (window.__bbMatchGen || 0) + 1;
+  try { if (g_activeFetchController) { g_activeFetchController.abort(); g_activeFetchController = null; } } catch (_e) {}
+  window.__espnCoreFetchGen = (window.__espnCoreFetchGen || 0) + 1;
+  window.__bbSportyToken = (window.__bbSportyToken || 0) + 1;
+  if (window.__engineRunInProgress) { /* abandon an in-flight run so its picks are neither rendered nor tracked */
+    window.__bbRunSeq = (window.__bbRunSeq || 0) + 1;
+    window.__engineRunInProgress = false;
+    const _rb = document.getElementById("runBtn"); if (_rb) _rb.disabled = false;
+  }
+  try { unlockFetchBtn(); } catch (_e) {}
+  ["teamAName", "teamBName", "ftMarket", "h1Market", "teamAMarket", "teamBMarket", "h1TeamAMarket", "h1TeamBMarket",
+   "minutesOverrideA", "minutesOverrideB", "ssTeamAName", "ssTeamAId", "ssPasteA", "ssTeamBName", "ssTeamBId", "ssPasteB"].forEach((id) => {
+    const el = document.getElementById(id); if (el) { el.value = ""; el.style.borderColor = ""; }
+  });
+  try { clearSideFields("A"); clearSideFields("B"); } catch (_e) {}
+  try { clearH2HFields(); } catch (_e) {}
+  ["aAutoTag", "bAutoTag", "h2hAutoTag", "mAutoTag", "aIntegrityTag", "bIntegrityTag"].forEach((id) => { const el = document.getElementById(id); if (el) el.style.display = "none"; });
+  try { closeDrop("dropA"); closeDrop("dropB"); } catch (_e) {}
+  selectedTeamIds = { A: null, B: null };
+  g_lastFetchedTeams = { A: "", B: "" };
+  g_fetchMeta = defaultFetchMeta();
+  AppState.context.data = defaultMassacreFetchContext();
+  AppState.injuries.A = defaultInjuryMeta(); AppState.injuries.B = defaultInjuryMeta();
+  try { g_injA = defaultInjuryMeta(); g_injB = defaultInjuryMeta(); } catch (_e) {}
+  try { hideInjuryBox("A"); hideInjuryBox("B"); } catch (_e) {}
+  try { _schedCache.clear(); _summaryCache.clear(); } catch (_e) {}
+  try { if (typeof _ssEventStatsCache !== "undefined" && _ssEventStatsCache && _ssEventStatsCache.clear) _ssEventStatsCache.clear(); } catch (_e) {}
+  window.__seriesDateCache = {};
+  window.__bbSportyLast = null; window.__bbCrossLeague = null; window.__bbSeasonInfo = {}; window.__bbH2HInfo = {};
+  window.__lastRunParsed = null; window.__lastRunFinalPicks = null; window.__lastRunFinalLines = null;
+  window.__lastRunLeague = null; window.__lastRunFixtureMeta = null;
+  _lastCardFixtureKey = "";
+  const _xl = document.getElementById("bbCrossLeagueNote"); if (_xl) { _xl.style.display = "none"; _xl.textContent = ""; }
+  const _ss = document.getElementById("sportyStatus"); if (_ss) _ss.textContent = "Find the fixture and fill market line fields only.";
+  try { resetCardExtrasOnMatchChange(); } catch (_e) {}
+  try { acknowledgeGlobalEngineAlert(); } catch (_e) {}
+  try { setFetchAuditIssues([]); } catch (_e) {}
+  setStatusText("", "");
+  resetResultsTable();
+  const _dash = document.getElementById("syndicateDashboard"); if (_dash) _dash.remove();
+  try { if (typeof applyLast10SeriesAlert === "function") applyLast10SeriesAlert(); } catch (_e) {}
+  try { if (typeof updateCardExtraLabels === "function") updateCardExtraLabels(); } catch (_e) {}
+  try { validateFetchSection(); } catch (_e) {}
+  try { engineDebug("match state wiped", { reason: reason || "", gen: window.__bbMatchGen }); } catch (_e) {}
+  return window.__bbMatchGen;
+}
 function onFixtureSelect() {
   const select = document.getElementById("fixtureSelect");
   const opt = select.options[select.selectedIndex];
-  if (!opt || !opt.value) return;
+  if (!opt || !opt.value) { bbWipeMatchState("select-match placeholder"); return; } /* MATCH-WIPE */
   pickFixture(
     opt.dataset.home || "",
     opt.dataset.homeId || "",
@@ -33677,7 +33730,7 @@ function onFixtureSelect() {
   );
 }
 function pickFixture(homeName, homeId, awayName, awayId, eventDate) {
-  if (typeof resetCardExtrasOnMatchChange === "function") resetCardExtrasOnMatchChange();
+  bbWipeMatchState("match change"); /* MATCH-WIPE */
   _lastCardFixtureKey = fixtureIdentityKey(homeName, awayName, eventDate);
   closeDrop("dropA");
   closeDrop("dropB");
@@ -33757,6 +33810,8 @@ async function fetchESPN_CORE() {
   }
   g_activeFetchController = new AbortController();
   window.__abortSignal = g_activeFetchController.signal;
+  const _myMatchGen = window.__bbMatchGen || 0, _mySignal = window.__abortSignal; /* MATCH-WIPE: generation of this fetch */
+  const _staleMatch = () => (window.__bbMatchGen || 0) !== _myMatchGen || (_mySignal && _mySignal.aborted);
   if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
     await fetchEuroleagueCore(league, teamAName, teamBName);
   } else if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
@@ -33765,6 +33820,7 @@ async function fetchESPN_CORE() {
     await fetchSportradarCore(league, teamAName, teamBName);
   } else {
     await fetchESPNCore(league, teamAName, teamBName);
+    if (_staleMatch()) return; /* MATCH-WIPE: the match changed; do not run the fallback or touch shared state */
     /* FIX EXHIBITION-OPPONENT: ESPN has no schedule for non-NBA exhibition opponents (e.g. London Lions in NBA
        preseason), so the fetch ended with "No recent schedule data found from ESPN". Fall back to the Sportradar
        feed (all competitions, incl. last season) for the same names; say so clearly if that also has nothing. */
@@ -33781,6 +33837,7 @@ async function fetchESPN_CORE() {
         if (_keepPrefix) document.querySelectorAll("input[id^='" + _keepPrefix + "'], textarea[id^='" + _keepPrefix + "']").forEach((el) => { if (/^[ab][A-Z0-9]/.test(el.id)) _keep[el.id] = el.value; });
         window.__bbSrFallbackSide = _aEmpty && _bEmpty ? "AB" : _aEmpty ? "A" : "B";
         await fetchSportradarCore(league, teamAName, teamBName);
+        if (_staleMatch()) { window.__bbSrFallbackSide = null; return; } /* MATCH-WIPE */
         Object.keys(_keep).forEach((id) => { const el = document.getElementById(id); if (el) el.value = _keep[id]; });
         window.__bbSrFallbackSide = null;
         const _a2 = String((document.getElementById("aFTScored") || {}).value || "").trim(), _b2 = String((document.getElementById("bFTScored") || {}).value || "").trim();
@@ -33788,6 +33845,7 @@ async function fetchESPN_CORE() {
       }
     } catch (_eSrFb) { logDebug("Sportradar fallback failed", _eSrFb); }
   }
+  if (_staleMatch()) return; /* MATCH-WIPE: a newer match owns the status, banner, button and abort signal */
   try { /* BRUTAL-1: visible cross-league flag */
     let _xn = document.getElementById("bbCrossLeagueNote");
     if (!_xn) { const _fs = document.getElementById("fetchStatus"); if (_fs && _fs.parentNode) { _xn = document.createElement("div"); _xn.id = "bbCrossLeagueNote"; _xn.style.cssText = "font-size:11px;color:#d98a00;margin:4px 0;font-weight:700"; _fs.parentNode.insertBefore(_xn, _fs.nextSibling); } }
@@ -41038,6 +41096,7 @@ async function runEngine() {
       intentionalNoPlayRows: finalPicksForDisplay.filter((p) => p && p.pick === "NO PLAY").length,
       trackerStateBeforeSave: getTrackerStateDebugScore(g_trackerState),
     });
+    if (_bbRunAbandoned()) return; /* MATCH-WIPE: match changed mid-run, nothing is tracked */
     if (persistableTrackedPicks.length) {
       await bbWithTimeout(addTrackedPicks(persistableTrackedPicks), 8000, "addTrackedPicks", null);
       if (_bbRunAbandoned()) return; /* FIX #19 */
@@ -41272,6 +41331,7 @@ async function runEngine() {
   queueH2HCheckboxSync(false);
 }
 function onLeagueChange() {
+  bbWipeMatchState("league change"); /* MATCH-WIPE */
   if (g_activeFetchController) {
     g_activeFetchController.abort();
     g_activeFetchController = null;
