@@ -1,4 +1,3 @@
-Q
 <!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
@@ -21865,6 +21864,40 @@ function secondsToClock(secs) {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 // ========== CALC-AUDIT-190: SHARED CALCULATION HELPERS (ROUNDING, FORMATTING, CONVERSION) — END ==========
+/* LIVE-DISPLAY: quarter + real feed clock (no local countdown). Text examples: "Q1 7:42", "Q2", "HT", "End Q3", "OT 2:10". */
+const g_bbLiveQ = new Map(); /* eventId -> { home:[q1..], away:[q1..] } from the latest feed snapshot */
+function bbLiveRemember(eid, comp) {
+  try {
+    const cs = (comp && comp.competitors) || [];
+    const h = cs.find((c) => c.homeAway === "home") || cs[0], a = cs.find((c) => c.homeAway === "away") || cs[1];
+    const v = (x) => { const n = parseFloat(x && typeof x === "object" ? (x.value ?? x.displayValue) : x); return Number.isFinite(n) ? n : null; };
+    const qh = ((h && h.linescores) || []).map(v), qa = ((a && a.linescores) || []).map(v);
+    if (qh.length || qa.length) g_bbLiveQ.set(String(eid), { home: qh, away: qa });
+  } catch (_e) {}
+}
+function bbLivePeriodTag(info) {
+  const regP = LEAGUE_FETCH_RULES[(info && info.league) || ""]?.regulationPeriods ?? 4;
+  const p = Number((info && info.period) || 0);
+  if (info && info.clock === "HALF") return "HT";
+  if (p <= 0) return "LIVE";
+  if (p > regP) return p - regP === 1 ? "OT" : "OT" + (p - regP);
+  return regP === 2 ? "H" + p : "Q" + p;
+}
+function bbLiveClockText(info) {
+  if (!info) return "LIVE";
+  const tag = bbLivePeriodTag(info);
+  if (tag === "HT" || tag === "LIVE") return tag;
+  const regP = LEAGUE_FETCH_RULES[info.league || ""]?.regulationPeriods ?? 4;
+  const p = Number(info.period || 0);
+  const clk = String(info.clock || "").trim();
+  const secs = clk ? parseClockToSeconds(clk) : null;
+  if (secs === 0) {
+    if (regP >= 4 && p === regP / 2) return "HT";
+    if (p < regP) return "End " + tag;
+    return tag + " 0:00";
+  }
+  return clk && secs !== null ? tag + " " + (clk.includes(":") ? clk : secondsToClock(secs)) : tag;
+}
 function _tickLiveClocks() {
   if (document.hidden) return;
   if (g_liveGameStatus.size === 0) {
@@ -21875,44 +21908,15 @@ function _tickLiveClocks() {
   document.querySelectorAll("[data-live-clk]").forEach((el) => {
     const eid = el.dataset.liveClk;
     const info = g_liveGameStatus.get(eid);
-    if (!info || info.clock === "HALF") return;
-    if (info.clockSource === "last-play") return; /* P4-LIVECLOCK: KBL clock is the time of the last play; counting it down would invent time */
-    const capturedAt = info.capturedAt || Date.now();
-    const origSecs = parseClockToSeconds(info.clock);
-    if (origSecs === null) return;
-    const elapsedSecs = Math.min((Date.now() - capturedAt) / 1000, origSecs);
-    const currentSecs = Math.max(0, origSecs - elapsedSecs);
-    if (info.clockFrozen) {
-      const _regP = LEAGUE_FETCH_RULES[info.league || ""]?.regulationPeriods ?? 4;
-      const _p = Number(info.period || 0);
-      const _frozenSecs = parseClockToSeconds(info.clock);
-      if (_p === 0) {
-        el.textContent = "⏸ TIMEOUT";
-      } else {
-        el.textContent = `${isFinite(_frozenSecs) ? secondsToClock(_frozenSecs) : info.clock} ⏸`;
-      }
-      return;
-    }
-    if (currentSecs <= 0) {
-      const _regP = LEAGUE_FETCH_RULES[info.league || ""]?.regulationPeriods ?? 4;
-      const _p = Number(info.period || 0);
-      if (_p > 0 && _p < _regP) {
-        el.textContent = ((_regP <= 2 && _p === 1) ? "Half Break" : `Q${_p} Break`);
-      } else {
-        el.textContent = "Settling";
-        if (!info._expiredAt) {
-          info._expiredAt = Date.now();
-          expiredEventIds.push(eid);
-        }
-      }
-    } else {
-      const _regP = LEAGUE_FETCH_RULES[info.league || ""]?.regulationPeriods ?? 4;
-      const _p = Number(info.period || 0);
-      if (_p === 0) {
-        el.textContent = "LIVE";
-      } else {
-        el.textContent = secondsToClock(currentSecs);
-      }
+    if (!info) return;
+    /* LIVE-DISPLAY: show exactly what the feed reported (refreshed by the poller); never count down locally */
+    const txt = " " + bbLiveClockText(info);
+    if (el.textContent !== txt) el.textContent = txt;
+    const regP = LEAGUE_FETCH_RULES[info.league || ""]?.regulationPeriods ?? 4;
+    const secs = parseClockToSeconds(info.clock);
+    if (Number(info.period || 0) >= regP && secs === 0 && !info._expiredAt) {
+      info._expiredAt = Date.now();
+      expiredEventIds.push(eid);
     }
   });
   if (expiredEventIds.length && !g_refreshTrackedPicksInFlight) {
@@ -22011,10 +22015,7 @@ async function _pollLiveGameClocksImpl() {
   let didChange = false;
   await Promise.all([...byLeague].map(async ([league, eventIds]) => {
     if (typeof isIncrowdEuroAutoFetchLeague === "function" && isIncrowdEuroAutoFetchLeague(league)) {
-      const _uiLeague = (document.getElementById("leagueSelect") && document.getElementById("leagueSelect").value) || "";
-      if (!isIncrowdEuroAutoFetchLeague(_uiLeague)) {
-        return;
-      }
+      /* LIVE-ALL: EuroLeague/EuroCup picks are polled whatever league is selected in the form */
       try {
         if (typeof pollIncrowdEuroLiveForLeague === "function") {
           const _euroChanged = await pollIncrowdEuroLiveForLeague(league, eventIds, _liveClockSignal);
@@ -22023,6 +22024,11 @@ async function _pollLiveGameClocksImpl() {
       } catch (err) {
         engineDebug("incrowd euro live poll failed", { league, error: err?.message || String(err) });
       }
+      return;
+    }
+    if (typeof isSportradarAutoFetchLeague === "function" && isSportradarAutoFetchLeague(league)) {
+      try { if (await pollSportradarLiveForLeague(league, eventIds, _liveClockSignal)) didChange = true; }
+      catch (err) { engineDebug("sportradar live poll failed", { league, error: err?.message || String(err) }); }
       return;
     }
     if (typeof isKblAutoFetchLeague === "function" && isKblAutoFetchLeague(league)) {
@@ -22082,6 +22088,7 @@ async function _pollLiveGameClocksImpl() {
         const clock = String(comp?.status?.displayClock || "");
         const period = Number(comp?.status?.period || 0);
         const _liveMeta = isEspnCompetitionLive(comp && comp.status);
+        bbLiveRemember(eid, comp); /* LIVE-DISPLAY */
         const isHalf = !!_liveMeta.half;
         const isLive = !!_liveMeta.live;
         if (isLive) {
@@ -23144,12 +23151,24 @@ function renderTrackedPicks() {
                   _liveClockLabel === "HALF"
                     ? "HALF"
                     : _liveClockLabel.replace(/^(Period \d+|Overtime(?: \d+)?)\s+/i, "");
-                const safeClock = escapeHtml(String(_clockOnly).trim() || String(_liveClockLabel).trim()); /* P4-LIVECLOCK: no clock from the source -> retain the live-period label */
+                const safeClock = escapeHtml(bbLiveClockText(_liveInfo)); /* LIVE-DISPLAY: "Q2 4:31" / "HT" / "End Q3" / "OT" — feed clock */
+                void _clockOnly;
+                const _lq = g_bbLiveQ.get(String(p.eventId)) || _liveInfo.qScores || {};
+                const _qH2 = _lq.home || [], _qA2 = _lq.away || [];
+                const _maxQ2 = Math.min(Math.max(_curP2, _qH2.length), _regP2 + 4);
+                let _qRowsHtml = "";
+                for (let _qi = 0; _qi < _maxQ2; _qi++) {
+                  const _qHv = Number(_qH2[_qi]), _qAv = Number(_qA2[_qi]);
+                  if (_qH2[_qi] != null && _qA2[_qi] != null && isFinite(_qHv) && isFinite(_qAv) && (_qHv > 0 || _qAv > 0)) {
+                    const _ql = _qi < _regP2 ? (_regP2 === 2 ? "H" : "Q") + (_qi + 1) : (_qi - _regP2 === 0 ? "OT" : "OT" + (_qi - _regP2 + 1));
+                    _qRowsHtml += `<div style="font-size:7px;font-weight:900;line-height:1.25;color:var(--text);white-space:nowrap;letter-spacing:0;">${_ql}<span style="display:inline-block;min-width:13px;text-align:right;">${Math.round(_qHv)}</span>:<span style="display:inline-block;min-width:13px;">${Math.round(_qAv)}</span></div>`;
+                  }
+                }
                 const _hasLiveScore =
                   Number.isFinite(_liveInfo.homeScore) && Number.isFinite(_liveInfo.awayScore);
                 const homeTotal = _hasLiveScore ? Math.round(_liveInfo.homeScore) : null;
                 const awayTotal = _hasLiveScore ? Math.round(_liveInfo.awayScore) : null;
-                return `<div style="color:var(--muted);font-size:8px;font-weight:900;line-height:1.0;letter-spacing:0.3px;margin-bottom:1px;">LIVE</div><div style="font-size:12px;font-weight:900;line-height:1.2;margin-bottom:2px;color:var(--tracker-strong);">${_hasLiveScore ? homeTotal + " : " + awayTotal : ""}</div><div style="font-size:6px;font-weight:800;line-height:1.1;margin-bottom:1px;color:var(--muted);white-space:nowrap;"><span style="font-size:5px;">⏰</span><span data-live-clk="${escapeHtml(p.eventId)}"> ${safeClock}</span></div>`;
+                return `<div style="color:var(--muted);font-size:8px;font-weight:900;line-height:1.0;letter-spacing:0.3px;margin-bottom:1px;">LIVE</div><div style="font-size:12px;font-weight:900;line-height:1.2;margin-bottom:2px;color:var(--tracker-strong);">${_hasLiveScore ? homeTotal + " : " + awayTotal : ""}</div><div style="font-size:6px;font-weight:800;line-height:1.1;margin-bottom:1px;color:var(--muted);white-space:nowrap;"><span style="font-size:5px;">⏰</span><span data-live-clk="${escapeHtml(p.eventId)}"> ${safeClock}</span></div>${_qRowsHtml}`;
               })()
             : "";
           const _settleSigAttr = encodeURIComponent(settleSig);
@@ -25925,6 +25944,9 @@ async function refreshTrackedPickResults() {
                   { source: "kbl", league: p.league, eventId: p.eventId },
                 ];
               }
+              if (typeof isSportradarAutoFetchLeague === "function" && isSportradarAutoFetchLeague(p.league) && /^\d+$/.test(String(p.eventId || ""))) {
+                return [`${p.league}:${p.eventId}`, { source: "sr", league: p.league, eventId: p.eventId }]; /* SETTLE-ALL */
+              }
               const base = getTrackedLeagueApiBase(p.league);
               if (!base) return null;
               if (!/^\d+$/.test(String(p.eventId || ""))) return null; /* P4-10: ESPN ids are numeric; manual-... ids returned HTTP 400 on every refresh */
@@ -25936,6 +25958,11 @@ async function refreshTrackedPickResults() {
       const _rdPool = bbRdLimiter(BB_RD_FETCH_POOL); /* FIX RD8: ESPN summaries; feed lookups share deduped feeds */
       const eventResults = await Promise.all(
         eventEntries.map((entry) => (entry.source === "espn" ? _rdPool : (fn) => fn())(async () => {
+          if (entry.source === "sr") { /* SETTLE-ALL: Sportradar match_info -> ESPN-shaped competition */
+            let competition = null;
+            try { competition = await fetchSportradarCompetitionForEvent(entry.league, entry.eventId); } catch (_eSr) { competition = null; }
+            return [entry.eventId, competition ? { header: { competitions: [competition] }, _sr: true } : null];
+          }
           if (entry.source === "incrowd") {
             let competition = null;
             try {
@@ -26129,6 +26156,7 @@ async function refreshTrackedPickResults() {
             ts: new Date().toLocaleTimeString([], { hour12: false }),
           });
           const _liveMeta = isEspnCompetitionLive(competition && competition.status);
+          if (pick.eventId) bbLiveRemember(pick.eventId, competition); /* LIVE-DISPLAY */
           const _isLiveNow = !!_liveMeta.live;
           if (_isLiveNow && pick.eventId) {
             const _isHalf = !!_liveMeta.half;
@@ -31112,6 +31140,7 @@ async function pollIncrowdEuroLiveForLeague(league, eventIds, signal) {
       continue;
     }
     const _liveMeta = isEspnCompetitionLive(comp.status);
+    bbLiveRemember(eid, comp); /* LIVE-DISPLAY */
     if (_liveMeta.live) {
       const period = Number(comp.status?.period || 0);
       const clock = _liveMeta.half ? "HALF" : String(comp.status?.displayClock || "");
@@ -32157,7 +32186,7 @@ function kblGameToEspnCompetition(g) {
     id: String(g.id || g.gmkey || ""),
     status: {
       displayClock: half ? "HALF" : clock,
-      period: period || (played ? 4 : 0),
+      period: period || (played ? 4 : live ? Math.max(homeLs.length, awayLs.length) : 0), /* LIVE-DISPLAY: KBL current quarter = quarters reported so far */
       type: {
         completed: !!played,
         state: played ? "post" : live ? "in" : "pre",
@@ -32618,6 +32647,7 @@ async function pollKblLiveForLeague(league, eventIds, signal) {
       continue;
     }
     const _liveMeta = isEspnCompetitionLive(comp.status);
+    bbLiveRemember(eid, comp); /* LIVE-DISPLAY */
     if (_liveMeta.live) {
       const period = Number(comp.status?.period || 0);
       const clock = _liveMeta.half ? "HALF" : String(comp.status?.displayClock || "");
@@ -33349,6 +33379,70 @@ async function srGet(path, maxAgeMs) {
     _srCache.set(path, { at: Date.now(), data: d.data });
     return d.data;
   } finally { if (t) clearTimeout(t); }
+}
+/* SETTLE-ALL / LIVE-ALL: Sportradar match -> ESPN-shaped competition (status, period, feed clock, scores, quarter linescores). */
+function srMatchToEspnCompetition(m) {
+  if (!m || !m.teams || !m.teams.home || !m.teams.away) return null;
+  const st = m.status || {}, sid = Number(st._id), sname = String(st.name || "");
+  const res = m.result || {}, per = m.periods || {};
+  const notPlayed = !!(m.postponed || m.cancelled || m.walkover) || /postpon|cancel|abandon|interrupt|delay/i.test(sname);
+  const ended = !notPlayed && (String(m.matchstatus || "") === "result" || sid === 100 || sid === 110 || sid === 120 || /^(ended|aet|after overtime|after ot)/i.test(sname));
+  const live = !ended && !notPlayed && (String(m.matchstatus || "") === "live" || /quarter|half|overtime|pause|break|period|interrupted/i.test(sname)) && sid !== 0;
+  const half = live && /halftime|half time|^pause$/i.test(sname) && !/1st half|2nd half/i.test(sname);
+  const period = Number(m.p) || 0;
+  let clock = "";
+  const ti = m.timeinfo || {}, plen = Number(m.periodlength) || 10, olen = Number(m.overtimelength) || 5, nper = Number(m.numberofperiods) || 4;
+  const played = Number(ti.played);
+  if (live && period > 0 && Number.isFinite(played) && ti.played != null) { /* remaining time in the current period, from the feed's played seconds */
+    const endOfP = period <= nper ? period * plen * 60 : nper * plen * 60 + (period - nper) * olen * 60;
+    const rem = endOfP - played;
+    if (rem >= 0 && rem <= (period <= nper ? plen : olen) * 60) clock = Math.floor(rem / 60) + ":" + String(Math.floor(rem % 60)).padStart(2, "0");
+  }
+  const ls = (side) => {
+    const out = [];
+    ["p1", "p2", "p3", "p4"].forEach((k) => { if (per[k] && per[k][side] != null) out.push({ value: Number(per[k][side]) }); });
+    Object.keys(per).filter((k) => /^(ot|p[5-9])/.test(k) && k !== "ft").sort().forEach((k) => { if (per[k] && per[k][side] != null) out.push({ value: Number(per[k][side]) }); });
+    return out;
+  };
+  const side = (k) => { const t = m.teams[k]; return { homeAway: k, id: String(t.uid || t._id), score: res[k] != null ? String(res[k]) : "0",
+    team: { id: String(t.uid || t._id), displayName: t.mediumname || t.name || "", shortDisplayName: t.name || "" }, linescores: ls(k) }; };
+  return { id: String(m._id), status: { displayClock: half ? "HALF" : clock, period: ended ? Math.max(period, nper) : period,
+      type: { completed: ended, state: ended ? "post" : live ? "in" : "pre",
+        name: notPlayed ? "STATUS_POSTPONED" : ended ? "STATUS_FINAL" : half ? "STATUS_HALFTIME" : live ? "STATUS_IN_PROGRESS" : "STATUS_SCHEDULED",
+        description: notPlayed ? "Postponed" : ended ? "Final" : half ? "Halftime" : live ? sname : "Scheduled", shortDetail: sname } },
+    competitors: [side("home"), side("away")] };
+}
+async function fetchSportradarCompetitionForEvent(league, eventId) {
+  const d = await srGet("match_info/" + encodeURIComponent(String(eventId)), 10000);
+  return srMatchToEspnCompetition(d && (d.match || d));
+}
+async function pollSportradarLiveForLeague(league, eventIds, signal) {
+  let didChange = false;
+  for (const eid of eventIds || []) {
+    if (signal && signal.aborted) break;
+    if (!/^\d+$/.test(String(eid))) continue;
+    let comp = null;
+    try { comp = await fetchSportradarCompetitionForEvent(league, eid); } catch (_e) { comp = null; }
+    if (!comp) continue;
+    if (comp.status.type.completed) {
+      if (g_liveGameStatus.delete(String(eid))) didChange = true;
+      if (settlePendingPicksFromCompetition(eid, comp, true)) didChange = true;
+      continue;
+    }
+    const _liveMeta = isEspnCompetitionLive(comp.status);
+    bbLiveRemember(eid, comp);
+    if (!_liveMeta.live) { if (g_liveGameStatus.delete(String(eid))) didChange = true; continue; }
+    const cs = comp.competitors, homeScore = parseFloat(cs[0].score) || 0, awayScore = parseFloat(cs[1].score) || 0;
+    const period = Number(comp.status.period || 0), clock = _liveMeta.half ? "HALF" : String(comp.status.displayClock || "");
+    const ex = g_liveGameStatus.get(String(eid));
+    if (!ex || ex.period !== period || ex.clock !== clock || ex.homeScore !== homeScore || ex.awayScore !== awayScore) {
+      g_liveGameStatus.set(String(eid), { period, clock, statusName: comp.status.type.name, league, capturedAt: Date.now(), clockFrozen: false,
+        clockSource: "feed", homeScore, awayScore, _expiredAt: ex?._expiredAt ?? null });
+      didChange = true;
+    }
+    if (_liveMeta.half || period >= 2) { if (settlePendingPicksFromCompetition(eid, comp, false)) didChange = true; }
+  }
+  return didChange;
 }
 function isSportradarAutoFetchLeague(league) {
   const k = String(league || "").toLowerCase();
