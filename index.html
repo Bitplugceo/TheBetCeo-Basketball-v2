@@ -1,4 +1,3 @@
-S
 <!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
@@ -237,7 +236,7 @@ function bbFitShrinkFromTracker() {
     const mk = String(p.marketKey || "").toLowerCase();
     if (actual == null || !Number.isFinite(projection) || !Number.isFinite(line) || mk === "winner") return;
     let x, target;
-    { const ot = mk === "ft" ? 1 : /^(team_a|team_b)$/.test(mk) ? 0.5 : 0; x = projection + ot - line; target = actual - line; }
+    { const ot = 0; /* PENDING-FIX 4 */ x = projection + ot - line; target = actual - line; }
     const bucket = bbSignalBucket(mk); (by[bucket] = by[bucket] || []).push([x, target]);
     if (p.league) { const key = String(p.league).toLowerCase() + "|" + bucket; (by[key] = by[key] || []).push([x, target]); }
   });
@@ -250,7 +249,9 @@ function bbEvaluateTotal(proj, line, league, marketKey) {
   const p = Number(proj), l = Number(line);
   if (!Number.isFinite(p) || !Number.isFinite(l)) return { ok: false, p: null, reason: Number.isFinite(p) ? "no market line entered" : "no projection (missing inputs)" };
   const mk = String(marketKey || "ft").toLowerCase();
-  const ot = mk === "ft" ? 1 : /^(team_a|team_b)$/.test(mk) ? 0.5 : 0;
+  const ot = 0; /* PENDING-FIX 4 (OT allowance): a flat +1 FT / +0.5 team was added to every projection, but FT history already
+     includes OT (otPolicy: FT keeps OT). Measured OT rate = 3.4% (median of 257 Sportradar leagues), ~0.2-0.4 pts already inside
+     the averages; the extra +1 double-counted and tilted FT edges toward OVER. */
   const edge = p + ot - l;
   const threshold = Number(computeEffectivePointThreshold(league, mk, edge, {} ).effective);
   const pSide = bbSignalProbability(Math.abs(edge), league, mk);
@@ -8054,12 +8055,12 @@ const TUNABLE_PARAM_REGISTRY = {
     lastVerifiedAt: null,
   },
   teamVolScale: {
-    value: 0.5,
+    value: 0.7, /* PENDING-FIX 7 */
     min: 0.3,
     max: 1.0,
     type: "scalar",
     scope: "global",
-    appliesTo: ["team_a", "team_b"],
+    appliesTo: ["team_a", "team_b", "h1_team_a", "h1_team_b"],
     description:
       "Single-team full-game volatility limit as a fraction of the full-game volatilityLimit (getMarketVolLimit). Was a flat hardcoded 0.5 with no documented derivation.",
     lastVerifiedAt: null,
@@ -8250,9 +8251,21 @@ function saveTunableParamLeagueOverrides() {
     });
   }
 }
+/* PENDING-FIX 2 (prune/reseed regression): init seeds volatilityLimit from LEAGUE_CONFIG_MAP first, then LEAGUE_VOL_LIMITS;
+   backfill seeds the rest from getLeagueVolLimit (learned stdev). The pruner compared every seed against getLeagueVolLimit, so
+   config-map seeds and backfilled learned values were deleted on every load and re-seeded with a different value. Prune now
+   compares against the SAME static source that seeded it and skips leagues with no static source. */
+function bbStaticSeedVolLimit(lk) {
+  const key = String(lk || "").toLowerCase();
+  const cfgKey = Object.keys(LEAGUE_CONFIG_MAP || {}).find((k) => k.toLowerCase() === key);
+  const cfgVol = cfgKey ? Number(LEAGUE_CONFIG_MAP[cfgKey] && LEAGUE_CONFIG_MAP[cfgKey].volLimit) : NaN;
+  if (Number.isFinite(cfgVol)) return cfgVol;
+  const v = Number(LEAGUE_VOL_LIMITS[key]);
+  return Number.isFinite(v) ? v : NaN;
+}
 function pruneUnverifiedLeagueOverrideDrift() {
   const PRUNABLE_STATIC_SOURCES = {
-    volatilityLimit: (lk) => getLeagueVolLimit(lk),
+    volatilityLimit: (lk) => bbStaticSeedVolLimit(lk),
     edgeFTPointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.ft,
     edgeH1PointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.h1,
     edgeTeamPointThreshold: (lk) => LEAGUE_EDGE_POINT_THRESHOLDS[lk]?.team,
@@ -10066,7 +10079,7 @@ window.getFreezeStatus = getFreezeStatus;
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 const TUNABLE_CONSTANTS_GRID = {
   INJURY_OPPONENT_BOOST_FACTOR: [0.1, 0.15, 0.2, 0.25, 0.3],
-  UNDER_EDGE_FACTOR: [1.3, 1.4, 1.5, 1.6, 1.8],
+  UNDER_EDGE_FACTOR: [1.5, 1.6, 1.7, 1.8, 2.0], /* PENDING-FIX 9 */
 };
 // ========== CALC-AUDIT-068: CONSTANTS AND MODEL CONFIGURATION — END ==========
 // ========== CALC-AUDIT-069: CALCULATION-RELATED DEPENDENCIES (PARAMETER ACCESS, VALIDATION GATES, EXPORTS) — BEGIN ==========
@@ -11670,7 +11683,7 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
     venueStrongGames: [8, 9, 10, 11, 12],
     venueModerateWeight: [0.35, 0.4, 0.45, 0.5, 0.55, 0.6],
     venueStrongWeight: [0.55, 0.6, 0.65, 0.7, 0.75, 0.8],
-    underEdgeFactor: [1.3, 1.4, 1.5, 1.6, 1.8],
+    underEdgeFactor: [1.5, 1.6, 1.7, 1.8, 2.0], /* PENDING-FIX 9: 1.3/1.4 sat below the protected floor (1.5/1.6) and were silent no-ops */
     injuryOppBoostFactor: [0.1, 0.15, 0.2, 0.25, 0.3],
     edgeFTPointThreshold: [4.0, 5.0, 6.0, 7.0, 8.0],
     edgeH1PointThreshold: [5.0, 6.0, 7.0, 8.0, 9.0],
@@ -11678,7 +11691,7 @@ function runCoordinateAscentTuner(allPicks, targetLeague) {
     confidenceAThresh: [0.6, 0.63, 0.66, 0.69, 0.72],
     confidenceBThresh: [0.52, 0.55, 0.58, 0.61, 0.64],
     confidenceCThresh: [0.45, 0.48, 0.51, 0.54, 0.57],
-    teamVolScale: [0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
+    teamVolScale: [0.55, 0.6, 0.65, 0.7, 0.75, 0.8], /* PENDING-FIX 9: centred on measured team/FT SD ratio 0.71 */
     h2hTierInsufficientPenalty: [0.35, 0.45, 0.55, 0.65, 0.75],
     h2hTierThinPenalty: [0.65, 0.75, 0.85, 0.95, 1.0],
     h2hDivergenceThreshold: [0.08, 0.12, 0.16, 0.2, 0.25],
@@ -12780,12 +12793,12 @@ function bbProtectedEdgeFloor(league, bucket) {
   const P = BB_PROTECTED_EDGE_POLICY;
   const lk = String(league || "default").toLowerCase();
   const row = LEAGUE_EDGE_POINT_THRESHOLDS[lk];
-  if (row) {
-    const own = Number(row[bucket]);
-    if (Number.isFinite(own) && own > 0) return own;
-    const d = Number((LEAGUE_EDGE_POINT_THRESHOLDS.default || {})[bucket]);
-    if (Number.isFinite(d) && d > 0) return d;
-  }
+  /* PENDING-FIX 1 (fallback bug): a league with NO row skipped the default row and dropped straight to registryFallback,
+     contradicting the documented order league row -> default row -> registry. */
+  const own = Number(row && row[bucket]);
+  if (Number.isFinite(own) && own > 0) return own;
+  const d = Number((LEAGUE_EDGE_POINT_THRESHOLDS.default || {})[bucket]);
+  if (Number.isFinite(d) && d > 0) return d;
   return Number(P.registryFallback[bucket]) || 5.0;
 }
 function bbOverEdgeBump(marketKey) {
@@ -12828,6 +12841,8 @@ function _bbRawLeagueEdgePointThreshold(league, marketKey) {
   const row = LEAGUE_EDGE_POINT_THRESHOLDS[lk] || LEAGUE_EDGE_POINT_THRESHOLDS.default;
   const value = Number(row && row[key]);
   if (Number.isFinite(value) && value > 0) return value;
+  const _defVal = Number((LEAGUE_EDGE_POINT_THRESHOLDS.default || {})[key]); /* PENDING-FIX 1: row present but bucket missing -> default row */
+  if (Number.isFinite(_defVal) && _defVal > 0) return _defVal;
   const reg = paramKey && TUNABLE_PARAM_REGISTRY[paramKey];
   return reg && Number(reg.value) > 0 ? Number(reg.value) : 5.0;
 }
@@ -12847,6 +12862,10 @@ function getLeagueEdgePointThreshold(league, marketKey) {
     let tuned = NaN;
     try { tuned = typeof getParam === "function" ? Number(getParam("edgeH1TeamPointThreshold", league, marketKey)) : NaN; } catch (_e) {}
     if (Number.isFinite(tuned) && tuned > 0) return tuned;
+    /* PENDING-FIX 8: optional separate h1t field per league row. No row sets it yet -> behaviour unchanged. */
+    const _h1tRow = LEAGUE_EDGE_POINT_THRESHOLDS[String(league || "default").toLowerCase()];
+    const _h1t = Number(_h1tRow && _h1tRow.h1t);
+    if (Number.isFinite(_h1t) && _h1t > 0) return _h1t;
     return Math.max(2.5, Math.round(_base * 0.65 * 10) / 10);
   }
   return _base;
@@ -12876,7 +12895,7 @@ function getLeagueEdgePointThreshold_BASE(league, marketKey) {
 let LEAGUE_BASES = {
   albania_national_championship: 148, /* added: comparable albania_superliga */
   argentina_liga_argentina: 158.0, /* real avg 158.0 — Sportradar stats feed utid 34496, seasons 135927, 638 games Nov 2025-Jun 2026; was 158.0 (12 Oct 2026) */
-  argentina_super_20: 160, /* added: comparable argentina_lnb */
+  argentina_super_20: 175.5, /* real avg 175.3 — Sportradar stats feed utid 22350, 7 games pooled from team histories Oct 2021-Apr 2026 — SMALL SAMPLE; was 160 (12 Oct 2026) */
   australia_nbl_1_wildcard_women: 145.5, /* real avg 145.6 — Sportradar stats feed utid 36291, seasons 92185, 16 games May 2022-Aug 2022; was 145.5 (12 Oct 2026) */
   australia_nbl1: 174.5, /* real avg 174.5 — Sportradar stats feed utid 28567, seasons 145542+65539, 196 games Mar 2019-Aug 2026; was 174.5 (12 Oct 2026) */
   australia_nbl1_wildcard: 162.0, /* real avg 162.2 — Sportradar stats feed utid 36459, seasons 92173, 20 games May 2022-Aug 2022; was 162.0 (12 Oct 2026) */
@@ -12896,7 +12915,7 @@ let LEAGUE_BASES = {
   bulgaria_super_cup: 158, /* added: comparable bulgaria_nbl — domestic cup/supercup: same clubs as bulgaria_nbl */
   canada_nbl: 212.5, /* real avg 212.4 — Sportradar stats feed utid 27108, seasons 101047, 81 games Jan 2023-May 2023; was 212.5 (12 Oct 2026) */
   china_cba_club_cup: 181.5, /* real avg 181.6 — Sportradar stats feed utid 44965, seasons 137138, 48 games Dec 2025-Feb 2026; was 181.5 (12 Oct 2026) */
-  china_cba_preseason: 202, /* added: comparable cba */
+  china_cba_preseason: 169.5, /* real avg 169.5 — Sportradar stats feed utid 33285, 57 games pooled from team histories Sep 2024-Oct 2026; was 202 (12 Oct 2026) */
   chinese_taipei_sbl: 152.0, /* real avg 152.2 — Sportradar stats feed utid 31613, seasons 138270+127427, 145 games Jan 2025-May 2026; was 149.0 (12 Oct 2026) */
   chinese_taipei_t1_league: 196.0, /* real avg 196.2 — Sportradar stats feed utid 41368, seasons 112150, 82 games Oct 2023-Jun 2024; was 196.0 (12 Oct 2026) */
   chinese_taipei_wsbl_women: 132.0, /* real avg 131.9 — Sportradar stats feed utid 32231, seasons 138276+127429+114947, 174 games Jan 2024-May 2026; was 130.0 (12 Oct 2026) */
@@ -12922,9 +12941,9 @@ let LEAGUE_BASES = {
   france_leaders_cup_lnb: 170.0, /* real avg 170.1 — Sportradar stats feed utid 405, seasons 138714, 7 games Feb 2026-Feb 2026 — SMALL SAMPLE; was 162 (12 Oct 2026) */
   france_leaders_cup_lnb_elite_2: 170.5, /* real avg 170.4 — Sportradar stats feed utid 33153, seasons 138886, 5 games Jan 2026-Feb 2026 — SMALL SAMPLE; was 156 (12 Oct 2026) */
   france_match_des_champions: 162, /* added: comparable proa — domestic cup/supercup: same clubs as proa */
-  france_match_des_champions_women: 144, /* added: comparable france_lfb_w — domestic cup/supercup: same clubs as france_lfb_w */
+  france_match_des_champions_women: 128.5, /* real avg 128.4 — Sportradar stats feed utid 20098, 5 games pooled from team histories Oct 2022-Sep 2026 — SMALL SAMPLE; was 144 (12 Oct 2026) */
   france_nationale_1: 159.5, /* real avg 159.3 — Sportradar stats feed utid 48539, seasons 145066+134465, 628 games Sep 2025-Oct 2026; was 154.5 (12 Oct 2026) */
-  france_supercoupe: 162, /* added: comparable proa — domestic cup/supercup: same clubs as proa */
+  france_supercoupe: 164.0, /* real avg 164 — Sportradar stats feed utid 47476, 5 games pooled from team histories Sep 2025-Sep 2026 — SMALL SAMPLE; was 162 (12 Oct 2026) */
   france_u21_espoirs_elite: 160.0, /* real avg 160.1 — Sportradar stats feed utid 39935, seasons 146654+134467, 271 games Sep 2025-Oct 2026; was 163.0 (12 Oct 2026) */
   georgia_georgia_league_u22: 150, /* added: comparable georgia_super — U22 */
   germany_bbl_pokal_26_27: 166.5, /* real avg 166.3 — Sportradar stats feed utid 359, seasons 144970+132734, 31 games Sep 2025-Sep 2026; was 168 (12 Oct 2026) */
@@ -12933,7 +12952,7 @@ let LEAGUE_BASES = {
   greece_cup_women: 144.0, /* real avg 143.9 — Sportradar stats feed utid 45901, seasons 146754+133312+128313, 18 games Feb 2025-Sep 2026; was 140 (12 Oct 2026) */
   greece_elite_league: 157.0, /* real avg 156.8 — Sportradar stats feed utid 20154, seasons 144572+132636, 242 games Oct 2025-Oct 2026; was 149.0 (12 Oct 2026) */
   greece_greece_cup: 156.5, /* real avg 156.7 — Sportradar stats feed utid 608, seasons 138260, 15 games Dec 2025-Feb 2026; was 156.5 (12 Oct 2026) */
-  greece_super_cup: 158, /* added: comparable bcl — domestic cup/supercup: same clubs as bcl */
+  greece_super_cup: 158.0, /* real avg 157.9 — Sportradar stats feed utid 35266, 11 games pooled from team histories Sep 2023-Sep 2026; was 158 (12 Oct 2026) */
   greece_super_cup_women: 140, /* added: comparable greece_a1_w — domestic cup/supercup: same clubs as greece_a1_w */
   greece_womens_basketball_league_1: 147.0, /* real avg 146.8 — Sportradar stats feed utid 14554, seasons 144588+132638+121419, 266 games Oct 2024-Oct 2026; was 145.0 (12 Oct 2026) */
   hungary_magyar_kupa: 156.0, /* real avg 156.1 — Sportradar stats feed utid 39305, seasons 138496, 8 games Jan 2026-Feb 2026 — SMALL SAMPLE; was 158 (12 Oct 2026) */
@@ -13029,11 +13048,11 @@ let LEAGUE_BASES = {
   israel_wbl_women: 149.0, /* real avg 149.0 — Sportradar stats feed utid 39351, seasons 146796+135465+122657, 272 games Oct 2024-Oct 2026; was 141.0 (12 Oct 2026) */
   italy_cup_women: 137.5, /* real avg 137.6 — Sportradar stats feed utid 14985, seasons 138136, 7 games Jan 2026-Jan 2026 — SMALL SAMPLE; was 144 (12 Oct 2026) */
   italy_final_eight: 170.5, /* real avg 170.3 — Sportradar stats feed utid 877, seasons 138818, 7 games Feb 2026-Feb 2026 — SMALL SAMPLE; was 162 (12 Oct 2026) */
-  italy_serie_a2_lnp_cup: 156, /* added: comparable italy_a2 — LNP = Serie A2 clubs */
-  italy_supercoppa: 162, /* added: comparable lba — domestic cup/supercup: same clubs as lba */
+  italy_serie_a2_lnp_cup: 161.5, /* real avg 161.6 — Sportradar stats feed utid 15011, 5 games pooled from team histories Mar 2022-Mar 2026 — SMALL SAMPLE; was 156 (12 Oct 2026) */
+  italy_supercoppa: 169.5, /* real avg 169.3 — Sportradar stats feed utid 1157, 10 games pooled from team histories Sep 2022-Sep 2026; was 162 (12 Oct 2026) */
   italy_supercoppa_lnp: 167.0, /* real avg 167.2 — Sportradar stats feed utid 14339, seasons 144266+134745, 6 games Sep 2025-Sep 2026 — SMALL SAMPLE; was 156 (12 Oct 2026) */
   italy_supercoppa_lnp_serie_b: 150, /* added: comparable italy_serb — LNP Serie B clubs */
-  italy_supercoppa_women: 144, /* added: comparable italy_a1_w — domestic cup/supercup: same clubs as italy_a1_w */
+  italy_supercoppa_women: 129.0, /* real avg 128.9 — Sportradar stats feed utid 40987, 7 games pooled from team histories Sep 2023-Sep 2025 — SMALL SAMPLE; was 144 (12 Oct 2026) */
   japan_b_league_one: 164.5, /* real avg 164.7 — Sportradar stats feed utid 1516, seasons 143918, 72 games Sep 2026-Oct 2026; was 164.5 (12 Oct 2026) */
   kazakhstan_kazakhstan_cup: 148.5, /* real avg 148.7 — Sportradar stats feed utid 48719, seasons 147220+135027, 29 games Sep 2025-Oct 2026; was 148.5 (12 Oct 2026) */
   kazakhstan_national_league: 159.5, /* real avg 159.6 — Sportradar stats feed utid 48717, seasons 135661, 102 games Oct 2025-May 2026; was 159.5 (12 Oct 2026) */
@@ -13050,7 +13069,7 @@ let LEAGUE_BASES = {
   mexico_lnbpf_women: 160.5, /* real avg 160.7 — Sportradar stats feed utid 37003, seasons 139914+130050, 166 games May 2025-May 2026; was 160.0 (12 Oct 2026) */
   moldova_divizia_nationala_women: 123.0, /* real avg 122.8 — Sportradar stats feed utid 49330, seasons 136548, 33 games Oct 2025-May 2026; was 123.0 (12 Oct 2026) */
   montenegro_i_a_zckl_women: 146.0, /* real avg 146.1 — Sportradar stats feed utid 49320, seasons 136550, 49 games Oct 2025-Apr 2026; was 146.0 (12 Oct 2026) */
-  montenegro_i_b_mckl: 148, /* added: comparable montenegro_liga */
+  montenegro_i_b_mckl: 151.5, /* real avg 151.6 — Sportradar stats feed utid 49322, 41 games pooled from team histories Oct 2025-Apr 2026; was 148 (12 Oct 2026) */
   montenegro_montenegro_cup: 166.0, /* real avg 166.2 — Sportradar stats feed utid 49324, seasons 139640, 8 games Feb 2026-Feb 2026 — SMALL SAMPLE; was 154 (12 Oct 2026) */
   montenegro_montenegro_cup_women: 136, /* added: comparable default — no national women league in engine; generic European women comparable */
   netherlands_basketball_cup: 166.0, /* real avg 166.1 — Sportradar stats feed utid 46089, seasons 137714, 15 games Dec 2025-Mar 2026; was 166.0 (12 Oct 2026) */
@@ -13079,7 +13098,7 @@ let LEAGUE_BASES = {
   serbia_2_zls_women: 134.5, /* real avg 134.7 — Sportradar stats feed utid 35496, seasons 146868+136554, 129 games Oct 2025-Oct 2026; was 126 (12 Oct 2026) */
   serbia_cup: 167.5, /* real avg 167.4 — Sportradar stats feed utid 14961, seasons 139394, 7 games Feb 2026-Feb 2026 — SMALL SAMPLE; was 160 (12 Oct 2026) */
   serbia_serbian_cup_women: 134, /* added: comparable serbia_w — domestic cup/supercup: same clubs as serbia_w */
-  slovakia_cup: 154, /* added: comparable slovakia_sbl — domestic cup/supercup: same clubs as slovakia_sbl */
+  slovakia_cup: 169.5, /* real avg 169.6 — Sportradar stats feed utid 1636, 7 games pooled from team histories Nov 2022-Feb 2026 — SMALL SAMPLE; was 154 (12 Oct 2026) */
   slovakia_extraliga_women: 134.5, /* real avg 134.3 — Sportradar stats feed utid 1412, seasons 144086+132758, 172 games Sep 2025-Oct 2026; was 141.0 (12 Oct 2026) */
   slovenia_1_skl_women: 135.0, /* real avg 134.8 — Sportradar stats feed utid 48803, seasons 145462+135289, 74 games Oct 2025-Oct 2026; was 135.0 (12 Oct 2026) */
   slovenia_pokal: 171.0, /* real avg 171.1 — Sportradar stats feed utid 2500, seasons 138030, 11 games Dec 2025-Feb 2026; was 171.0 (12 Oct 2026) */
@@ -13088,8 +13107,8 @@ let LEAGUE_BASES = {
   spain_copa_del_rey_2026: 176.5, /* real avg 176.7 — Sportradar stats feed utid 396, seasons 139242, 7 games Feb 2026-Feb 2026 — SMALL SAMPLE; was 166 (12 Oct 2026) */
   spain_liga_femenina_2_women: 138, /* added: comparable spain_liga_femenina */
   spain_liga_femenina_challenge_women: 138.5, /* real avg 138.7 — Sportradar stats feed utid 50618, seasons 146316, 16 games Oct 2026-Oct 2026; was 138.5 (12 Oct 2026) */
-  spain_supercopa: 166, /* added: comparable acb — domestic cup/supercup: same clubs as acb */
-  spain_supercopa_women: 148, /* added: comparable spain_liga_femenina — domestic cup/supercup: same clubs as spain_liga_femenina */
+  spain_supercopa: 181.0, /* real avg 180.8 — Sportradar stats feed utid 581, 6 games pooled from team histories Sep 2024-Sep 2026 — SMALL SAMPLE; was 166 (12 Oct 2026) */
+  spain_supercopa_women: 139.5, /* real avg 139.5 — Sportradar stats feed utid 30394, 11 games pooled from team histories Sep 2023-Sep 2026; was 148 (12 Oct 2026) */
   sweden_sbl_women: 151.0, /* real avg 150.8 — Sportradar stats feed utid 30438, seasons 143312+131763, 187 games Sep 2025-Oct 2026; was 149.5 (12 Oct 2026) */
   sweden_superettan: 165.5, /* real avg 165.5 — Sportradar stats feed utid 35330, seasons 146322+131849, 224 games Sep 2025-Oct 2026; was 165.5 (12 Oct 2026) */
   switzerland_nlb: 150.0, /* real avg 150.1 — Sportradar stats feed utid 37973, seasons 145596+134493, 235 games Sep 2025-Oct 2026; was 153.0 (12 Oct 2026) */
@@ -13217,7 +13236,7 @@ let LEAGUE_BASES = {
   romania_ln: 171.5, /* real avg 171.6 — Sportradar stats feed utid 1948, seasons 145622+135559, 296 games Oct 2025-Oct 2026; was 156 (12 Oct 2026) */
   sweden_sbl: 175.5, /* real avg 175.6 — Sportradar stats feed utid 277, seasons 142580+131761, 216 games Sep 2025-Oct 2026; was 162 (12 Oct 2026) */
   swiss_sbl: 167.5, /* real avg 167.6 — Sportradar stats feed utid 1938, seasons 145592+134385, 154 games Sep 2025-Oct 2026; was 156 (12 Oct 2026) */
-  bal: 154,
+  bal: 169, /* real avg 169 combined pts/game, 2026 BAL season — sportsafrica.net 18 Jun 2026; was 154 */
   rwanda: 144,
   fiba_wc: 169.0, /* real avg 169.0 — Sportradar stats feed utid 441, seasons 104911, 92 games Aug 2023-Sep 2023; was 156 (12 Oct 2026) */
   fiba_eb: 163.5, /* real avg 163.5 — Sportradar stats feed utid 285, seasons 129691+85294, 152 games Sep 2022-Sep 2025; was 156 (12 Oct 2026) */
@@ -13232,12 +13251,12 @@ let LEAGUE_BASES = {
   fiba_asia_preq: 162,
   intl_friendly: 168,
   club_friendly: 172,
-  aba_pre: 168,
+  aba_pre: 163.5, /* real avg 163.7 — Sportradar stats feed utid 49140, 9 games pooled from team histories Sep 2026-Sep 2026 — SMALL SAMPLE; was 168 (12 Oct 2026) */
   albania_superliga: 148,
   albania_w: 128,
   argentina_liga_femenina: 134,
   armenia_a_league: 144,
-  aus_wnbl: 152,
+  aus_wnbl: 157.0, /* real avg 156.9 — Sportradar stats feed utid 1506, 488 games pooled from team histories Nov 2020-Mar 2026; was 152 (12 Oct 2026) */
   azerbaijan_abl: 142,
   belarus_premier: 156.5, /* real avg 156.4 — Sportradar stats feed utid 35815, seasons 146794+135285, 205 games Sep 2025-Oct 2026; was 154 (12 Oct 2026) */
   belarus_premier_w: 134,
@@ -19484,8 +19503,11 @@ const BB_UNDER_FACTOR_DEFAULTS = { ft: 1.5, h1: 1.5, team_a: 1.6, team_b: 1.6, h
 // AUDIT-NAV: members: bbUnderEdgeFactor
 // AUDIT-NAV: calls other labeled calc code: bbProtectedUnderFactorFloor, getParam
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
+/* PENDING-FIX 3 (Under-factor wiring): the Under factor was resolved five different ways (main gate, T10 pre-adjustment gate,
+   integrity warning gate, tracked-pick diagnostic with its own 1.3 floor, tuner grid below the floor). All five now go through
+   bbUnderEdgeFactor / computeEffectivePointThreshold; the global UNDER_EDGE_FACTOR (read once at load) is no longer a fallback. */
 function bbUnderEdgeFactor(league, mk) {
-  const base = Number(getParam("underEdgeFactor", league, mk) ?? UNDER_EDGE_FACTOR);
+  const base = Number(getParam("underEdgeFactor", league, mk) ?? 1.5);
   const key = String(mk || "").toLowerCase();
   const tuned = Number.isFinite(base) && Math.abs(base - 1.5) > 1e-9;
   const v = !tuned && BB_UNDER_FACTOR_DEFAULTS[key] ? BB_UNDER_FACTOR_DEFAULTS[key] : base;
@@ -19758,9 +19780,7 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
       /* T9/T9S (mixed-competition samples) removed: form and H2H are strictly same-competition, nothing is mixed in. */
       if (side === "UNDER" && bbStrictFinite(p.preAdjustmentProj) && bbStrictFinite(p.line)) {
         const preEdge = Number(p.preAdjustmentProj) - Number(p.line);
-        const baseThreshold = Number(getLeagueEdgePointThreshold(league, mk));
-        const underFactor = bbUnderEdgeFactor(league, mk);
-        const requiredPreEdge = baseThreshold * underFactor;
+        const requiredPreEdge = Number(computeEffectivePointThreshold(league, mk, -1, {}).effective); /* PENDING-FIX 3 */
         if (preEdge >= 0 || Math.abs(preEdge) < requiredPreEdge) {
           add("T10", "WARN", "Under depends on fatigue/intelligence adjustment; pre-adjustment edge " + preEdge.toFixed(2) + " vs " + requiredPreEdge.toFixed(2)); /* FIX_GUIDE step 3 */
           p.adjustmentDependence = { detected: true, preAdjustmentProjection: Number(p.preAdjustmentProj), preAdjustmentEdge: Number(preEdge), requiredEdge: Number(requiredPreEdge) };
@@ -19774,9 +19794,9 @@ function applyBBMarketGate(picks, rawMarketInputs, league, parsed) {
       const status = blocks > 0 || warns >= 2 ? "BLOCK" : warns ? "WARNING" : "CLEAR"; /* FIX_GUIDE step 3: symmetric */
       p.marketIntegrity = { status, side, signals: sig, baitAligned };
       if (status === "WARNING" && p.pick !== "NO PLAY") {
-        const baseThreshold = Number(getLeagueEdgePointThreshold(league, mk));
-        const underFactor = bbUnderEdgeFactor(league, mk);
-        const warningThreshold = baseThreshold * (side === "UNDER" ? underFactor : 1) * 1.25;
+        const _cetW = computeEffectivePointThreshold(league, mk, side === "UNDER" ? -1 : 1, {}); /* PENDING-FIX 3 */
+        const baseThreshold = Number(_cetW.base);
+        const warningThreshold = Number(_cetW.effective) * 1.25;
         if (bbStrictFinite(p.edge) && Math.abs(Number(p.edge)) < warningThreshold) {
           p.gradeYellow = true;
           p.integrityWarningNote = "Soft warning: edge " + Number(p.edge).toFixed(1) + " cleared " + baseThreshold.toFixed(1) + " but not the caution bar " + warningThreshold.toFixed(1) + ". Grade shown yellow.";
@@ -27335,7 +27355,7 @@ function computeEffectivePointThreshold(league, marketKey, signedEdge, context) 
      overrides and the 1.3 floor resolve exactly as before. An explicit context.underEdgeFactorOverride (tuner / backtest candidate) is used as-is. */
   const _uefLegacyRaw = context?.underEdgeFactorOverride != null
     ? context.underEdgeFactorOverride
-    : (getParam("underEdgeFactor", league, marketKey) ?? UNDER_EDGE_FACTOR);
+    : (getParam("underEdgeFactor", league, marketKey) ?? 1.5);
   let _underEdgeFactor = Math.max(bbProtectedUnderFactorFloor(marketKey), bbStrictFinite(_uefLegacyRaw) ? Number(_uefLegacyRaw) : 1.5); /* BB-PROTECTED: floor = current per-market Under default, not 1.3 */ /* BB-FIX: hard floor 1.3 so no tuner can make Unders easy */
   if (context?.underEdgeFactorOverride == null && typeof bbUnderEdgeFactor === "function") {
     const _perMarket = Number(bbUnderEdgeFactor(league, marketKey));
@@ -34754,6 +34774,20 @@ function combineVenueDiag(scoredDiag, allowedDiag) {
 /* 1H FALLBACK: when real first-half rows are missing/short (league feed without period scores), estimate each game's
    1H from its FT score x league-typical 1H share, so 1H markets still project. Flagged in window.__bbH1Estimated for the UI. */
 const LEAGUE_H1_SHARE_REAL = {
+  argentina_super_20: 0.517,
+  china_cba_preseason: 0.51,
+  france_match_des_champions_women: 0.511,
+  france_supercoupe: 0.477,
+  greece_super_cup: 0.488,
+  italy_serie_a2_lnp_cup: 0.484,
+  italy_supercoppa: 0.497,
+  italy_supercoppa_women: 0.499,
+  montenegro_i_b_mckl: 0.497,
+  slovakia_cup: 0.507,
+  spain_supercopa: 0.484,
+  spain_supercopa_women: 0.503,
+  aba_pre: 0.496,
+  aus_wnbl: 0.516,
   nba_gl: 0.504,
   wnba_pre: 0.545, /* real (Q1+Q2)/(Q1..Q4) over completed games, Sportradar stats feed (NBA Preseason: ESPN), 12 Oct 2026 */
   aba: 0.507,
@@ -37364,9 +37398,14 @@ function compute1HProjection({
 function getMarketVolLimit(league, marketKey) {
   const base = getParam("volatilityLimit", league) ?? 12;
   const key = String(marketKey || "").toLowerCase();
-  if (key === "h1" || key === "h1_team_a" || key === "h1_team_b")
-    return base * (getParam("h1VolScale", league) ?? 0.7071);
-  if (key === "team_a" || key === "team_b") return base * (getParam("teamVolScale", league) ?? 0.5);
+  /* PENDING-FIX 6 (h1_team vol limit): 1H team totals used the whole-1H limit; they now also take the team scale.
+     PENDING-FIX 7 (teamVolScale): fallback 0.5 -> 0.7. Measured SD(team)/SD(FT) median 0.709 over 257 leagues
+     (club 0.61-0.66, FIBA national teams 0.72-0.75). */
+  const _tvsRaw = Number(getParam("teamVolScale", league) ?? 0.7);
+  const _tvs = Number.isFinite(_tvsRaw) ? _tvsRaw : 0.7;
+  if (key === "h1") return base * (getParam("h1VolScale", league) ?? 0.7071);
+  if (key === "h1_team_a" || key === "h1_team_b") return base * (getParam("h1VolScale", league) ?? 0.7071) * _tvs;
+  if (key === "team_a" || key === "team_b") return base * _tvs;
   return base;
 }
 // ========== CALC-AUDIT-307: TOTALS AND LINE-RANGE CALCULATIONS — END ==========
@@ -38815,7 +38854,7 @@ function buildTrackedPickPayload({
     adjustmentDependence: pickRow.adjustmentDependence || null,
     underEdgeFactorUsed: (() => {
       const raw = (typeof computeEffectivePointThreshold === "function") ? computeEffectivePointThreshold(league, marketKey, -1, {}).underFactor : getParam("underEdgeFactor", league, marketKey); /* BB-FIX: record the factor the gate actually used */
-      return bbStrictFinite(raw) ? Math.max(1.3, Number(raw)) : 1.5;
+      return bbStrictFinite(raw) ? Math.max(bbProtectedUnderFactorFloor(marketKey), Number(raw)) : bbUnderEdgeFactor(league, marketKey); /* PENDING-FIX 3 */
     })(),
     integrityDecisionPath: pickRow.marketIntegrity?.status || (pickRow.pick === "NO PLAY" ? "NO_PLAY" : "CLEAR"),
     advancedStatsDiagnostic: pickRow.advancedStatsDiagnostic || window.__bbAdvDiagByMarket?.[marketKey] || null,
@@ -39831,6 +39870,7 @@ async function runEngine() {
     );
         /* CALCULATION SECTION */
     let h1Calc;
+    try { window.__bbH1Estimated = {}; } catch (_eR) {} /* PENDING-FIX 5 (estimated-1H block): flags were never cleared between matches, so one match with missing quarters marked later matches' 1H as estimated */
     try { h1Calc = Number.isFinite(_h1VolRatio) ? compute1HProjection({
       league,
       parsed,
