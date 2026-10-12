@@ -1,4 +1,3 @@
-S
 <!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
@@ -30382,6 +30381,10 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
             gotLS = lm.length >= 1 && lo.length >= 1;
             const _wentToOT =
               lm.length > rules.regulationPeriods && lo.length > rules.regulationPeriods;
+            if (_wentToOT) { /* LBL-1: regulation-only FT form (OT allowance is added separately at the gate) */
+              const _rp = rules.regulationPeriods, _rm = lm.slice(0, _rp).map(readVal), _ro = lo.slice(0, _rp).map(readVal);
+              if (_rm.every(Number.isFinite) && _ro.every(Number.isFinite)) { ms = _rm.reduce((x, y) => x + y, 0); os = _ro.reduce((x, y) => x + y, 0); }
+            }
             if (lm.length >= 1 && lo.length >= 1) {
               if (rules.regulationPeriods >= 4) {
                 const _h1m0 = readVal(lm[0]), _h1m1 = readVal(lm[1]);
@@ -30857,6 +30860,18 @@ function euroleagueDisplayClock(g) {
   return min || "";
 }
 /* RESTORED (1H fix): quarter -> linescore helpers were deleted with the quarter markets, but 1H (Q1+Q2) depends on them. */
+/* LBL-1: regulation-only FT score from per-quarter data (q1..q4 / partials1..4). The OT allowance (bbOtAllowance) assumes
+   form is regulation-only; without this, SR/KBL/EuroLeague/ESPN form included OT points and OT was counted twice. */
+function bbRegFromQuarters(side, full) {
+  const F = Number(full);
+  const q = (side && (side.quarters || side.partials)) || null;
+  if (!q) return F;
+  const n = (v) => (v == null || String(v).trim() === "" ? NaN : Number(v));
+  const v = [n(q.q1 ?? q.partials1), n(q.q2 ?? q.partials2), n(q.q3 ?? q.partials3), n(q.q4 ?? q.partials4)];
+  if (!v.every(x => Number.isFinite(x) && x >= 0)) return F;
+  const r = v[0] + v[1] + v[2] + v[3];
+  return r > 0 && (!Number.isFinite(F) || r <= F) ? r : F;
+}
 function bbQuarterH1(side) {
   const q = (side && (side.quarters || side.partials)) || null;
   if (!q) return null;
@@ -31271,8 +31286,8 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
       const isHome = hc === tCode;
       const me = isHome ? g.home : g.away;
       const opp = isHome ? g.away : g.home;
-      const ms = Number(me?.score);
-      const os = Number(opp?.score);
+      const ms = bbRegFromQuarters(me, me?.score); /* LBL-1 */
+      const os = bbRegFromQuarters(opp, opp?.score); /* LBL-1 */
       const venue = isHome ? "home" : "away";
       return {
         id: String(g.id || g.identifier || ""),
@@ -32353,8 +32368,8 @@ function buildKblTeamStats(teamCode, allGames, requiredVenue) {
       const isHome = hc === tCode;
       const me = isHome ? g.home : g.away;
       const opp = isHome ? g.away : g.home;
-      const ms = Number(me?.score);
-      const os = Number(opp?.score);
+      const ms = bbRegFromQuarters(me, me?.score); /* LBL-1 */
+      const os = bbRegFromQuarters(opp, opp?.score); /* LBL-1 */
       return {
         id: String(g.id || g.gmkey || ""),
         date: g.date || g.gameDate || "",
