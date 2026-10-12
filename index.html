@@ -1,4 +1,3 @@
-S
 <!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
@@ -7,10 +6,6 @@ BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Preserved line-only memory and market-line fetching; neither can override the edge-threshold eligibility decision.
 - Live eligibility uses signed point edges and effective league/market thresholds; original smart-line, tracker, team-memory, sibling-market, volatility/trap, confidence, and integrity gates are preserved.
 - Retained missing-input, unsupported-market, finite-projection/edge, malformed-line, and final structural integrity checks.
-v10 (12 Oct 2026): 1H FIX. EuroLeague/EuroCup and KBL never collected 1H data (h1m/h1o hard-coded null, empty linescores) -> 1H Total / Team A 1H / Team B 1H were always NaN.
-  Added tolerant quarter parsing validated against the final score, a live.euroleague.net Header/Boxscore fallback, 1H in H2H, real linescores for finished games (1H settlement),
-  1 retry + failure counter on ESPN summary fetches, 1H n/N coverage in the fetch status, "—" instead of "NaN" in the table, and a clearly-labelled FT-based 1H estimate (≈) that is NEVER a pick.
-  NOT verified against live feeds (network unavailable when patched): field names are matched tolerantly; anything that does not reconcile with the final score is rejected.
 v9 (11 Oct 2026): fixed "runEngine crashed: Can't find variable: _h1" (_h1 now = lineOf("h1")); rebuilt missing ssProcessTeamEvents_LEGACY and bbIsFriendlyEvent;
   removed undefined _reconGapSevere + recon-gap helpers; fixed SportyBet stale-argument bug and dropped hcp matching; removed edgeH2PointThreshold, h2_team_b and 2H/Q wording.
 Validation: static threshold tables, inline JavaScript syntax, removal checks, and edge/UNDER threshold tests are checked; live browser/network integration remains unverified.
@@ -12048,7 +12043,20 @@ function _bbRawLeagueEdgePointThreshold(league, marketKey) {
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 /* BB-PROTECTED: public threshold resolver. Whatever the tunable/locked/replay layers return, the result can never be
    below the protected floor (the untuned static value). Raising is allowed; lowering is not. */
+/* AUDIT FIX: 1H team totals (~40-pt lines, SD ~7.5) used the full 1H-total threshold (~5 pts, x1.6 for Unders = 8),
+   so they could practically never play. Scale the 1H bucket by the team/total SD ratio (7.5/11 ~ 0.65), floor 2.5. */
 function getLeagueEdgePointThreshold(league, marketKey) {
+  const _mk = String(marketKey || "").toLowerCase();
+  const _base = getLeagueEdgePointThreshold_BASE(league, marketKey);
+  if ((_mk === "h1_team_a" || _mk === "h1_team_b") && Number.isFinite(_base) && _base > 0) {
+    let tuned = NaN;
+    try { tuned = typeof getParam === "function" ? Number(getParam("edgeH1TeamPointThreshold", league, marketKey)) : NaN; } catch (_e) {}
+    if (Number.isFinite(tuned) && tuned > 0) return tuned;
+    return Math.max(2.5, Math.round(_base * 0.65 * 10) / 10);
+  }
+  return _base;
+}
+function getLeagueEdgePointThreshold_BASE(league, marketKey) {
   const lk = String(league || "default").toLowerCase();
   const mk = String(marketKey || "ft").toLowerCase();
   const bucket = mk === "team_a" || mk === "team_b" ? "team"
@@ -28942,11 +28950,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         const data = await (_summaryCache.has(key)
           ? _summaryCache.get(key)
           : (() => {
-              const p = proxyFetch(`${base}/summary?event=${ref.id}`).catch(async (_err1) => {
-                /* BB-FIX v10: one retry - a transient timeout used to silently drop that game's 1H data */
-                await new Promise((r) => setTimeout(r, 450));
-                return proxyFetch(`${base}/summary?event=${ref.id}`);
-              }).catch((err) => {
+              const p = proxyFetch(`${base}/summary?event=${ref.id}`).catch((err) => {
                 _summaryCache.delete(key);
                 throw err;
               });
@@ -29016,7 +29020,6 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         }
       } catch (e) {
         logDebug("fetchScheduleCore summary failed", e);
-        try { window.__bbSummaryFailures = (window.__bbSummaryFailures || 0) + 1; } catch (_cnt) {} /* BB-FIX v10: failures are counted, not invisible */
       }
       if (isNaN(ms) || isNaN(os) || ms <= 0 || os <= 0) return null;
       let advancedH1 = null;
@@ -29239,11 +29242,7 @@ async function fetchH2HCore(base, teamAId, teamBId, leagueKey) {
         const data = await (_summaryCache.has(key)
           ? _summaryCache.get(key)
           : (() => {
-              const p = proxyFetch(`${base}/summary?event=${ref.id}`).catch(async (_err1) => {
-                /* BB-FIX v10: one retry - a transient timeout used to silently drop that game's 1H data */
-                await new Promise((r) => setTimeout(r, 450));
-                return proxyFetch(`${base}/summary?event=${ref.id}`);
-              }).catch((err) => {
+              const p = proxyFetch(`${base}/summary?event=${ref.id}`).catch((err) => {
                 _summaryCache.delete(key);
                 throw err;
               });
@@ -29449,6 +29448,33 @@ function euroleagueDisplayClock(g) {
   const min = g?.minute != null ? String(g.minute).trim() : "";
   return min || "";
 }
+/* RESTORED (1H fix): quarter -> linescore helpers were deleted with the quarter markets, but 1H (Q1+Q2) depends on them. */
+function bbQuarterH1(side) {
+  const q = (side && (side.quarters || side.partials)) || null;
+  if (!q) return null;
+  const n = (v) => (v == null || String(v).trim() === "" ? NaN : Number(v));
+  const a = n(q.q1 ?? q.partials1), b = n(q.q2 ?? q.partials2);
+  return Number.isFinite(a) && Number.isFinite(b) && a >= 0 && b >= 0 && a + b > 0 ? a + b : null;
+}
+function euroleagueQuartersToLinescores(side) {
+  const q = (side && (side.quarters || side.partials)) || {};
+  const vals = [q.q1 ?? q.partials1, q.q2 ?? q.partials2, q.q3 ?? q.partials3, q.q4 ?? q.partials4];
+  const out = [];
+  for (let i = 0; i < vals.length; i++) {
+    if (vals[i] == null || String(vals[i]).trim() === "") break;
+    const n = Number(vals[i]);
+    if (!Number.isFinite(n)) break;
+    out.push({ value: n });
+  }
+  for (let i = 1; i <= 5; i++) {
+    const ot = q["ot" + i] ?? q["extraPeriod" + i];
+    if (ot == null) break;
+    const n = Number(ot);
+    if (!Number.isFinite(n)) break;
+    out.push({ value: n });
+  }
+  return out;
+}
 function incrowdGameToEspnCompetition(g) {
   if (!g) return null;
   const played = euroleagueGameIsPlayed(g);
@@ -29460,14 +29486,13 @@ function incrowdGameToEspnCompetition(g) {
   const awayClub = away.club || away;
   const homeScore = home.score != null ? home.score : home.standingsScore;
   const awayScore = away.score != null ? away.score : away.standingsScore;
-  const _bbFh = played && typeof bbEuroGameFirstHalf === "function" ? bbEuroGameFirstHalf(g) : null; /* BB-FIX v10 */
-  const homeLs = _bbFh && Array.isArray(_bbFh.qh) ? _bbFh.qh.filter((v) => isFinite(v)).map((v) => ({ value: v })) : [];
-  const awayLs = _bbFh && Array.isArray(_bbFh.qa) ? _bbFh.qa.filter((v) => isFinite(v)).map((v) => ({ value: v })) : [];
+  const homeLs = euroleagueQuartersToLinescores(home);
+  const awayLs = euroleagueQuartersToLinescores(away);
   return {
     id: String(g.id || g.identifier || g.code || ""),
     status: {
       displayClock: clock,
-      period: 0,
+      period: played ? Math.max(4, homeLs.length, awayLs.length) : (homeLs.length || 0),
       type: {
         completed: !!played,
         state: played ? "post" : live ? "in" : "pre",
@@ -29816,318 +29841,6 @@ async function loadEuroleagueGamesForStats(league) {
   } catch (_e) {}
   return merged;
 }
-// ========== BB-FIX v10 (12 Oct 2026): 1H / QUARTER DATA FOR EUROLEAGUE-STYLE AND KBL FEEDS — BEGIN ==========
-/* ROOT CAUSE FIXED: buildEuroleagueTeamStats / buildKblTeamStats / buildEuroleagueH2H / buildKblH2H hard-coded
-   h1m = h1o = null (h1A/h1B = NaN), and the *GameToEspnCompetition converters emitted empty linescores, so the 1H series
-   were ALWAYS empty for these leagues -> compute1HProjection returned NaN for 1H Total, Team A 1H and Team B 1H.
-   The parsers below are deliberately tolerant about field names (the live payload cannot be verified offline) and every
-   split is RECONCILED against the final score. A split that does not reconcile is rejected, never guessed. */
-function bbQNum(v) {
-  if (v == null || v === "") return NaN;
-  if (typeof v === "object") {
-    if (Array.isArray(v)) return NaN;
-    var o = v.value != null ? v.value : v.score != null ? v.score : v.points != null ? v.points : v.pts != null ? v.pts : v.displayValue;
-    if (o == null || typeof o === "object") return NaN;
-    v = o;
-  }
-  var n = typeof v === "number" ? v : parseFloat(v);
-  return isFinite(n) && n >= 0 ? n : NaN;
-}
-function bbQOrd(key) {
-  var k = String(key).toLowerCase().replace(/[^a-z0-9]/g, "");
-  if (/^(extra|overtime|ot|et)/.test(k)) return 5;
-  if (/^(first|one)/.test(k)) return 1;
-  if (/^(second|two)/.test(k)) return 2;
-  if (/^(third|three)/.test(k)) return 3;
-  if (/^(fourth|four)/.test(k)) return 4;
-  var m = /^(?:q|qtr|quarter|period|partial|partials|p)?([1-5])(?:score|pts|points)?$/.exec(k);
-  return m ? Number(m[1]) : 0;
-}
-function bbQFill(out) {
-  for (var i = 0; i < out.length; i++) if (out[i] === undefined) out[i] = NaN;
-  return out;
-}
-function bbQuartersFromValue(v) {
-  if (!v || typeof v !== "object") return null;
-  if (Array.isArray(v)) {
-    var a = v.map(bbQNum);
-    return a.filter(isFinite).length >= 2 ? a : null;
-  }
-  var out = [], found = 0;
-  Object.keys(v).forEach(function (k) {
-    var o = bbQOrd(k);
-    if (!o) return;
-    var raw = v[k];
-    if (Array.isArray(raw)) {
-      if (o === 5) {
-        var s = raw.map(bbQNum).filter(isFinite).reduce(function (t, x) { return t + x; }, 0);
-        out[4] = s;
-      }
-      return;
-    }
-    var n = bbQNum(raw);
-    if (isFinite(n)) { out[o - 1] = n; if (o <= 4) found++; }
-  });
-  return found >= 2 ? bbQFill(out) : null;
-}
-function bbQuartersFromContainer(c) {
-  if (!c || typeof c !== "object") return null;
-  var names = ["quarters", "quarterScores", "scoreByQuarter", "partials", "partialScores", "periods", "periodScores", "scoreByPeriod", "lineScore", "linescore", "linescores", "byQuarter"];
-  for (var i = 0; i < names.length; i++) {
-    var arr = bbQuartersFromValue(c[names[i]]);
-    if (arr) return arr;
-  }
-  var out = [], found = 0;
-  Object.keys(c).forEach(function (k) {
-    var m = /^(?:score)?(?:q|qtr|quarter|period|partial)[_\s-]?([1-5])(?:[_\s-]?(?:score|pts|points))?$/i.exec(k);
-    if (!m) return;
-    var n = bbQNum(c[k]);
-    if (isFinite(n)) { out[Number(m[1]) - 1] = n; if (Number(m[1]) <= 4) found++; }
-  });
-  return found >= 2 ? bbQFill(out) : null;
-}
-/* Reconcile a quarter array with the final score. Returns { h1, q } or null. */
-function bbQuarterNormalize(arr, finalScore) {
-  if (!Array.isArray(arr) || arr.length < 2) return null;
-  var q = arr.map(function (x) { return isFinite(x) ? Number(x) : NaN; });
-  if (!isFinite(q[0]) || !isFinite(q[1])) return null;
-  var fin = isFinite(finalScore) && Number(finalScore) > 0 ? Number(finalScore) : NaN;
-  var out = q.slice();
-  var have4 = q.length >= 4 && [0, 1, 2, 3].every(function (i) { return isFinite(q[i]); });
-  var fq = q.filter(isFinite);
-  if (isFinite(fin) && have4) {
-    var sumPer = fq.reduce(function (t, x) { return t + x; }, 0);
-    if (Math.abs(sumPer - fin) <= 0.5) {
-      /* per-quarter values reconcile with the final score */
-    } else {
-      var nd = true;
-      for (var i = 1; i < q.length; i++) if (isFinite(q[i]) && isFinite(q[i - 1]) && q[i] < q[i - 1]) nd = false;
-      var lastV = fq[fq.length - 1];
-      if (nd && Math.abs(lastV - fin) <= 0.5) {
-        out = q.map(function (v, idx) { return idx === 0 || !isFinite(v) || !isFinite(q[idx - 1]) ? v : v - q[idx - 1]; });
-      } else {
-        return null;
-      }
-    }
-  } else if (q[1] > 60) {
-    /* a value this large cannot be one quarter: treat as a running (cumulative) halftime total */
-    out = [q[0], q[1] - q[0]];
-  }
-  if (isFinite(fin) && out[0] + out[1] > fin) return null;
-  if (!(out[0] >= 3 && out[1] >= 3 && out[0] <= 60 && out[1] <= 60)) return null;
-  var h1 = out[0] + out[1];
-  if (!(h1 >= 20 && h1 <= 160)) return null;
-  return { h1: h1, q: out };
-}
-function bbQuarterPairFromArrays(qHome, qAway, fHome, fAway) {
-  var nh = bbQuarterNormalize(qHome, fHome), na = bbQuarterNormalize(qAway, fAway);
-  if (nh && na) return { h: nh.h1, a: na.h1, qh: nh.q, qa: na.q };
-  if (isFinite(fHome) && isFinite(fAway)) {
-    var sh = bbQuarterNormalize(qAway, fHome), sa = bbQuarterNormalize(qHome, fAway);
-    if (sh && sa) return { h: sh.h1, a: sa.h1, qh: sh.q, qa: sa.q };
-  }
-  return null;
-}
-function bbQuarterGameLevel(g) {
-  var names = ["quarters", "partials", "periods", "quarterScores", "scoreByQuarter", "periodScores", "linescores"];
-  for (var i = 0; i < names.length; i++) {
-    var v = g && g[names[i]];
-    if (!v || typeof v !== "object") continue;
-    if (Array.isArray(v) && v.length === 2) {
-      var h0 = Array.isArray(v[0]) ? bbQuartersFromValue(v[0]) : bbQuartersFromContainer(v[0]);
-      var a0 = Array.isArray(v[1]) ? bbQuartersFromValue(v[1]) : bbQuartersFromContainer(v[1]);
-      if (h0 && a0) return { h: h0, a: a0 };
-    } else if (!Array.isArray(v)) {
-      var hv = v.home || v.local || v.a || v.A || v.teamA, av = v.away || v.road || v.b || v.B || v.teamB;
-      var hq = bbQuartersFromValue(hv) || bbQuartersFromContainer(hv), aq = bbQuartersFromValue(av) || bbQuartersFromContainer(av);
-      if (hq && aq) return { h: hq, a: aq };
-    }
-  }
-  return null;
-}
-/* First-half pair {h, a} read straight from a feed game object (home/away or local/road containers). */
-function bbQuarterPairFromGame(g) {
-  if (!g || typeof g !== "object") return null;
-  var H = g.home || g.local || null, A = g.away || g.road || null;
-  var fH = bbQNum(H && (H.score != null ? H.score : H.standingsScore));
-  var fA = bbQNum(A && (A.score != null ? A.score : A.standingsScore));
-  var qh = bbQuartersFromContainer(H), qa = bbQuartersFromContainer(A);
-  if (!qh || !qa) {
-    var gl = bbQuarterGameLevel(g);
-    if (gl) { qh = gl.h; qa = gl.a; }
-  }
-  if (!qh || !qa) return null;
-  return bbQuarterPairFromArrays(qh, qa, fH, fA);
-}
-function bbEuroGameFirstHalf(g) {
-  if (!g || typeof g !== "object") return null;
-  var c = g.__bbQ;
-  if (c && isFinite(c.h) && isFinite(c.a)) return c;
-  var p = null;
-  try { p = bbQuarterPairFromGame(g); } catch (_e) { p = null; }
-  if (p) { try { g.__bbQ = p; } catch (_e2) {} }
-  return p;
-}
-function bbEuroH1For(g, isHome, which) {
-  var fh = bbEuroGameFirstHalf(g);
-  if (!fh) return null;
-  var mine = isHome ? fh.h : fh.a, opp = isHome ? fh.a : fh.h;
-  var v = which === "m" ? mine : opp;
-  return isFinite(v) && v > 0 ? Math.round(v) : null;
-}
-/* Live-API parsers (live.euroleague.net). Header carries ScoreQuarterNA / ScoreQuarterNB; Boxscore carries ByQuarter rows. */
-function bbQuartersFromLiveHeader(hdr, side) {
-  if (!hdr || typeof hdr !== "object") return null;
-  var out = [], found = 0;
-  Object.keys(hdr).forEach(function (k) {
-    var m = /^ScoreQuarter([1-4])([AB])$/i.exec(k);
-    if (m && m[2].toUpperCase() === side) {
-      var n = bbQNum(hdr[k]);
-      if (isFinite(n)) { out[Number(m[1]) - 1] = n; found++; }
-      return;
-    }
-    var e = /^ScoreExtraTime([AB])$/i.exec(k);
-    if (e && e[1].toUpperCase() === side) {
-      var n2 = bbQNum(hdr[k]);
-      if (isFinite(n2)) out[4] = n2;
-    }
-  });
-  return found >= 2 ? bbQFill(out) : null;
-}
-function bbQuartersFromBoxscore(box) {
-  var bq = box && (box.ByQuarter || box.byQuarter);
-  if (!Array.isArray(bq) || bq.length < 2) return null;
-  var rows = bq.slice(0, 2).map(function (r) {
-    var arr = [], found = 0;
-    Object.keys(r || {}).forEach(function (k) {
-      var m = /^Quarter([1-4])$/i.exec(k);
-      if (m) { var n = bbQNum(r[k]); if (isFinite(n)) { arr[Number(m[1]) - 1] = n; found++; } return; }
-      if (/^ExtraTime$/i.test(k)) { var n2 = bbQNum(r[k]); if (isFinite(n2)) arr[4] = n2; }
-    });
-    return found >= 2 ? bbQFill(arr) : null;
-  });
-  return rows[0] && rows[1] ? { A: rows[0], B: rows[1] } : null;
-}
-var __bbEuroQCache = new Map();
-async function bbEuroFetchQuarterSplit(g) {
-  var seasonCode = (g && g.season && g.season.code) || String((g && g.identifier) || "").split("_")[0] || "";
-  var gameCode = g && g.code != null ? g.code : String((g && g.identifier) || "").split("_")[1];
-  if (!seasonCode || gameCode == null || gameCode === "") return null;
-  var key = seasonCode + "|" + gameCode;
-  var hit = __bbEuroQCache.get(key);
-  if (hit && (hit.ok || Date.now() - hit.ts < hit.ttl)) return hit.ok ? hit.val : null;
-  var H = g.home || g.local || {}, A = g.away || g.road || {};
-  var fH = bbQNum(H.score != null ? H.score : H.standingsScore), fA = bbQNum(A.score != null ? A.score : A.standingsScore);
-  var gotResponse = false;
-  var sleep = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
-  var get = async function (url) {
-    for (var attempt = 0; attempt < 2; attempt++) {
-      try {
-        var d = await proxyFetch(url, 9000);
-        if (d && typeof d === "object") { gotResponse = true; return d; }
-      } catch (_e) {
-        if (window.__abortSignal && window.__abortSignal.aborted) return null;
-        await sleep(350);
-      }
-    }
-    return null;
-  };
-  var q = "gamecode=" + encodeURIComponent(String(gameCode)) + "&seasoncode=" + encodeURIComponent(String(seasonCode));
-  var val = null;
-  var hdr = await get("https://live.euroleague.net/api/Header?" + q);
-  if (hdr) {
-    var hA = bbQuartersFromLiveHeader(hdr, "A"), hB = bbQuartersFromLiveHeader(hdr, "B");
-    if (hA && hB) {
-      var fh2 = isFinite(fH) ? fH : bbQNum(hdr.ScoreA), fa2 = isFinite(fA) ? fA : bbQNum(hdr.ScoreB);
-      val = bbQuarterPairFromArrays(hA, hB, fh2, fa2);
-    }
-  }
-  if (!val) {
-    var box = await get("https://live.euroleague.net/api/Boxscore?" + q);
-    var bq = box ? bbQuartersFromBoxscore(box) : null;
-    if (bq) val = bbQuarterPairFromArrays(bq.A, bq.B, fH, fA);
-  }
-  __bbEuroQCache.set(key, val ? { ok: true, val: val, ts: Date.now(), ttl: 0 } : { ok: false, ts: Date.now(), ttl: gotResponse ? 30 * 60 * 1000 : 60 * 1000 });
-  return val;
-}
-async function bbAsyncPool(items, limit, fn) {
-  var idx = 0;
-  var worker = async function () {
-    while (idx < items.length) {
-      var i = idx++;
-      try { await fn(items[i], i); } catch (_e) {}
-    }
-  };
-  var ws = [];
-  for (var w = 0; w < Math.max(1, Math.min(limit, items.length)); w++) ws.push(worker());
-  await Promise.all(ws);
-}
-/* Make sure the games that feed the last-10 / H2H windows carry a first-half split. Mutates game.__bbQ. */
-async function bbEuroEnsureQuarters(allGames, codes, asOfIso, excludeId, opts) {
-  opts = opts || {};
-  var perTeam = opts.perTeam || 14, h2hN = opts.h2h || 6, budgetMs = opts.budgetMs || 30000;
-  var rep = { selected: 0, fromFeed: 0, fetched: 0, failed: 0, skipped: 0 };
-  var asOfMs = asOfIso ? Date.parse(asOfIso) : NaN;
-  var cs = (codes || []).map(function (c) { return String(c || "").toUpperCase(); }).filter(Boolean);
-  var played = (allGames || []).filter(function (g) { return euroleagueGameIsPlayed(g); });
-  var before = function (g) {
-    if (excludeId && String(g.id || g.identifier || "") === String(excludeId)) return false;
-    var t = Date.parse(g.date || "");
-    return !isFinite(asOfMs) || !isFinite(t) || t < asOfMs;
-  };
-  var byDateDesc = function (a, b) { return new Date(b.date || 0) - new Date(a.date || 0); };
-  var sel = new Map();
-  var codeOf = function (s) { return String((s && s.code) || "").toUpperCase(); };
-  cs.forEach(function (code) {
-    played.filter(function (g) { return (codeOf(g.home) === code || codeOf(g.away) === code) && before(g); })
-      .sort(byDateDesc).slice(0, perTeam).forEach(function (g) { sel.set(String(g.id || g.identifier), g); });
-  });
-  if (cs.length >= 2) {
-    played.filter(function (g) { var s = [codeOf(g.home), codeOf(g.away)]; return s.indexOf(cs[0]) >= 0 && s.indexOf(cs[1]) >= 0 && before(g); })
-      .sort(byDateDesc).slice(0, h2hN).forEach(function (g) { sel.set(String(g.id || g.identifier), g); });
-  }
-  var todo = [];
-  sel.forEach(function (g) {
-    rep.selected++;
-    if (bbEuroGameFirstHalf(g)) rep.fromFeed++; else todo.push(g);
-  });
-  var t0 = Date.now();
-  await bbAsyncPool(todo, 6, async function (g) {
-    if (Date.now() - t0 > budgetMs || (window.__abortSignal && window.__abortSignal.aborted)) { rep.skipped++; return; }
-    var s = await bbEuroFetchQuarterSplit(g);
-    if (s) { g.__bbQ = s; rep.fetched++; } else rep.failed++;
-  });
-  try { window.__bbEuroQReport = rep; } catch (_e) {}
-  return rep;
-}
-/* Short status text: how many of the last-N games carry 1H data. */
-function bbH1Cov(stats) {
-  var n = stats && stats.scored ? stats.scored.length : 0;
-  var h = stats && stats.h1Scored ? stats.h1Scored.length : 0;
-  return " · 1H " + h + "/" + n + (h < 5 ? " ⚠️" : "");
-}
-/* 1H ESTIMATE FROM FT (display-only). Used when no usable 1H game data exists, so the table shows an estimate instead of
-   "NaN". It is NEVER eligible for a pick: the rows are forced to NO PLAY with an explicit reason. */
-function bbDerivedH1Share(league) {
-  var lk = String(league || "").toLowerCase();
-  if (/^ncaa/.test(lk)) return 0.475;
-  return 0.49;
-}
-function bbDerive1HFromRef(league, lines, ref) {
-  var out = { h1DerivedProj: NaN, h1DerivedA: NaN, h1DerivedB: NaN, h1DerivedShare: NaN };
-  try {
-    if (!ref) return out;
-    var a = Number(ref.a), b = Number(ref.b);
-    if (!isFinite(a) || !isFinite(b) || a <= 0 || b <= 0) return out;
-    var sh = bbDerivedH1Share(league);
-    out.h1DerivedShare = sh;
-    out.h1DerivedA = a * sh;
-    out.h1DerivedB = b * sh;
-    out.h1DerivedProj = (a + b) * sh;
-  } catch (_e) {}
-  return out;
-}
-// ========== BB-FIX v10 (12 Oct 2026): 1H / QUARTER DATA FOR EUROLEAGUE-STYLE AND KBL FEEDS — END ==========
 // ========== CALC-AUDIT-261: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — BEGIN ==========
 // AUDIT-NAV: members: buildEuroleagueTeamStats
 // AUDIT-NAV: calls other labeled calc code: filterEventsAsOf, resolvePredictionAsOf
@@ -30159,8 +29872,9 @@ function buildEuroleagueTeamStats(teamCode, allGames, requiredVenue, asOfOverrid
         venue,
         ms,
         os,
-        h1m: bbEuroH1For(g, isHome, "m"), /* BB-FIX v10: was hard-coded null -> 1H always NaN */
-        h1o: bbEuroH1For(g, isHome, "o"),
+        /* RESTORED (1H fix): 1H = Q1+Q2 from the feed's per-quarter scores (deleted with the quarter markets). null/"" = missing, never 0. */
+        h1m: bbQuarterH1(me),
+        h1o: bbQuarterH1(opp),
         venueName: g?.venue?.name || null,
         venueCity: null,
         venueState: null,
@@ -30304,8 +30018,8 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
         teamBId: tB,
         scoreA: Math.round(scoreA),
         scoreB: Math.round(scoreB),
-        h1A: (function () { const v = bbEuroH1For(g, homeIsA, "m"); return v == null ? NaN : v; })(), /* BB-FIX v10 */
-        h1B: (function () { const v = bbEuroH1For(g, homeIsA, "o"); return v == null ? NaN : v; })(),
+        h1A: NaN,
+        h1B: NaN,
         date,
       };
     })
@@ -30598,15 +30312,6 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
           : null;
     const _asOfFixture = selectedFixture?.dataset?.eventDate || "";
     const _fixtureGameId = selectedFixture?.value || "";
-    /* BB-FIX v10: first-half splits for the last-10 / H2H windows (feed quarters, else live.euroleague.net Header/Boxscore) */
-    let _qRep = null;
-    try {
-      setStatusHTML('<span class="spinner"></span>Loading 1H / quarter scores...', "loading");
-      _qRep = await bbEuroEnsureQuarters(allGames, [teamAId, teamBId], _asOfFixture, _fixtureGameId, { perTeam: 14, h2h: 6 });
-      if (!_stillValid(teamAId, teamBId)) return;
-    } catch (_qe) {
-      logDebug("bbEuroEnsureQuarters failed", _qe);
-    }
     const aStats = buildEuroleagueTeamStats(teamAId, allGames, null, _asOfFixture, _fixtureGameId);
     const bStats = buildEuroleagueTeamStats(teamBId, allGames, null, _asOfFixture, _fixtureGameId);
     const aVenueStats = teamAVenue ? buildEuroleagueTeamStats(teamAId, allGames, teamAVenue, _asOfFixture, _fixtureGameId) : null;
@@ -30682,7 +30387,7 @@ async function fetchEuroleagueCore(league, teamAName, teamBName) {
         document.getElementById(prefix + "1HAllowed").value = stats.h1Allowed.join(",");
       const tag = document.getElementById(prefix === "a" ? "aAutoTag" : "bAutoTag");
       if (tag) tag.style.display = stats.scored.length >= 8 ? "inline" : "none";
-      messages.push(safeText(name) + ": " + stats.scored.length + " games" + bbH1Cov(stats) + " ✅");
+      messages.push(safeText(name) + ": " + stats.scored.length + " games ✅");
     }
     _fillSide("a", aStats, aVenueStats, teamAVenue, teamAName);
     _fillSide("b", bStats, bVenueStats, teamBVenue, teamBName);
@@ -30980,24 +30685,23 @@ function kblApplyDetailScoreStatus(norm, detail) {
   };
   if (norm.home.score == null) norm.home.score = total(homeTr);
   if (norm.away.score == null) norm.away.score = total(awayTr);
+  /* RESTORED (1H fix): per-quarter scores feed 1H (Q1+Q2); they were dropped with the quarter markets. */
+  const sideQs = (trSide) => {
+    const out = {};
+    ["1", "2", "3", "4"].forEach((k) => { const v = trSide["scoreq" + k]; const n = v == null || v === "" ? NaN : Number(v); if (Number.isFinite(n)) out["q" + k] = n; });
+    (Array.isArray(trSide.scoreeq) ? trSide.scoreeq : []).forEach((v, i) => { const n = Number(v); if (Number.isFinite(n)) out["ot" + (i + 1)] = n; });
+    return Object.keys(out).length ? out : null;
+  };
+  const _hq = sideQs(homeTr), _aq = sideQs(awayTr);
+  if (_hq) norm.home.quarters = _hq;
+  if (_aq) norm.away.quarters = _aq;
+  if (norm.home.score == null && _hq && Number.isFinite(_hq.q1)) norm.home.score = Object.values(_hq).reduce((a, b) => a + b, 0);
+  if (norm.away.score == null && _aq && Number.isFinite(_aq.q1)) norm.away.score = Object.values(_aq).reduce((a, b) => a + b, 0);
   if (g.isStarted != null) norm.isStarted = kblTruthy(g.isStarted);
   if (g.isEnded != null) norm.isEnded = kblTruthy(g.isEnded);
   if (norm.isEnded) norm.status = "result";
   else if (norm.isStarted) norm.status = "playing";
   norm.liveClock = detail.__bbLiveClock || null;
-  /* BB-FIX v10: read the first-half split from the match detail when it carries one (validated against the final score) */
-  try {
-    if (norm.isEnded || String(norm.status || "").toLowerCase() === "result") {
-      const _fH = Number(norm.home && norm.home.score), _fA = Number(norm.away && norm.away.score);
-      let _qp = bbQuarterPairFromArrays(bbQuartersFromContainer(homeTr), bbQuartersFromContainer(awayTr), _fH, _fA);
-      if (!_qp) {
-        const _gl = bbQuarterGameLevel(detail) || bbQuarterGameLevel(g);
-        if (_gl) _qp = bbQuarterPairFromArrays(_gl.h, _gl.a, _fH, _fA);
-      }
-      if (!_qp) _qp = bbQuarterPairFromArrays(bbQuartersFromContainer(g.home), bbQuartersFromContainer(g.away), _fH, _fA);
-      if (_qp) norm.__bbQ = _qp;
-    }
-  } catch (_kq) { logDebug("kbl quarter split failed", _kq); }
   return norm;
 }
 
@@ -31014,9 +30718,8 @@ function kblGameToEspnCompetition(g) {
   const away = g.away || {};
   const homeScore = home.score;
   const awayScore = away.score;
-  const _bbFh = played && typeof bbEuroGameFirstHalf === "function" ? bbEuroGameFirstHalf(g) : null; /* BB-FIX v10 */
-  const homeLs = _bbFh && Array.isArray(_bbFh.qh) ? _bbFh.qh.filter((v) => isFinite(v)).map((v) => ({ value: v })) : [];
-  const awayLs = _bbFh && Array.isArray(_bbFh.qa) ? _bbFh.qa.filter((v) => isFinite(v)).map((v) => ({ value: v })) : [];
+  const homeLs = euroleagueQuartersToLinescores(home);
+  const awayLs = euroleagueQuartersToLinescores(away);
   return {
     id: String(g.id || g.gmkey || ""),
     status: {
@@ -31250,8 +30953,9 @@ function buildKblTeamStats(teamCode, allGames, requiredVenue) {
         venue: isHome ? "home" : "away",
         ms,
         os,
-        h1m: bbEuroH1For(g, isHome, "m"), /* BB-FIX v10: was hard-coded null */
-        h1o: bbEuroH1For(g, isHome, "o"),
+        /* RESTORED (1H fix): 1H = Q1+Q2 from the feed's per-quarter scores (deleted with the quarter markets). null/"" = missing, never 0. */
+        h1m: bbQuarterH1(me),
+        h1o: bbQuarterH1(opp),
         venueName: g?.venue?.name || null,
         venueCity: null,
         venueState: null,
@@ -31352,8 +31056,8 @@ function buildKblH2H(teamACode, teamBCode, allGames) {
         teamBId: tB,
         scoreA: Number(sideA?.score),
         scoreB: Number(sideB?.score),
-        h1A: (function () { const v = bbEuroH1For(g, homeIsA, "m"); return v == null ? NaN : v; })(), /* BB-FIX v10 */
-        h1B: (function () { const v = bbEuroH1For(g, homeIsA, "o"); return v == null ? NaN : v; })(),
+        h1A: NaN,
+        h1B: NaN,
       };
     })
     .filter((g) => Number.isFinite(g.scoreA) && Number.isFinite(g.scoreB) && g.scoreA > 0 && g.scoreB > 0)
@@ -31775,7 +31479,7 @@ async function fetchKblCore(league, teamAName, teamBName) {
         document.getElementById(prefix + "1HAllowed").value = stats.h1Allowed.join(",");
       const tag = document.getElementById(prefix === "a" ? "aAutoTag" : "bAutoTag");
       if (tag) tag.style.display = stats.scored.length >= 8 ? "inline" : "none";
-      messages.push(safeText(name) + ": " + stats.scored.length + " games" + bbH1Cov(stats) + " ✅");
+      messages.push(safeText(name) + ": " + stats.scored.length + " games ✅");
     }
     _fillSide("a", aStats, aVenueStats, teamAVenue, teamAName);
     _fillSide("b", bStats, bVenueStats, teamBVenue, teamBName);
@@ -32372,7 +32076,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       fillVenueMarketInputs("a", aVenueStats, teamAVenue);
     const aTag = document.getElementById("aAutoTag");
       if (aTag) aTag.style.display = aStats.scored.length >= 8 ? "inline" : "none";
-      messages.push(`${safeText(teamAName)}: ${aStats.scored.length} games${bbH1Cov(aStats)} ✅`);
+      messages.push(`${safeText(teamAName)}: ${aStats.scored.length} games ✅`);
     } else {
       messages.push(`${safeText(teamAName)}: no data ❌`);
     }
@@ -32408,7 +32112,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       fillVenueMarketInputs("b", bVenueStats, teamBVenue);
     const bTag = document.getElementById("bAutoTag");
       if (bTag) bTag.style.display = (bStats.scored && bStats.scored.length >= 8) ? "inline" : "none";
-      messages.push(`${safeText(teamBName)}: ${bStats.scored.length} games${bbH1Cov(bStats)} ✅`);
+      messages.push(`${safeText(teamBName)}: ${bStats.scored.length} games ✅`);
     } else {
       messages.push(`${safeText(teamBName)}: no data ❌`);
     }
@@ -33232,7 +32936,47 @@ function combineVenueDiag(scoredDiag, allowedDiag) {
 // AUDIT-NAV: calls other labeled calc code: getFetchedSeries, isFetchedAuthoritative
 // AUDIT-NAV: label only; labeling does not assert that any formula here is correct.
 /* CALCULATION SECTION */
+/* 1H FALLBACK: when real first-half rows are missing/short (league feed without period scores), estimate each game's
+   1H from its FT score x league-typical 1H share, so 1H markets still project. Flagged in window.__bbH1Estimated for the UI. */
+const BB_H1_SHARE_DEFAULT = 0.49;
+function bbH1Share(league) {
+  try {
+    const v = typeof getParam === "function" ? Number(getParam("h1ShareOfFT", league)) : NaN;
+    if (Number.isFinite(v) && v >= 0.4 && v <= 0.6) return v;
+  } catch (_e) {}
+  return BB_H1_SHARE_DEFAULT;
+}
+function bbH1FallbackSeries(side, metric, real, parsed, root) {
+  const realClean = (Array.isArray(real) ? real : []).filter((v) => bbStrictFinite(v) && Number(v) > 0);
+  if (realClean.length >= 5) { try { if (window.__bbH1Estimated) delete window.__bbH1Estimated[side + metric]; } catch (_e) {} return real; }
+  let ft = [];
+  try {
+    if (metric === "allowed") ft = getManualAllowedSeries(side, "ft", parsed, root);
+    else ft = typeof resolveFtSeries === "function" ? resolveFtSeries(side, root, { limit: 10, manual: parsed?.[side === "A" ? "aFTScored" : "bFTScored"] }) : getManualSeries(side, "ft", parsed, root);
+  } catch (_e) { ft = []; }
+  const ftClean = (Array.isArray(ft) ? ft : []).map(Number).filter((v) => Number.isFinite(v) && v > 0);
+  if (ftClean.length < 5 || ftClean.length !== (ft || []).length) return real;
+  let league = "";
+  try { league = String(document.getElementById("leagueSelect")?.value || ""); } catch (_e) {}
+  const share = bbH1Share(league);
+  const out = ftClean.map((v) => Math.round(v * share * 10) / 10);
+  if (Array.isArray(ft.__bbDates)) out.__bbDates = ft.__bbDates.slice();
+  if (Array.isArray(ft.__bbCompetitionTags)) out.__bbCompetitionTags = ft.__bbCompetitionTags.slice();
+  out.__bbH1Estimated = true;
+  try { (window.__bbH1Estimated = window.__bbH1Estimated || {})[side + metric] = { share: share, n: out.length, realN: realClean.length }; } catch (_e) {}
+  return out;
+}
 function getManualSeries(side, marketKey, parsed, contextRoot = null) {
+  const _r = getManualSeries_RAW(side, marketKey, parsed, contextRoot);
+  if (marketKey !== "h1") return _r;
+  return bbH1FallbackSeries(side, "scored", _r, parsed, contextRoot || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {});
+}
+function getManualAllowedSeries(side, marketKey, parsed, contextRoot = null) {
+  const _r = getManualAllowedSeries_RAW(side, marketKey, parsed, contextRoot);
+  if (marketKey !== "h1") return _r;
+  return bbH1FallbackSeries(side, "allowed", _r, parsed, contextRoot || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {});
+}
+function getManualSeries_RAW(side, marketKey, parsed, contextRoot = null) {
   const root = contextRoot || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {};
   if (isFetchedAuthoritative(side, root, marketKey)) {
     return getFetchedSeries(side, "overall", marketKey, "scored", root);
@@ -33256,7 +33000,7 @@ function getManualSeries(side, marketKey, parsed, contextRoot = null) {
    Role: Points the opponent gave up. This is the defense half of the 50/50.
    Chunks below are numbered one statement at a time. Nothing in this section is grouped past a single statement.
    ============================================================ */
-function getManualAllowedSeries(side, marketKey, parsed, contextRoot = null) {
+function getManualAllowedSeries_RAW(side, marketKey, parsed, contextRoot = null) {
   const root = contextRoot || (typeof AppState !== "undefined" ? AppState.context?.data : null) || {};
   if (isFetchedAuthoritative(side, root, marketKey)) {
     return getFetchedSeries(side, "overall", marketKey, "allowed", root);
@@ -37058,21 +36802,19 @@ function buildResultRows({ table, finalPicks, lockIdx, fixtureMeta, league, diag
     } else if (_isMarginMarket) {
       tdProj.textContent = bbStrictFinite(p.proj)
         ? ((Number(p.proj) > 0 ? "+" : "") + Number(p.proj).toFixed(1))
-        : "—";
+        : "NaN";
     } else {
-      tdProj.textContent = bbStrictFinite(p.proj)
-        ? formatProjectionWhole(p.proj)
-        : (p.derived1H && bbStrictFinite(p.derivedProj) ? "≈" + Number(p.derivedProj).toFixed(1) : "—"); /* BB-FIX v10 */
+      tdProj.textContent = formatProjectionWhole(p.proj);
     }
     row.appendChild(tdProj);
     const tdEdge = document.createElement("td");
     tdEdge.textContent = _isMarginMarket
-      ? bbStrictFinite(shownEdge)
-        ? (shownEdge > 0 ? "+" : "") + Number(shownEdge).toFixed(1)
-        : "—"
-      : bbStrictFinite(shownEdge) && isFinite(shownLine) && shownLine > 0
-        ? (function () { const _fe = formatEdge(shownEdge, shownLine); return _fe === "NaN" ? "—" : _fe; })()
-        : (p.derived1H && bbStrictFinite(p.derivedEdge) ? "≈" + (p.derivedEdge > 0 ? "+" : "") + Number(p.derivedEdge).toFixed(1) : "—"); /* BB-FIX v10 */
+      ? isFinite(shownEdge)
+        ? (shownEdge > 0 ? "+" : "") + shownEdge.toFixed(1)
+        : "NaN"
+      : isFinite(shownEdge) && isFinite(shownLine) && shownLine > 0
+        ? formatEdge(shownEdge, shownLine)
+        : "NaN";
     row.appendChild(tdEdge);
     const tdConf = document.createElement("td");
     const _confDisplay = isNoPlay ? "—" : confText;
@@ -37858,7 +37600,8 @@ async function runEngine() {
       league,
     );
         /* CALCULATION SECTION */
-    const h1Calc = Number.isFinite(_h1VolRatio) ? compute1HProjection({
+    let h1Calc;
+    try { h1Calc = Number.isFinite(_h1VolRatio) ? compute1HProjection({
       league,
       parsed,
       lines: finalLines,
@@ -37874,10 +37617,20 @@ async function runEngine() {
       },
       contextData: AppState.context?.data || null, 
     }) : { h1Proj: NaN, h1Edge: NaN, aS1: NaN, bS1: NaN, projA1H: NaN, projB1H: NaN, sampleTier1H: "invalid", volatilityError: true };
-    /* BB-FIX v10: when the real 1H model cannot run (no 1H game data), attach a clearly-labelled FT-based ESTIMATE for display only */
+    } catch (_h1Err) {
+      /* 1H failure (e.g. invariant on a NaN projection) must not abort FT / team / winner predictions */
+      engineDebug("H1 projection failed; 1H markets NO PLAY", { error: _h1Err?.message || String(_h1Err) });
+      try { window.__engineInvariantFailed = false; } catch (_e) {}
+      h1Calc = { h1Proj: NaN, h1Edge: NaN, aS1: NaN, bS1: NaN, projA1H: NaN, projB1H: NaN, h1SampleTier: "insufficient", sampleTier1H: "invalid", volatilityError: true };
+    }
+    if (!h1Calc || typeof h1Calc !== "object") h1Calc = { h1Proj: NaN, h1Edge: NaN, projA1H: NaN, projB1H: NaN, h1SampleTier: "insufficient" };
+    if (!(bbStrictFinite(h1Calc.h1Proj)) && h1Calc.h1SampleTier !== "insufficient") h1Calc.h1SampleTier = "insufficient";
+    try { const _est = window.__bbH1Estimated || {}; const _k = Object.keys(_est); if (_k.length && bbStrictFinite(h1Calc.h1Proj)) { h1Calc.h1Estimated = true; h1Calc.h1Note = (h1Calc.h1Note ? h1Calc.h1Note + " · " : "") + "1H estimated from FT x " + (_est[_k[0]].share || 0.49) + " (period scores unavailable)"; } } catch (_e) {}
     try {
-      if (h1Calc && !bbStrictFinite(h1Calc.h1Proj)) Object.assign(h1Calc, bbDerive1HFromRef(league, finalLines, { a: ftCalc.projAFT, b: ftCalc.projBFT }));
-    } catch (_dv) {}
+      let _n = document.getElementById("bbH1EstNote");
+      if (!_n) { const _fs = document.getElementById("fetchStatus"); if (_fs && _fs.parentNode) { _n = document.createElement("div"); _n.id = "bbH1EstNote"; _n.style.cssText = "font-size:11px;color:#d98a00;margin:4px 0;font-weight:700"; _fs.parentNode.insertBefore(_n, _fs.nextSibling); } }
+      if (_n) { _n.textContent = h1Calc.h1Estimated ? "⚠ 1H Total / Team A 1H / Team B 1H: quarter scores unavailable for some games, so 1H was estimated from FT × " + bbH1Share(league) + "." : ""; _n.style.display = h1Calc.h1Estimated ? "block" : "none"; }
+    } catch (_eN) {}
     MODEL_TUNING.recencyWeights = _runFTWeights;
     /* TEAM MEMORY: hidden audit record for the tracked payload (base = pre-memory projections, used for learning) */
     try {
@@ -37943,7 +37696,7 @@ async function runEngine() {
       blowoutGap: (Number.isFinite(h1Calc.projA1H) && Number.isFinite(h1Calc.projB1H) ? Math.abs(h1Calc.projA1H - h1Calc.projB1H) : NaN),
       _edgeAlreadyScaled: true,
     }));
-    if (!Number.isFinite(_h1VolRatio)) _liveNoPlayReasons.h1 = "1H game data unavailable (fewer than 3 usable half/quarter scores per team in the fetched games) - see the 1H n/N count in the fetch status";
+    if (!Number.isFinite(_h1VolRatio)) _liveNoPlayReasons.h1 = "no 1H data entered (or fewer than 3 values per team)";
     g_currentLiveComputeMarket = "team_a";
     let aPick = rangeBlocks("team_a") ? "NO PLAY" : getPickForLeague(ftCalc.aEdge, aLine, "team_a", {
       teamSc: ftCalc.aS,
@@ -37956,11 +37709,6 @@ async function runEngine() {
       blowoutGap: ftCalc.blowoutGap,
       _edgeAlreadyScaled: true,
     });
-    const marginProjectionFT = computeMarginProjection(ftCalc.projAFT, ftCalc.projBFT, { hcaPeriod: "ft", contextData: finalLines?.contextData || parsed?.contextData || (typeof AppState !== "undefined" ? AppState.context?.data : null) || null });
-    const combinedMarginVolFT = computeCombinedMarginVolatility(ftCalc.aVol, ftCalc.bVol);
-    const winnerEdge = marginProjectionFT;
-    g_currentLiveComputeMarket = "winner";
-    let winnerPick = rangeBlocks("winner") ? "NO PLAY" : getMarginPickForLeague(winnerEdge, "winner");
     let h1aEdge =
       marketAllowedForLeague("h1_team_a") && isFinite(h1Calc.projA1H) && isFinite(finalLines.h1aLine) && finalLines.h1aLine > 0
         ? h1Calc.projA1H - finalLines.h1aLine
@@ -38247,34 +37995,6 @@ async function runEngine() {
           : NaN;
     const projDiff = computeMarginProjection(ftCalc.projAFT, ftCalc.projBFT, { roleA: typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "" });
     const _coeffFitted = isConfidenceCoeffFitted(league, "ft");
-    const winnerMarginInputs = getMarginConfidenceInputs(
-      winnerEdge,
-      ftCalc.ftProj,
-      combinedMarginVolFT,
-      getMarketVolLimit(league, "ft"),
-    );
-    const winnerTrap = detectMarginTrap(
-      winnerEdge,
-      ftCalc.ftProj,
-      league,
-      "winner",
-      combinedMarginVolFT,
-      getMarketVolLimit(league, "ft"),
-      NaN                                                           ,
-    );
-    const winnerConfidence = getMarginConfidenceGrade({
-      pick: winnerPick,
-      marginEdgePct: winnerMarginInputs.marginEdgePct,
-      marginVolRatio: winnerMarginInputs.marginVolRatio,
-      sampleTier: ftCalc.ftSampleTier,
-      hasH2H: ftCalc.ftHasH2H,
-      trap: winnerTrap,
-      marketKey: "winner",
-      league,
-      marginEdgePts: winnerEdge,
-      volLimitPts: getMarketVolLimit(league, "ft"),
-      injuryFetchFailed: !!(typeof window !== "undefined" && window.__bbInjuryFeedEmptyWarning) || !!(typeof AppState !== "undefined" && AppState.injuries && ((AppState.injuries.A && (AppState.injuries.A.emptyFeed || AppState.injuries.A.fetchFailed)) || (AppState.injuries.B && (AppState.injuries.B.emptyFeed || AppState.injuries.B.fetchFailed)))),
-    });
     const picks = [
       {
         _idx: 0,
@@ -38374,28 +38094,6 @@ async function runEngine() {
         bVenueAdjustment: ftCalc.bVenueAdjustment,
       },
       {
-        _idx: 5,
-        name: "Winner",
-        marketKey: "winner",
-        marketType: "winner",
-        league,
-        context: { aSc: ftCalc.aS, bSc: ftCalc.bS },
-        line: null,
-        proj: marginProjectionFT,
-        edge: winnerEdge,
-        pick: winnerPick,
-        confidence: winnerConfidence,
-        note: null,
-        fullModel: ftCalc.ftFullModel,
-        sampleTier: ftCalc.ftSampleTier,
-        hasH2H: ftCalc.ftHasH2H,
-        trap: winnerTrap,
-        volatility: combinedMarginVolFT,
-        volLimit: getMarketVolLimit(league, "ft"),
-        coeffFitted: _coeffFitted,
-        marginEdgePct: winnerMarginInputs.marginEdgePct,
-      },
-      {
         _idx: 14,
         name: "Team A 1H",
         marketKey: "h1_team_a",
@@ -38450,23 +38148,6 @@ async function runEngine() {
         p.lockStrength = 0;
       });
     }
-    /* BB-FIX v10: show an estimate instead of "NaN" when no 1H data exists. Display-only, pick forced to NO PLAY. */
-    try {
-      if (h1Calc && bbStrictFinite(h1Calc.h1DerivedProj) && !bbStrictFinite(h1Calc.h1Proj)) {
-        const _dMsg = "1H game data unavailable - value shown (≈) is an estimate: FT projection x " + (Number(h1Calc.h1DerivedShare) * 100).toFixed(1) + "%. Informational only, never a pick.";
-        picks.forEach((p) => {
-          const _mk = String((p && p.marketKey) || "").toLowerCase();
-          if (_mk !== "h1" && _mk !== "h1_team_a" && _mk !== "h1_team_b") return;
-          const _dProj = _mk === "h1" ? h1Calc.h1DerivedProj : _mk === "h1_team_a" ? h1Calc.h1DerivedA : h1Calc.h1DerivedB;
-          const _ln = Number(p.line);
-          p.derived1H = true;
-          p.derivedProj = _dProj;
-          p.derivedEdge = isFinite(_ln) && _ln > 0 ? _dProj - _ln : NaN;
-          forcePickNoPlayWithNote(p, _dMsg);
-          p.lockStrength = 0;
-        });
-      }
-    } catch (_d1h) {}
     const h1ToFtRatioGuard =
       isFinite(h1Calc.h1Proj) && isFinite(ftCalc.ftProj) && ftCalc.ftProj > 0
         ? h1Calc.h1Proj / ftCalc.ftProj
