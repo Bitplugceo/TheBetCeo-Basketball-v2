@@ -1,3 +1,4 @@
+S
 <!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
@@ -42,6 +43,27 @@ Validation: static threshold tables, inline JavaScript syntax, removal checks, a
   type="image/jpeg"
   href="A7358954-0D25-46A3-BF5E-EE0894AA056F.JPG?v=v25_audit10_20260913"
 />
+<script>/* 12H-CLOCK (13 Oct 2026): display-only formatters. Stored timestamps are never changed.
+   bbFmt12DateTime -> "13 Oct 2026 at 7:30 PM", bbFmt12Time -> "7:30 PM" (or "7:30:05 PM"). Invalid/missing -> "NaN". */
+var BB_MON_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function bbToDate12(v) {
+  if (v === null || v === undefined || v === "") return null;
+  var d = v instanceof Date ? v : new Date(typeof v === "number" ? (v < 1e12 ? v * 1000 : v) : (/^\d+$/.test(String(v)) ? (Number(v) < 1e12 ? Number(v) * 1000 : Number(v)) : v));
+  return isNaN(d.getTime()) ? null : d;
+}
+function bbFmt12Time(v, withSeconds) {
+  var d = bbToDate12(v);
+  if (!d) return "NaN";
+  var h = d.getHours(), ap = h >= 12 ? "PM" : "AM";
+  h = h % 12; if (h === 0) h = 12;
+  return h + ":" + String(d.getMinutes()).padStart(2, "0") + (withSeconds ? ":" + String(d.getSeconds()).padStart(2, "0") : "") + " " + ap;
+}
+function bbFmt12DateTime(v) {
+  var d = bbToDate12(v);
+  if (!d) return "NaN";
+  return d.getDate() + " " + BB_MON_SHORT[d.getMonth()] + " " + d.getFullYear() + " at " + bbFmt12Time(d);
+}
+</script>
 <script>/* BB fixed build v2.6 (10 Oct 2026): pass 4 whole-engine audit, see CHANGELOG v2.6 */
 // ========== CALC-AUDIT-001: CORE NUMERIC HELPERS — BEGIN ==========
 // AUDIT-NAV: members: bbStrictFinite
@@ -817,7 +839,7 @@ function bbCurLeague() { return String((document.getElementById("leagueSelect") 
 function bbSportyChooser(list, memKey, opts) {
   var sel = document.getElementById("sportyPick"); if (!sel) return;
   if (!list || !list.length) { sel.style.display = "none"; sel.innerHTML = ""; return; }
-  sel.innerHTML = '<option value="">Pick the SportyBet game…</option>' + list.map(function (e, i) { var t = e.estimateStartTime ? new Date(Number(e.estimateStartTime)).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" }) : ""; return '<option value="' + i + '">' + String(e.homeTeamName || "").replace(/</g, "") + " v " + String(e.awayTeamName || "").replace(/</g, "") + (t ? " (" + t + ")" : "") + "</option>"; }).join("");
+  sel.innerHTML = '<option value="">Pick the SportyBet game…</option>' + list.map(function (e, i) { var t = e.estimateStartTime ? bbFmt12DateTime(Number(e.estimateStartTime)) : ""; return '<option value="' + i + '">' + String(e.homeTeamName || "").replace(/</g, "") + " v " + String(e.awayTeamName || "").replace(/</g, "") + (t ? " (" + t + ")" : "") + "</option>"; }).join("");
   sel.style.display = "";
   sel.onchange = function () {
     var ev = list[Number(sel.value)]; if (!ev) return;
@@ -16675,7 +16697,7 @@ function isTrackerHealthView() {
 }
 function trackerDebug(message, extra = null) {
   try {
-    const stamp = new Date().toLocaleTimeString([], { hour12: false });
+    const stamp = bbFmt12Time(new Date(), true);
     let detail = "";
     if (extra !== null && extra !== undefined) {
       if (typeof extra === "string") {
@@ -16861,7 +16883,7 @@ function engineDebug(message, extra = null) {
     if (typeof isIgnoredEngineWatchLine === "function" && isIgnoredEngineWatchLine(_quietProbe)) {
       return;
     }
-    const stamp = new Date().toLocaleTimeString([], { hour12: false });
+    const stamp = bbFmt12Time(new Date(), true);
     let detail = "";
     if (extra !== null && extra !== undefined) {
       if (typeof extra === "string") {
@@ -17019,7 +17041,7 @@ const AFDB = (function () {
   }
   function log(level, section, msg, data) {
     const entry = {
-      ts: new Date().toLocaleTimeString([], { hour12: false }),
+      ts: bbFmt12Time(new Date(), true),
       level,
       section: section || "CORE",
       msg,
@@ -17337,7 +17359,7 @@ const AFDB = (function () {
         ? "Raid complete.\nNo suspects found in this diagnostic sweep."
         : "Raid complete.\nCaught " + totalSuspects + " Thieves and locked them behind the bars.";
     const verdictEntry = {
-      ts: new Date().toLocaleTimeString([], { hour12: false }),
+      ts: bbFmt12Time(new Date(), true),
       level: totalSuspects === 0 ? "VERDICT" : "ERROR",
       section: "POLICE RAID",
       msg: verdictMsg,
@@ -17972,7 +17994,7 @@ function _trackerPanelCopyText(fallbackTitle) {
   const body = panel ? String(panel.innerText || panel.textContent || "").trim() : "";
   if (!body) return "";
   const title = (titleEl && titleEl.textContent ? titleEl.textContent.trim() : "") || fallbackTitle;
-  const head = title + " - " + new Date().toLocaleString();
+  const head = title + " - " + bbFmt12DateTime(new Date());
   return head + "\n" + "=".repeat(Math.min(head.length, 48)) + "\n" + body;
 }
 function copyTrackerData() {
@@ -20274,16 +20296,7 @@ function formatPickLine(p) {
 }
 // ========== CALC-AUDIT-181: SHARED CALCULATION HELPERS (ROUNDING, FORMATTING, CONVERSION) — END ==========
 function formatTrackedDate(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, {
-    year: "numeric",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  });
+  return bbFmt12DateTime(iso); /* 12H-CLOCK: "13 Oct 2026 at 7:30 PM"; missing -> "NaN" */
 }
 function makeTrackedMatchupKey(pick) {
   const home = normalizeTeamName(pick?.homeTeam || "");
@@ -20902,6 +20915,7 @@ function repairWinnerSettlementParityTrackedPicks(activeList, archivedList, opts
         return;
       }
       if (!OU_MARKETS[mk]) return;
+      if (typeof bbStoredScoreImplausible === "function" && bbStoredScoreImplausible(p)) return; /* SETTLE-FIX */
       const line = Number(p.line != null ? p.line : p.pickLine);
       const actual = parseOuActual(p.actualScore, p);
       if (!Number.isFinite(line) || !Number.isFinite(actual)) return;
@@ -20947,6 +20961,47 @@ try {
       repairWinnerSettlementParityTrackedPicks;
   }
 } catch (_w) {}
+/* SETTLE-FIX repair: an already-settled pick whose stored score is 0-0 / implausible goes back to PENDING so the
+   normal refresh re-settles it with the real final. Voided picks (actualScore "VOID") are left alone. */
+function bbStoredScoreImplausible(p) {
+  if (!p) return false;
+  const st = String(p.resultStatus || "pending").toLowerCase();
+  if (!["win", "loss", "push", "no_play_settled"].includes(st)) return false;
+  const mk = String(p.marketKey || "").toLowerCase();
+  const raw = p.actualScore;
+  if (String(raw == null ? "" : raw).trim().toUpperCase() === "VOID") return false;
+  const h1 = bbSettleIsH1Market(mk);
+  const gs = p.gameScore && typeof p.gameScore === "object" ? p.gameScore : null;
+  if (gs && Number.isFinite(Number(gs.a)) && Number.isFinite(Number(gs.b)) && !bbSettleFtPlausible(Number(gs.a), Number(gs.b))) return true;
+  const txt = String(raw == null ? "" : raw).trim();
+  const m = txt.match(/^(-?\d+(?:\.\d+)?)\s*[-–:]\s*(-?\d+(?:\.\d+)?)$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    return h1 ? !bbSettleH1Plausible(a, b) : !bbSettleFtPlausible(a, b);
+  }
+  if (/^-?\d+(\.\d+)?$/.test(txt)) { /* old single-value style: combined total or a team total */
+    const v = Number(txt);
+    if (mk === "ft") return v < BB_SETTLE_MIN_FT_TOTAL;
+    if (mk === "team_a" || mk === "team_b" || mk === "h1" || mk === "h1_team_a" || mk === "h1_team_b") return v <= 0;
+  }
+  if (/ by 0$/i.test(txt) && gs && Number(gs.a) === 0 && Number(gs.b) === 0) return true;
+  return false;
+}
+function bbRepairImplausibleSettledPicks(active, archived) {
+  let n = 0;
+  const now = new Date().toISOString();
+  [active, archived].forEach((list) => (Array.isArray(list) ? list : []).forEach((p) => {
+    if (!bbStoredScoreImplausible(p)) return;
+    p.settleRepair = { at: now, previousStatus: p.resultStatus, previousScore: p.actualScore == null ? null : String(p.actualScore) };
+    p.resultStatus = "pending";
+    p.engineResultStatus = "pending";
+    delete p.actualScore; delete p.settledAt; delete p.settlementSource; delete p.gameScore; delete p.scoreOrientation; delete p.settledVersion;
+    p.updatedAt = now;
+    n++;
+  }));
+  if (n) { try { trackerDebug("reset implausible settled picks to pending", { count: n }); } catch (_d) {} }
+  return n;
+}
 function normalizeTrackerState(raw) {
   const remoteLineMemory =
     raw?.lineMemory && typeof raw.lineMemory === "object" ? raw.lineMemory : {};
@@ -20957,6 +21012,7 @@ function normalizeTrackerState(raw) {
     ? raw.archivedPicks.map((p) => ensureTrackedPickKeys(p)).slice(0, TRACKER_ARCHIVED_LIMIT)
     : [];
   const reconciled = reconcileTrackerBucketConflicts(normalizedActive, normalizedArchived);
+  try { bbRepairImplausibleSettledPicks(reconciled.activePicks, reconciled.archivedPicks); } catch (_rp) {}
   repairMisclassifiedNoPlayTrackedPicks(reconciled.activePicks, reconciled.archivedPicks, { mutateLive: true });
   AppState.tracker.state = {
     vId: raw?.vId || Date.now(),
@@ -23419,7 +23475,7 @@ function renderHealthDashboardPanel() {
       <div class="tracker-analytics-section">
         <div class="tracker-analytics-section-head">
           <div class="tracker-analytics-section-title">Last Retraining Pass</div>
-          <div class="tracker-analytics-section-meta">${snap.lastRetrain ? safeText(new Date(snap.lastRetrain.ts).toLocaleString()) : "Never run"}</div>
+          <div class="tracker-analytics-section-meta">${snap.lastRetrain ? safeText(bbFmt12DateTime(snap.lastRetrain.ts)) : "Never run"}</div>
         </div>
         <div class="tracker-analytics-section-body">
           ${snap.lastRetrain ? `<div class="tracker-empty-note">Ran after ${snap.lastRetrain.settledCount} total settled picks. Fires automatically every 25 new settled picks.</div>` : `<div class="tracker-empty-note">Retraining pipeline has not run yet — needs 25+ settled picks.</div>`}
@@ -25567,8 +25623,9 @@ function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
           completed,
           LEAGUE_FETCH_RULES[pick.league || ""]?.regulationPeriods ?? 4,
         ));
-    if (!completed && !isPeriodAutoSettleMarket(mk)) return;
-    if (!periodDone) return;
+    const _explicitVoid = bbSettleExplicitVoid(pick, competition); /* SETTLE-FIX */
+    if (!_explicitVoid && !completed && !isPeriodAutoSettleMarket(mk)) return;
+    if (!_explicitVoid && !periodDone) return;
     const settled = settleTrackedPickFromCompetition(pick, competition, !completed);
     if (applyAutoSettleStatus(pick, settled, completed ? "api_scoreboard" : "api_period_live")) {
       changed = true;
@@ -25593,7 +25650,81 @@ function settlePendingPicksFromCompetition(eventId, competition, gameFinal) {
 }
 /* FIX SC1: wrapper — grade with the original logic, then store each team's score for the market's period ("A - B",
    Team A first) instead of a single combined total. The grade itself is never changed here. */
+/* SETTLE-FIX (13 Oct 2026): every automatic settlement (ESPN, Sportradar/SportyBet ids, InCrowd, KBL, live boards)
+   goes through settleTrackedPickFromCompetition. A grade is accepted only when
+   - the feed confirms the game is finished (or, for 1H markets, that the half is over), AND
+   - the score is plausible: FT both teams > 0 and combined >= BB_SETTLE_MIN_FT_TOTAL; 1H both halves > 0.
+   Otherwise the pick stays PENDING and is retried on the next refresh. An explicitly cancelled/abandoned game
+   (or one still postponed BB_SETTLE_POSTPONE_VOID_MS after tip-off) is graded VOID (= push, stake back). */
+const BB_SETTLE_MIN_FT_TOTAL = 60;
+const BB_SETTLE_POSTPONE_VOID_MS = 48 * 60 * 60 * 1000;
+function bbSettleNum(v) {
+  if (v === null || v === undefined || v === "") return NaN;
+  const n = parseFloat(typeof v === "object" ? (v.value ?? v.displayValue) : v);
+  return Number.isFinite(n) ? n : NaN;
+}
+function bbSettleScoresFromCompetition(pick, competition) {
+  const comps = (competition && competition.competitors) || [];
+  const home = comps.find((c) => c.homeAway === "home") || comps[0];
+  const away = comps.find((c) => c.homeAway === "away") || comps[1];
+  if (!home || !away) return null;
+  const ftH = bbSettleNum(home.score), ftA = bbSettleNum(away.score);
+  const lsH = home.linescores || [], lsA = away.linescores || [];
+  const regP = (typeof LEAGUE_FETCH_RULES !== "undefined" && LEAGUE_FETCH_RULES[(pick && pick.league) || ""] && LEAGUE_FETCH_RULES[(pick && pick.league) || ""].regulationPeriods) || 4;
+  let h1H = NaN, h1A = NaN;
+  if (lsH.length >= 2 && lsA.length >= 2 && regP >= 4) { h1H = bbSettleNum(lsH[0]) + bbSettleNum(lsH[1]); h1A = bbSettleNum(lsA[0]) + bbSettleNum(lsA[1]); }
+  else if (lsH.length >= 1 && lsA.length >= 1 && regP < 4) { h1H = bbSettleNum(lsH[0]); h1A = bbSettleNum(lsA[0]); }
+  return { ftH, ftA, h1H, h1A };
+}
+function bbSettleIsH1Market(mk) {
+  const k = String(mk || "").toLowerCase();
+  return k === "h1" || k.startsWith("h1_");
+}
+function bbSettleFtPlausible(a, b) {
+  return Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0 && a + b >= BB_SETTLE_MIN_FT_TOTAL;
+}
+function bbSettleH1Plausible(a, b) {
+  return Number.isFinite(a) && Number.isFinite(b) && a > 0 && b > 0;
+}
+/* true when the feed explicitly reports the game as cancelled/abandoned/walkover (or postponed for 48h+ past tip-off) */
+function bbSettleExplicitVoid(pick, competition) {
+  const t = (competition && competition.status && competition.status.type) || {};
+  const txt = (String(t.name || "") + " " + String(t.description || "") + " " + String(t.shortDetail || "")).toUpperCase();
+  if (/CANCEL|ABANDON|WALKOVER|FORFEIT/.test(txt)) return true;
+  if (/POSTPONED/.test(txt)) {
+    const start = Date.parse((pick && (pick.eventDate || pick.gameDate || pick.startTime)) || "");
+    return Number.isFinite(start) && Date.now() - start > BB_SETTLE_POSTPONE_VOID_MS;
+  }
+  return false;
+}
+function bbSettleGate(pick, competition, allowPartialSettlement) {
+  if (!pick || !competition) return { ok: false, reason: "no data" };
+  const t = (competition.status && competition.status.type) || {};
+  const final = !bbEspnNotPlayed(competition.status) && !!(t.completed || t.state === "post" || t.name === "STATUS_FINAL");
+  const sc = bbSettleScoresFromCompetition(pick, competition);
+  if (!sc) return { ok: false, reason: "no competitors" };
+  const h1 = bbSettleIsH1Market(pick.marketKey);
+  if (!final && !(allowPartialSettlement && h1)) return { ok: false, reason: "not finished" };
+  if (h1) {
+    if (!bbSettleH1Plausible(sc.h1H, sc.h1A)) return { ok: false, reason: "implausible 1H score " + sc.h1H + "-" + sc.h1A };
+    if (final && !bbSettleFtPlausible(sc.ftH, sc.ftA)) return { ok: false, reason: "implausible FT score " + sc.ftH + "-" + sc.ftA };
+    return { ok: true };
+  }
+  if (!bbSettleFtPlausible(sc.ftH, sc.ftA)) return { ok: false, reason: "implausible FT score " + sc.ftH + "-" + sc.ftA };
+  return { ok: true };
+}
 function settleTrackedPickFromCompetition(pick, competition, allowPartialSettlement = false) {
+  if (pick && competition && bbSettleExplicitVoid(pick, competition)) {
+    pick.actualScore = "VOID";
+    pick.voidReason = String((competition.status && competition.status.type && (competition.status.type.description || competition.status.type.name)) || "cancelled");
+    pick.engineResultStatus = "push";
+    return "push";
+  }
+  const _gate = bbSettleGate(pick, competition, allowPartialSettlement);
+  if (!_gate.ok) {
+    try { trackerDebug("settle refused (stays pending)", { eventId: pick && pick.eventId, market: pick && pick.marketKey, reason: _gate.reason }); } catch (_d) {}
+    return "pending";
+  }
   const grade = _settleTrackedPickFromCompetitionCore(pick, competition, allowPartialSettlement);
   try {
     if (grade && grade !== "pending") {
@@ -26055,7 +26186,7 @@ async function refreshTrackedPickResults() {
             settled: null,
             actual: null,
             line: pick.lineAtPick || pick.line,
-            ts: new Date().toLocaleTimeString([], { hour12: false }),
+            ts: bbFmt12Time(new Date(), true),
           });
           return;
         }
@@ -26070,7 +26201,7 @@ async function refreshTrackedPickResults() {
             settled: null,
             actual: null,
             line: pick.lineAtPick || pick.line,
-            ts: new Date().toLocaleTimeString([], { hour12: false }),
+            ts: bbFmt12Time(new Date(), true),
           });
           return;
         }
@@ -26102,7 +26233,8 @@ async function refreshTrackedPickResults() {
               !!apiFinal,
               _regPeriodsForSettle,
             ) !== false);
-        if (apiFinal || forceSettle) {
+        const _explicitVoid = typeof bbSettleExplicitVoid === "function" && bbSettleExplicitVoid(pick, competition); /* SETTLE-FIX */
+        if (apiFinal || forceSettle || _explicitVoid) {
           const settled = settleTrackedPickFromCompetition(pick, competition, !apiFinal);
           g_settlementDebugLog.set(_dbgKey, {
             pick: `${pick.homeTeam} vs ${pick.awayTeam} · ${pick.marketKey}`,
@@ -26119,7 +26251,7 @@ async function refreshTrackedPickResults() {
             settled,
             actual: pick.actualScore,
             line: pick.lineAtPick || pick.line,
-            ts: new Date().toLocaleTimeString([], { hour12: false }),
+            ts: bbFmt12Time(new Date(), true),
           });
           if (settled && settled !== "pending" && pick.resultStatus !== settled) {
             pick.resultStatus = settled;
@@ -26153,7 +26285,7 @@ async function refreshTrackedPickResults() {
             settled: null,
             actual: null,
             line: pick.lineAtPick || pick.line,
-            ts: new Date().toLocaleTimeString([], { hour12: false }),
+            ts: bbFmt12Time(new Date(), true),
           });
           const _liveMeta = isEspnCompetitionLive(competition && competition.status);
           if (pick.eventId) bbLiveRemember(pick.eventId, competition); /* LIVE-DISPLAY */
@@ -26214,7 +26346,7 @@ async function refreshTrackedPickResults() {
                   settled: midSettled,
                   actual: pick.actualScore,
                   line: pick.lineAtPick || pick.line,
-                  ts: new Date().toLocaleTimeString([], { hour12: false }),
+                  ts: bbFmt12Time(new Date(), true),
                 });
                 trackerDebug("period-settled pick", {
                   eventId: pick.eventId,
@@ -29284,9 +29416,9 @@ function dateStringToLocalKey(dateStr) {
 }
 /* removed unused loadFixturesForDate */
 function formatFixtureTime(dateStr) {
-  if (!dateStr) return "--:--";
+  if (!dateStr) return "NaN";
   try {
-    return new Date(dateStr).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    return bbFmt12DateTime(dateStr); /* 12H-CLOCK */
   } catch (e) {
     return "--:--";
   }
@@ -33385,8 +33517,16 @@ function srMatchToEspnCompetition(m) {
   if (!m || !m.teams || !m.teams.home || !m.teams.away) return null;
   const st = m.status || {}, sid = Number(st._id), sname = String(st.name || "");
   const res = m.result || {}, per = m.periods || {};
-  const notPlayed = !!(m.postponed || m.cancelled || m.walkover) || /postpon|cancel|abandon|interrupt|delay/i.test(sname);
-  const ended = !notPlayed && (String(m.matchstatus || "") === "result" || sid === 100 || sid === 110 || sid === 120 || /^(ended|aet|after overtime|after ot)/i.test(sname));
+  const notPlayed = !!(m.postponed || m.cancelled || m.canceled || m.walkover) || /postpon|cancel|abandon|interrupt|delay/i.test(sname);
+  /* SETTLE-FIX (13 Oct 2026): match_info can report "Ended"/matchstatus "result" while result.home/away are still null.
+     Those nulls used to become "0" and the pick was graded 0-0. Take the score from result, else periods.ft, else the
+     quarter sum; with no score at all the match is NOT treated as ended (stays pending and is retried). */
+  const _srNum = (v) => (v === null || v === undefined || v === "" || !Number.isFinite(Number(v)) ? null : Number(v));
+  const _srQSum = (k) => { let t = 0, n = 0; Object.keys(per).forEach((pk) => { if (pk !== "ft" && per[pk] && _srNum(per[pk][k]) != null) { t += Number(per[pk][k]); n++; } }); return n ? t : null; };
+  const _srScore = (k) => { const r = _srNum(res[k]); if (r != null) return r; const f = per.ft ? _srNum(per.ft[k]) : null; if (f != null) return f; return _srQSum(k); };
+  const _srHasScore = _srScore("home") != null && _srScore("away") != null;
+  const ended = !notPlayed && _srHasScore && (String(m.matchstatus || "") === "result" || sid === 100 || sid === 110 || sid === 120 || /^(ended|aet|after overtime|after ot)/i.test(sname));
+  const _srCancelled = !!(m.cancelled || m.canceled || m.walkover) || /cancel|abandon/i.test(sname);
   const live = !ended && !notPlayed && (String(m.matchstatus || "") === "live" || /quarter|half|overtime|pause|break|period|interrupted/i.test(sname)) && sid !== 0;
   const half = live && /halftime|half time|^pause$/i.test(sname) && !/1st half|2nd half/i.test(sname);
   const period = Number(m.p) || 0;
@@ -33404,17 +33544,35 @@ function srMatchToEspnCompetition(m) {
     Object.keys(per).filter((k) => /^(ot|p[5-9])/.test(k) && k !== "ft").sort().forEach((k) => { if (per[k] && per[k][side] != null) out.push({ value: Number(per[k][side]) }); });
     return out;
   };
-  const side = (k) => { const t = m.teams[k]; return { homeAway: k, id: String(t.uid || t._id), score: res[k] != null ? String(res[k]) : "0",
+  const side = (k) => { const t = m.teams[k]; return { homeAway: k, id: String(t.uid || t._id), score: _srScore(k) != null ? String(_srScore(k)) : null,
     team: { id: String(t.uid || t._id), displayName: t.mediumname || t.name || "", shortDisplayName: t.name || "" }, linescores: ls(k) }; };
   return { id: String(m._id), status: { displayClock: half ? "HALF" : clock, period: ended ? Math.max(period, nper) : period,
       type: { completed: ended, state: ended ? "post" : live ? "in" : "pre",
-        name: notPlayed ? "STATUS_POSTPONED" : ended ? "STATUS_FINAL" : half ? "STATUS_HALFTIME" : live ? "STATUS_IN_PROGRESS" : "STATUS_SCHEDULED",
-        description: notPlayed ? "Postponed" : ended ? "Final" : half ? "Halftime" : live ? sname : "Scheduled", shortDetail: sname } },
+        name: notPlayed ? (_srCancelled ? "STATUS_CANCELED" : "STATUS_POSTPONED") : ended ? "STATUS_FINAL" : half ? "STATUS_HALFTIME" : live ? "STATUS_IN_PROGRESS" : "STATUS_SCHEDULED",
+        description: notPlayed ? (_srCancelled ? "Canceled" : "Postponed") : ended ? "Final" : half ? "Halftime" : live ? sname : "Scheduled", shortDetail: sname } },
     competitors: [side("home"), side("away")] };
 }
 async function fetchSportradarCompetitionForEvent(league, eventId) {
   const d = await srGet("match_info/" + encodeURIComponent(String(eventId)), 10000);
-  return srMatchToEspnCompetition(d && (d.match || d));
+  const m = d && (d.match || d);
+  /* SETTLE-FIX: match_info says Ended but carries no score -> look the match up in the season fixture list, which
+     carries the final result (seen 13 Oct 2026 on ARGENTINA_LNB 74998080 / 74998084). */
+  try {
+    const r = (m && m.result) || {};
+    const st = String((m && m.matchstatus) || ""), sid = Number(m && m.status && m.status._id);
+    if (m && (r.home == null || r.away == null) && (st === "result" || sid === 100 || sid === 110 || sid === 120)) {
+      const seasons = [m._seasonid].concat((SR_LEAGUES[String(league || "").toLowerCase()] || {}).sids || []).filter(Boolean);
+      for (const sid2 of [...new Set(seasons.map(String))]) {
+        let fx = null;
+        try { fx = await srGet("stats_season_fixtures2/" + sid2 + "/1", 120000); } catch (_fx) { fx = null; }
+        const hit = fx && Array.isArray(fx.matches) ? fx.matches.find((x) => String(x && x._id) === String(m._id || eventId)) : null;
+        if (hit && hit.result && hit.result.home != null && hit.result.away != null) {
+          return srMatchToEspnCompetition(Object.assign({}, m, { result: hit.result, periods: hit.periods || m.periods }));
+        }
+      }
+    }
+  } catch (_fb) {}
+  return srMatchToEspnCompetition(m);
 }
 async function pollSportradarLiveForLeague(league, eventIds, signal) {
   let didChange = false;
@@ -39881,7 +40039,7 @@ async function runEngine() {
       window.__phase2H1RecencyWeights = null;
     }
   g_engineDebugLog.unshift(
-    `[${new Date().toLocaleTimeString([], { hour12: false })}] ══ NEW RUN ══`,
+    `[${bbFmt12Time(new Date(), true)}] ══ NEW RUN ══`,
   );
   if (g_engineDebugLog.length > ENGINE_DEBUG_LIMIT) {
     g_engineDebugLog = g_engineDebugLog.slice(0, ENGINE_DEBUG_LIMIT);
