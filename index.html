@@ -34034,6 +34034,39 @@ function bbWipeMatchState(reason) {
   try { engineDebug("match state wiped", { reason: reason || "", gen: window.__bbMatchGen }); } catch (_e) {}
   return window.__bbMatchGen;
 }
+/* VISIBLE-WIPE (13 Oct 2026): on a match switch, league switch and Clear the page is first painted fully blank
+   (inputs empty, tags hidden, notes/status/H2H lines/error chips gone, results removed, H2H boxes unticked, every
+   section collapsed except Auto-Fetch). bbAfterBlank() then waits double-rAF + 400 ms so the blank state is really
+   rendered (also when the data is cached) and only runs the loader if the match generation is still current. */
+const BB_BLANK_HOLD_MS = 400;
+function bbVisibleWipe(keepTeams) {
+  const root = document.querySelector(".wrapper") || document;
+  root.querySelectorAll("input, textarea").forEach((i) => {
+    if (keepTeams && (i.id === "teamAName" || i.id === "teamBName")) return;
+    if (i.type === "checkbox" || i.type === "radio") i.checked = false; else i.value = "";
+    i.style.borderColor = "";
+  });
+  document.querySelectorAll(".autofill-indicator").forEach((t) => { if (t.id !== "marketLinesOnlyTag") t.style.display = "none"; });
+  ["bbCrossLeagueNote", "bbH1EstNote", "syndicateDashboard"].forEach((id) => { const el = document.getElementById(id); if (el) el.remove(); });
+  try { setStatusText("", ""); } catch (_e) {}
+  try { setFetchAuditIssues([]); } catch (_e) {}
+  try { resetResultsTable(); } catch (_e) {}
+  const t = document.getElementById("results"); if (t) t.style.display = "none";
+  try { if (typeof applyLast10SeriesAlert === "function") applyLast10SeriesAlert(); } catch (_e) {}
+  try { if (typeof renderHeaderErrorState === "function") renderHeaderErrorState(); } catch (_e) {}
+  ["leagueSection", "marketSection", "teamASection", "teamBSection", "h2hSection", "sofascoreManualSection"].forEach((id) => { try { closeSection(id); } catch (_e) {} });
+  try { openSection("espnSection"); } catch (_e) {}
+}
+function bbAfterBlank(fn) {
+  const gen = window.__bbMatchGen || 0;
+  const raf = typeof requestAnimationFrame === "function" ? requestAnimationFrame : (cb) => setTimeout(cb, 16);
+  window.__bbBlankPending = gen;
+  raf(() => raf(() => setTimeout(() => {
+    if ((window.__bbMatchGen || 0) !== gen) return; /* a newer switch or Clear owns the page */
+    window.__bbBlankPending = null;
+    try { fn(); } catch (e) { try { logDebug("after-blank loader failed", e); } catch (_e) {} }
+  }, BB_BLANK_HOLD_MS)));
+}
 function onFixtureSelect() {
   const select = document.getElementById("fixtureSelect");
   const opt = select.options[select.selectedIndex];
@@ -34082,8 +34115,11 @@ function pickFixture(homeName, homeId, awayName, awayId, eventDate) {
   if (typeof updateCardExtraLabels === "function") updateCardExtraLabels();
   validateFetchSection();
   accordionOpen("espnSection");
-  setStatusHTML('<span class="spinner"></span>Match selected. Fetching stats...', "loading");
-  withErrorBoundary(fetchESPN, "fetchESPN_pickFixture")();
+  bbVisibleWipe(true); /* VISIBLE-WIPE: blank first, Auto-Fetch keeps the new teams */
+  bbAfterBlank(() => {
+    setStatusHTML('<span class="spinner"></span>Match selected. Fetching stats...', "loading");
+    withErrorBoundary(fetchESPN, "fetchESPN_pickFixture")();
+  });
 }
 async function fetchESPN() { return bbFetchWithSporty(fetchESPN_CORE, this, arguments); }
 async function fetchESPN_CORE() {
@@ -41544,6 +41580,8 @@ async function runEngine() {
 
 
 <script>function clearAll() {
+  try { bbWipeMatchState("clear button"); } catch (_e) {} /* VISIBLE-WIPE: bump generation so nothing in flight refills the page */
+  try { bbVisibleWipe(false); } catch (_e) {}
   acknowledgeGlobalEngineAlert();
   _fixtureLoadToken++;
   unlockFetchBtn();
@@ -41760,9 +41798,12 @@ function onLeagueChange() {
   updateSectionLocks();
   if (_isEspnAuto) {
     accordionOpen("espnSection");
+    bbVisibleWipe(false); /* VISIBLE-WIPE */
     try { window.__bbLabelLeague = bbLabelCapture(); } catch (_e) {} /* MATCH-WIPE-LABELS: this league's clean defaults */
-    loadFixtures(0);
-    if (typeof fetchLeagueStandings === "function") fetchLeagueStandings(league);
+    bbAfterBlank(() => {
+      loadFixtures(0);
+      if (typeof fetchLeagueStandings === "function") fetchLeagueStandings(league);
+    });
   } else {
     accordionOpen("sofascoreManualSection");
     try { window.__bbLabelLeague = bbLabelCapture(); } catch (_e) {} /* MATCH-WIPE-LABELS */
