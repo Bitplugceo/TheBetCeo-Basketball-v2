@@ -1,4 +1,3 @@
-S
 <!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
@@ -26939,13 +26938,19 @@ function bbApplyAutoH2HToBoxes(h2hGames, teamAId, opts) {
   const tag = document.getElementById("h2hAutoTag");
   if (tag) tag.style.display = "inline";
   const h1 = pairs("h1A", "h1B");
+  let h1Note;
   if (h1.A.length >= 2 && h1.B.length >= 2) {
     setBox("a1HH2H", h1.A);
     setBox("b1HH2H", h1.B);
     syncH2HCheckbox("h1", false);
+    h1Note = "1H H2H: " + h1.A.length + " of " + picked.length + " meetings (Q1+Q2) ✅";
+  } else {
+    h1Note = "1H H2H: quarter data for " + h1.A.length + " of " + picked.length + " meetings — left out (min 2) ❌";
   }
+  try { window.__bbAutoH2H1H = { A: h1.A.slice(), B: h1.B.slice(), n: h1.A.length, of: picked.length }; } catch (_eW) {}
   queueH2HCheckboxSync(false);
-  return { ok: true, stale: false, picked: picked, sameGames: (d && Array.isArray(d.sameCompetitionGames)) ? d.sameCompetitionGames.slice(0, 10) : picked.slice(), message: message };
+  if (h1.A.length >= 2 && h1.B.length >= 2) syncH2HCheckbox("h1", true); /* H2H-1H: a fresh auto-fetch ticks "Use 1H H2H" (>= 2 meetings) */
+  return { ok: true, stale: false, picked: picked, sameGames: (d && Array.isArray(d.sameCompetitionGames)) ? d.sameCompetitionGames.slice(0, 10) : picked.slice(), message: message + " · " + h1Note, h1: h1 };
 }
 // ========== CALC-AUDIT-210: TEAM AND PLAYER INPUTS USED BY CALCULATIONS — END ==========
 function takeSelectedH2H(games, league) {
@@ -31612,8 +31617,8 @@ function buildEuroleagueH2H(teamACode, teamBCode, allGames) {
         teamBId: tB,
         scoreA: Math.round(scoreA),
         scoreB: Math.round(scoreB),
-        h1A: NaN,
-        h1B: NaN,
+        h1A: (bbQuarterH1(sideA) ?? NaN), /* H2H-1H: Q1+Q2 from the feed's quarters, Team A frame */
+        h1B: (bbQuarterH1(sideB) ?? NaN),
         date,
       };
     })
@@ -32650,8 +32655,8 @@ function buildKblH2H(teamACode, teamBCode, allGames) {
         teamBId: tB,
         scoreA: Number(sideA?.score),
         scoreB: Number(sideB?.score),
-        h1A: NaN,
-        h1B: NaN,
+        h1A: (bbQuarterH1(sideA) ?? NaN), /* H2H-1H */
+        h1B: (bbQuarterH1(sideB) ?? NaN),
       };
     })
     .filter((g) => Number.isFinite(g.scoreA) && Number.isFinite(g.scoreB) && g.scoreA > 0 && g.scoreB > 0)
@@ -33726,7 +33731,10 @@ function srBuildH2H(teamACode, teamBCode, allGames, league) {
     .filter((g) => g.isEnded && new Set([g.home.code, g.away.code]).has(tA) && new Set([g.home.code, g.away.code]).has(tB))
     .map((g) => {
       const homeIsA = g.home.code === tA, sA = homeIsA ? g.home : g.away, sB = homeIsA ? g.away : g.home;
-      const h1A = bbQuarterH1(sA), h1B = bbQuarterH1(sB);
+      /* H2H-1H: NCAA-men style leagues report two halves as p1/p2, so 1H = p1 only (Q1+Q2 would be the whole game) */
+      const _halves = ((typeof LEAGUE_FETCH_RULES !== "undefined" && LEAGUE_FETCH_RULES[String(league || "").toLowerCase()]) || {}).regulationPeriods === 2;
+      const _h1Of = (sd) => { if (!_halves) return bbQuarterH1(sd); const q = sd && (sd.quarters || sd.partials); const v = q ? Number(q.q1 ?? q.partials1) : NaN; return Number.isFinite(v) && v > 0 ? v : null; };
+      const h1A = _h1Of(sA), h1B = _h1Of(sB);
       return { id: g.id, competition: league, competitionName: league, competitionClass: "domestic",
         competitionScoped: false, date: g.date, teamAId: tA, teamBId: tB, scoreA: Number(sA.score), scoreB: Number(sB.score),
         h1A: h1A == null ? NaN : h1A, h1B: h1B == null ? NaN : h1B };
