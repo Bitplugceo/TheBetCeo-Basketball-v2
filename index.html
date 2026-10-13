@@ -1,3 +1,4 @@
+S
 <!--
 BB ENGINE PATCH RECORD v8 (11 Oct 2026)
 - Edge/threshold eligibility is the first decision gate; the original secondary gates still run afterward.
@@ -20962,29 +20963,49 @@ try {
 } catch (_w) {}
 /* SETTLE-FIX repair: an already-settled pick whose stored score is 0-0 / implausible goes back to PENDING so the
    normal refresh re-settles it with the real final. Voided picks (actualScore "VOID") are left alone. */
+/* FIX TP1: the old check judged EVERY non-"h1" market against the full-game rule (both > 0 and sum >= 60), so every
+   quarter pick (q1..q4 store the quarter score, e.g. "21 - 23"), handicap_h1/h2 (half scores) and low-scoring leagues
+   were reset to pending on EVERY load/normalize, and re-reset after each re-settle. Only the real bug signature is
+   repaired now: a 0-0 / non-positive stored score. */
 function bbStoredScoreImplausible(p) {
   if (!p) return false;
   const st = String(p.resultStatus || "pending").toLowerCase();
   if (!["win", "loss", "push", "no_play_settled"].includes(st)) return false;
-  const mk = String(p.marketKey || "").toLowerCase();
   const raw = p.actualScore;
-  if (String(raw == null ? "" : raw).trim().toUpperCase() === "VOID") return false;
-  const h1 = bbSettleIsH1Market(mk);
-  const gs = p.gameScore && typeof p.gameScore === "object" ? p.gameScore : null;
-  if (gs && Number.isFinite(Number(gs.a)) && Number.isFinite(Number(gs.b)) && !bbSettleFtPlausible(Number(gs.a), Number(gs.b))) return true;
   const txt = String(raw == null ? "" : raw).trim();
+  if (txt.toUpperCase() === "VOID") return false;
+  const bad = (a, b) => !Number.isFinite(a) || !Number.isFinite(b) || a < 0 || b < 0 || (a === 0 && b === 0);
+  const gs = p.gameScore && typeof p.gameScore === "object" ? p.gameScore : null;
+  if (gs && gs.a != null && gs.b != null && bad(Number(gs.a), Number(gs.b))) return true;
   const m = txt.match(/^(-?\d+(?:\.\d+)?)\s*[-–:]\s*(-?\d+(?:\.\d+)?)$/);
-  if (m) {
-    const a = Number(m[1]), b = Number(m[2]);
-    return h1 ? !bbSettleH1Plausible(a, b) : !bbSettleFtPlausible(a, b);
-  }
-  if (/^-?\d+(\.\d+)?$/.test(txt)) { /* old single-value style: combined total or a team total */
-    const v = Number(txt);
-    if (mk === "ft") return v < BB_SETTLE_MIN_FT_TOTAL;
-    if (mk === "team_a" || mk === "team_b" || mk === "h1" || mk === "h1_team_a" || mk === "h1_team_b") return v <= 0;
+  if (m) return bad(Number(m[1]), Number(m[2]));
+  if (/^-?\d+(\.\d+)?$/.test(txt)) {
+    const mk = String(p.marketKey || "").toLowerCase();
+    if (["ft", "team_a", "team_b", "h1", "h1_team_a", "h1_team_b"].includes(mk)) return Number(txt) <= 0;
   }
   if (/ by 0$/i.test(txt) && gs && Number(gs.a) === 0 && Number(gs.b) === 0) return true;
   return false;
+}
+/* FIX TP1 recovery: undo resets made by the old over-broad rule, using the status/score the repair itself saved. */
+function bbRestoreWronglyRepairedPicks(active, archived) {
+  let n = 0;
+  [active, archived].forEach((list) => (Array.isArray(list) ? list : []).forEach((p) => {
+    const r = p && p.settleRepair;
+    if (!r || r.restored || String(p.resultStatus || "pending").toLowerCase() !== "pending") return;
+    const prev = String(r.previousStatus || "").toLowerCase();
+    if (!["win", "loss", "push", "no_play_settled"].includes(prev) || r.previousScore == null) return;
+    const probe = { ...p, resultStatus: prev, actualScore: r.previousScore };
+    delete probe.gameScore;
+    if (bbStoredScoreImplausible(probe)) return; /* a genuine 0-0 reset stays pending */
+    p.resultStatus = prev;
+    p.engineResultStatus = prev;
+    p.actualScore = r.previousScore;
+    if (!p.settledAt) p.settledAt = r.at;
+    p.settleRepair = { ...r, restored: new Date().toISOString() };
+    n++;
+  }));
+  if (n) { try { trackerDebug("restored wrongly reset settled picks", { count: n }); } catch (_d) {} }
+  return n;
 }
 function bbRepairImplausibleSettledPicks(active, archived) {
   let n = 0;
@@ -21011,6 +21032,7 @@ function normalizeTrackerState(raw) {
     ? raw.archivedPicks.map((p) => ensureTrackedPickKeys(p)).slice(0, TRACKER_ARCHIVED_LIMIT)
     : [];
   const reconciled = reconcileTrackerBucketConflicts(normalizedActive, normalizedArchived);
+  try { bbRestoreWronglyRepairedPicks(reconciled.activePicks, reconciled.archivedPicks); } catch (_rs) {}
   try { bbRepairImplausibleSettledPicks(reconciled.activePicks, reconciled.archivedPicks); } catch (_rp) {}
   repairMisclassifiedNoPlayTrackedPicks(reconciled.activePicks, reconciled.archivedPicks, { mutateLive: true });
   AppState.tracker.state = {
