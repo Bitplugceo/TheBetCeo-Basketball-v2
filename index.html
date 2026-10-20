@@ -1,3 +1,4 @@
+W
 <!DOCTYPE html>
 <html lang="en">
 <!-- NON-CALC GROUP: document metadata, resource links and manifest. -->
@@ -41756,44 +41757,193 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     try { if (typeof formatMarginPickForDisplay === "function") raw = formatMarginPickForDisplay(raw, p.marketKey, (meta && meta.homeTeam) || "Home", (meta && meta.awayTeam) || "Away", p.line); } catch (e) {}
     return String(raw || "").trim();
   }
-  /* Pick the single strongest full play of one game; null when the game has none (= no play). */
+  /* Map one engine pick into the compact candidate shape stored on a game. */
+  function candFromPick(p, s, meta) {
+    var ln = usedLine(p);
+    return {
+      market: marketName(p), marketKey: String(p.marketKey || ""), pick: pickText(p, meta),
+      line: isFinite(ln) && ln > 0 ? ln : null,
+      grade: String(p.confidenceDisplay && p.confidenceDisplay !== "NaN" ? p.confidenceDisplay : (p.confidence || "")),
+      win: s, edge: fin(p.edge) ? Number(p.edge) : null, lock: !!p.isLock,
+      odds: fin(p.marketPrice) ? Number(p.marketPrice) : null,
+      noVig: fin(p.noVigProb) ? Number(p.noVigProb) : null,
+      mEdge: fin(p.edgeVsMarket) ? Number(p.edgeVsMarket) : null,
+      ev: fin(p.evPerUnit) ? Number(p.evPerUnit) : null,
+      priceAt: fin(p.priceFetchedAt) ? Number(p.priceFetchedAt) : null
+    };
+  }
+  /* Strongest full play + every other full play as alts (1H / team / FT that also qualified). */
   function bestOfGame(picks, meta) {
     var ok = (Array.isArray(picks) ? picks : []).filter(isFullPlay).map(function (p) { return { p: p, s: strength(p) }; }).filter(function (x) { return isFinite(x.s); });
-    if (!ok.length) return { best: null, n: 0 };
+    if (!ok.length) return { best: null, alts: [], n: 0 };
     ok.sort(cmpPick);
-    var p = ok[0].p, ln = usedLine(p);
-    return { n: ok.length, best: {
-      market: marketName(p), marketKey: String(p.marketKey || ""), pick: pickText(p, meta),
-      line: isFinite(ln) && ln > 0 ? ln : null, grade: String(p.confidenceDisplay && p.confidenceDisplay !== "NaN" ? p.confidenceDisplay : (p.confidence || "")),
-      win: ok[0].s, edge: fin(p.edge) ? Number(p.edge) : null, lock: !!p.isLock,
-      odds: fin(p.marketPrice) ? Number(p.marketPrice) : null, noVig: fin(p.noVigProb) ? Number(p.noVigProb) : null, mEdge: fin(p.edgeVsMarket) ? Number(p.edgeVsMarket) : null, ev: fin(p.evPerUnit) ? Number(p.evPerUnit) : null, priceAt: fin(p.priceFetchedAt) ? Number(p.priceFetchedAt) : null } };
+    var alts = ok.map(function (x) { return candFromPick(x.p, x.s, meta); });
+    /* de-dupe identical marketKey+pick+line */
+    var seen = {}, uniq = [];
+    alts.forEach(function (c) {
+      var k = String(c.marketKey || "") + "|" + String(c.pick || "") + "|" + String(c.line);
+      if (seen[k]) return; seen[k] = 1; uniq.push(c);
+    });
+    return { n: uniq.length, best: uniq[0], alts: uniq };
   }
-  function dirOf(g) { var m = /^(OVER|UNDER)\b/i.exec(String(g && g.best && g.best.pick || "").trim()); return m ? m[1].toUpperCase() : ""; }
-  /* Builds the parlay. Gates are optional (opts) so a bare selectParlay(games, legs) behaves exactly as before. */
+  function dirOfCand(c) {
+    var m = /^(OVER|UNDER)\b/i.exec(String(c && c.pick || "").trim());
+    return m ? m[1].toUpperCase() : "";
+  }
+  function dirOf(g) { return dirOfCand(g && g.best); }
+  /* League strength for parlay assembly — majors preferred when win% is close. */
+  function leagueTier(lk) {
+    var s = String(lk || "").toLowerCase();
+    if (/nba|wnba|euroleague|acb|liga_endesa|bbl|bundesliga|serie_a(?!2)|lnb|ncaa|ncaab|greece_basket_league|greece_elite/.test(s)) return 3;
+    if (/eurocup|bcl|champions_league|aba|vtb|cba|kbl|nbl|ausnbl|nznbl|serie_a2|pro_a|turkey|bsl|israel|france|spain|germany|italy|greece/.test(s)) return 2;
+    return 1;
+  }
+  /* Market family: ft / h1 / team / other — used to stop an 8-leg of pure FT locks. */
+  function marketFamily(mk) {
+    mk = String(mk || "").toLowerCase();
+    if (/^h1|1h|half|period_1|q1|q2/.test(mk) || mk.indexOf("h1_") === 0) return "h1";
+    if (/team|margin|spread|winner|moneyline|ml/.test(mk)) return "team";
+    if (/ft|full|total|^q[34]|game/.test(mk) || mk === "total" || mk === "ou") return "ft";
+    return "other";
+  }
+  /*
+    Brutal parlay builder:
+    - Uses EVERY full-play market on a game (alts), not only the top lock
+    - Max 1 leg per game
+    - Caps market family + direction so FT-lock stacks cannot dominate
+    - Soft league preference: when two candidates are close in win%, higher-tier league wins
+    - Soft anti-lock bias: once FT is well represented, strong 1H / team alts outrank another FT lock
+  */
   function selectParlayEx(games, legs, opts) {
     opts = opts || {};
-    var n = Math.max(1, parseInt(legs, 10) || 1), out = { sel: [], dropGrade: 0, dropEv: 0, dropCap: 0, dropNoPrice: 0 };
-    var arr = (games || []).filter(function (g) { return g && g.status === "play" && g.best && fin(g.best.win); });
-    if (opts.minGrade && opts.minGrade !== "ANY") {
-      var need = gradeRank(opts.minGrade);
-      arr = arr.filter(function (g) { var ok = gradeRank(g.best.grade) >= need; if (!ok) out.dropGrade++; return ok; });
+    var n = Math.max(1, parseInt(legs, 10) || 1);
+    var out = { sel: [], dropGrade: 0, dropEv: 0, dropCap: 0, dropNoPrice: 0, usedAlts: 0 };
+    var need = (opts.minGrade && opts.minGrade !== "ANY") ? gradeRank(opts.minGrade) : 0;
+
+    function priceOfCand(g, c) {
+      /* typed odds on the game key still apply as a rough price gate */
+      if (opts.oddsOf) {
+        var o = Number(opts.oddsOf(Object.assign({}, g, { best: c })));
+        if (isFinite(o) && o > 1) return o;
+      }
+      if (opts.odds && isFinite(Number(opts.odds[g.key])) && Number(opts.odds[g.key]) > 1) return Number(opts.odds[g.key]);
+      var ao = Number(c && c.odds);
+      return isFinite(ao) && ao > 1 ? ao : NaN;
     }
-    var priceOf = function (g) { return opts.oddsOf ? Number(opts.oddsOf(g)) : (opts.odds ? Number(opts.odds[g.key]) : NaN); };
-    if (opts.onlyPriced) { arr = arr.filter(function (g) { var o = priceOf(g), ok = isFinite(o) && o > 1; if (!ok) out.dropNoPrice++; return ok; }); }
-    if (opts.skipNegEv) {
-      arr = arr.filter(function (g) { var o = priceOf(g); var bad = isFinite(o) && o > 1 && g.best.win * o < 1; if (bad) out.dropEv++; return !bad; });
+
+    /* Expand every play game into candidate legs (one per alt market). */
+    var pool = [];
+    (games || []).forEach(function (g) {
+      if (!g || g.status !== "play") return;
+      var alts = (Array.isArray(g.alts) && g.alts.length) ? g.alts : (g.best ? [g.best] : []);
+      alts.forEach(function (c, idx) {
+        if (!c || !fin(c.win)) return;
+        if (need && gradeRank(c.grade) < need) { out.dropGrade++; return; }
+        var o = priceOfCand(g, c);
+        if (opts.onlyPriced && !(isFinite(o) && o > 1)) { out.dropNoPrice++; return; }
+        if (opts.skipNegEv && isFinite(o) && o > 1 && c.win * o < 1) { out.dropEv++; return; }
+        pool.push({
+          g: g,
+          c: c,
+          idx: idx,
+          win: Number(c.win),
+          grade: gradeRank(c.grade),
+          fam: marketFamily(c.marketKey || c.market),
+          mk: String(c.marketKey || c.market || "").toLowerCase(),
+          dir: dirOfCand(c),
+          tier: leagueTier(g.league),
+          lock: !!c.lock,
+          ev: (isFinite(o) && o > 1) ? (c.win * o - 1) : NaN
+        });
+      });
+    });
+
+    if (!pool.length) return out;
+
+    /* Base rank: EV or win%, then grade, then league tier. */
+    pool.sort(function (a, b) {
+      if (opts.rankBy === "EV") {
+        var pa = isFinite(a.ev), pb = isFinite(b.ev);
+        if (pa !== pb) return pa ? -1 : 1;
+        if (pa && a.ev !== b.ev) return b.ev - a.ev;
+      }
+      if (b.win !== a.win) return b.win - a.win;
+      if (b.grade !== a.grade) return b.grade - a.grade;
+      if (b.tier !== a.tier) return b.tier - a.tier;
+      return (startMs(a.g) || 0) - (startMs(b.g) || 0);
+    });
+
+    if (!opts.diversify) {
+      /* still max 1 per game */
+      var usedG = {};
+      for (var i = 0; i < pool.length && out.sel.length < n; i++) {
+        var x = pool[i];
+        if (usedG[x.g.key]) continue;
+        usedG[x.g.key] = 1;
+        var leg = Object.assign({}, x.g, { best: x.c, alts: x.g.alts });
+        if (x.idx > 0) out.usedAlts++;
+        out.sel.push(leg);
+      }
+      return out;
     }
-    var evOf = function (g) { var o = priceOf(g); return isFinite(o) && o > 1 ? g.best.win * o - 1 : NaN; };
-    arr.sort(function (a, b) {
-      if (opts.rankBy === "EV") { var ea = evOf(a), eb = evOf(b), pa = isFinite(ea), pb = isFinite(eb); if (pa !== pb) return pa ? -1 : 1; if (pa && eb !== ea) return eb - ea; }
-      return (b.best.win - a.best.win) || (gradeRank(b.best.grade) - gradeRank(a.best.grade)) || (startMs(a) - startMs(b) || 0); });
-    if (!opts.diversify) { out.sel = arr.slice(0, n); return out; }
-    var capMarket = Math.max(2, Math.ceil(n * 0.4)), capDir = Math.max(2, Math.ceil(n * 0.7)), byMk = {}, byDir = {};
-    for (var i = 0; i < arr.length && out.sel.length < n; i++) {
-      var g = arr[i], mk = String(g.best.marketKey || g.best.market || "").toLowerCase(), d = dirOf(g);
-      if ((byMk[mk] || 0) >= capMarket || (d && (byDir[d] || 0) >= capDir)) { out.dropCap++; continue; }
-      byMk[mk] = (byMk[mk] || 0) + 1; if (d) byDir[d] = (byDir[d] || 0) + 1;
-      out.sel.push(g);
+
+    var capFam = Math.max(2, Math.ceil(n * 0.45));   /* ~45% one family (FT/H1/team) */
+    var capMk = Math.max(2, Math.ceil(n * 0.35));    /* tighter on exact market key */
+    var capDir = Math.max(2, Math.ceil(n * 0.70));
+    var capLeague = Math.max(2, Math.ceil(n * 0.40)); /* don't let one league own the slip */
+    var byFam = {}, byMk = {}, byDir = {}, byLeague = {}, usedGame = {};
+
+    function scoreLive(x) {
+      var s = x.win * 100 + x.grade * 1.5 + x.tier * 1.2;
+      if (opts.rankBy === "EV" && isFinite(x.ev)) s += Math.max(-5, Math.min(8, x.ev * 20));
+      /* Once FT is half the slip, non-FT alts get a boost — kills pure lock stacks */
+      var ftCount = byFam.ft || 0;
+      if (x.fam === "ft" && ftCount >= Math.max(2, Math.floor(n * 0.4))) s -= 4;
+      if (x.fam !== "ft" && ftCount >= Math.max(2, Math.floor(n * 0.35))) s += 3.5;
+      /* Prefer higher-tier league when already holding a weak-league leg of similar win% */
+      if (x.tier >= 3) s += 1.5;
+      if (x.tier === 1) s -= 1.25;
+      /* Mild penalty for pure locks after we already have one */
+      var locks = out.sel.filter(function (L) { return L.best && L.best.lock; }).length;
+      if (x.lock && locks >= 1) s -= 1.5;
+      return s;
+    }
+
+    /* Greedy: repeatedly take the highest live-scored candidate that respects caps */
+    var guard = 0;
+    while (out.sel.length < n && guard++ < 500) {
+      var best = null, bestS = -1e9;
+      for (var j = 0; j < pool.length; j++) {
+        var y = pool[j];
+        if (usedGame[y.g.key]) continue;
+        if ((byFam[y.fam] || 0) >= capFam) continue;
+        if ((byMk[y.mk] || 0) >= capMk) continue;
+        if (y.dir && (byDir[y.dir] || 0) >= capDir) continue;
+        if ((byLeague[y.g.league] || 0) >= capLeague) continue;
+        var sc = scoreLive(y);
+        if (sc > bestS) { bestS = sc; best = y; }
+      }
+      if (!best) break;
+      usedGame[best.g.key] = 1;
+      byFam[best.fam] = (byFam[best.fam] || 0) + 1;
+      byMk[best.mk] = (byMk[best.mk] || 0) + 1;
+      if (best.dir) byDir[best.dir] = (byDir[best.dir] || 0) + 1;
+      byLeague[best.g.league] = (byLeague[best.g.league] || 0) + 1;
+      var leg2 = Object.assign({}, best.g, { best: best.c, alts: best.g.alts });
+      if (best.idx > 0) out.usedAlts++;
+      out.sel.push(leg2);
+    }
+    /* Fill remainder without family caps if still short (keep 1-per-game + dir soft) */
+    if (out.sel.length < n) {
+      for (var k = 0; k < pool.length && out.sel.length < n; k++) {
+        var z = pool[k];
+        if (usedGame[z.g.key]) continue;
+        if (z.dir && (byDir[z.dir] || 0) >= Math.ceil(n * 0.85)) { out.dropCap++; continue; }
+        usedGame[z.g.key] = 1;
+        if (z.dir) byDir[z.dir] = (byDir[z.dir] || 0) + 1;
+        out.sel.push(Object.assign({}, z.g, { best: z.c, alts: z.g.alts }));
+        if (z.idx > 0) out.usedAlts++;
+      }
     }
     return out;
   }
@@ -41917,7 +42067,15 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     g.at = Date.now(); g.err = ""; g.eventId = String(meta.eventId || g.value || "");
     if (meta.eventDate && !g.eventDate) g.eventDate = String(meta.eventDate);
     g.nPlays = res.n;
-    if (res.best) { g.status = "play"; g.best = res.best; } else { g.status = "noplay"; g.best = null; }
+    if (res.best) {
+      g.status = "play";
+      g.best = res.best;
+      g.alts = res.alts && res.alts.length ? res.alts : [res.best];
+    } else {
+      g.status = "noplay";
+      g.best = null;
+      g.alts = [];
+    }
   }
   function pendingFor(dk) {
     var order = S.cfg.leagues;
@@ -42097,10 +42255,12 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
           + "</tr>";
       }
       var b = g.best;
+      var nAlt = Array.isArray(g.alts) ? g.alts.length : (g.nPlays || 1);
+      var altHint = nAlt > 1 ? '<span class="apMk">' + nAlt + " markets qualified</span>" : "";
       return "<tr>"
         + "<td>" + esc(fmtTime(g)) + "</td>"
         + "<td>" + esc(g.leagueLabel || g.league) + "</td>"
-        + "<td>" + esc(g.home) + " vs " + esc(g.away) + "</td>"
+        + "<td>" + esc(g.home) + " vs " + esc(g.away) + altHint + "</td>"
         + "<td>" + esc(marketLabel(b, g)) + "</td>"
         + "<td>" + esc(lineOf(b)) + "</td>"
         + "<td>" + esc(pickLabel(b)) + "</td>"
@@ -42174,8 +42334,9 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     var short = sel.length < want
       ? '<div class="apNote">Only <b>' + sel.length + "</b> of " + want + " legs qualified. No forced fills — remaining were no play, missing data, started, or filtered by grade / age / spread / EV.</div>"
       : "";
+    var altNote = (pack && pack.usedAlts) ? (' · <span style="color:#1f9d55">used ' + pack.usedAlts + ' secondary market' + (pack.usedAlts === 1 ? "" : "s") + '</span>') : "";
     wrap.innerHTML = '<div class="apSum">Your parlay · ' + sel.length + " legs · model ≈ " + fmtPct(combined)
-      + ' <span class="apMuted">(stress ' + fmtPct(stress) + ")</span></div>"
+      + ' <span class="apMuted">(stress ' + fmtPct(stress) + ")</span>" + altNote + "</div>"
       + short + whyHtml
       + '<div class="apMuted" style="padding:0 12px 8px">' + esc(evLine) + "</div>"
       + '<div class="apTblWrap"><table id="apParlayTbl"><thead><tr>'
