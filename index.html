@@ -1,4 +1,3 @@
-H
 <!DOCTYPE html>
 <html lang="en">
 <!-- NON-CALC GROUP: document metadata, resource links and manifest. -->
@@ -1198,14 +1197,10 @@ async function bbFetchSportyLines() {
   bbSportyStatus("Fetching market-line list…");
   try {
     var match = null, total = 0;
-    for (var page = 1; page <= 5 && !match; page++) {
-      var res = await bbFetchT(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
-      var js = await res.json().catch(function () { return null; });
-      if (!res.ok || !js || js.bizCode !== 10000) throw new Error((js && (js.error || js.message)) || ("HTTP " + res.status));
-      var evs = (js.data && js.data.tournaments || []).reduce(function (a, t) { return a.concat((t.events || []).map(function (e) { e.__tn = t.name || ""; e.__tid = t.id || ""; return e; })); }, []);
-      total = js.data && js.data.totalNum || total;
-      match = bbSportyMatchEvent(evs, home, away, startMs);
-      if ((page * 100) >= total) break;
+    { /* WORKER-LIMIT FIX D: shared 5 min list cache (was up to 5 uncached page requests per tap) */
+      var _lst2 = await bbSportyGetList(base, 5);
+      total = _lst2.total;
+      match = bbSportyMatchEvent(_lst2.events, home, away, startMs);
     }
     if (!match) { bbSportyStatus("No SportyBet game matched " + home + " vs " + away + (startMs ? " (±3 h, then same day)" : "") + ". Tap Fetch Market Lines to retry.", true); return null; }
     bbSportyStatus("Matched " + match.event.homeTeamName + " v " + match.event.awayTeamName + ". Fetching markets…");
@@ -1307,19 +1302,41 @@ function bbTodayTomorrow(e) {
   return t >= now.getTime() - 3 * 3600000 && t < end;
 }
 
+/* WORKER-LIMIT FIX D: the SportyBet list (up to 8 pages) and event markets were re-downloaded on every Fetch Stats / raid match.
+   Now: the full list is cached 5 min (shared by concurrent callers), each event's markets 2 min. */
+var _bbSpListCache = null, _bbSpListInflight = null, _bbSpEventCache = {};
+var BB_SP_LIST_TTL = 5 * 60 * 1000, BB_SP_EVENT_TTL = 2 * 60 * 1000;
+function bbSportyFlattenEvents(js) {
+  return (js.data && js.data.tournaments || []).reduce(function (a, t) { return a.concat((t.events || []).map(function (e) { e.__tn = t.name || ""; e.__tid = t.id || ""; return e; })); }, []);
+}
+async function bbSportyGetList(base, maxPages) {
+  if (_bbSpListCache && Date.now() - _bbSpListCache.at < BB_SP_LIST_TTL && _bbSpListCache.pages >= Math.min(maxPages, _bbSpListCache.totalPages || maxPages)) return _bbSpListCache;
+  if (_bbSpListInflight) return _bbSpListInflight;
+  _bbSpListInflight = (async function () {
+    var all = [], total = 0, page, totalPages = 0;
+    for (page = 1; page <= maxPages; page++) {
+      var res = await bbFetchT(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
+      var js = await res.json().catch(function () { return null; });
+      if (!res.ok || !js || js.bizCode !== 10000) throw new Error((js && (js.error || js.message)) || ("HTTP " + res.status));
+      all = all.concat(bbSportyFlattenEvents(js));
+      total = js.data && js.data.totalNum || total;
+      totalPages = total ? Math.ceil(total / 100) : 0;
+      if (!total || page * 100 >= total) break;
+    }
+    _bbSpListCache = { at: Date.now(), events: all, total: total, pages: page > maxPages ? maxPages : page, totalPages: totalPages };
+    return _bbSpListCache;
+  })();
+  try { return await _bbSpListInflight; } finally { _bbSpListInflight = null; }
+}
+
 /* NON-CALC GROUP — external feeds, fixture lookup and source parsing. */
 async function bbSportyLookup(home, away, startMs) {
   var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
   var all = [], total = 0, pairs = Array.isArray(home) ? home : [[home, away]], match = null;
-  for (var page = 1; page <= 8; page++) { /* all pages (today + tomorrow) */
-    var res = await bbFetchT(base + "/sporty/list?page=" + page, { headers: { Accept: "application/json" } });
-    var js = await res.json().catch(function () { return null; });
-    if (!res.ok || !js || js.bizCode !== 10000) throw new Error((js && (js.error || js.message)) || ("HTTP " + res.status));
-    var evs = (js.data && js.data.tournaments || []).reduce(function (a, t) { return a.concat((t.events || []).map(function (e) { e.__tn = t.name || ""; e.__tid = t.id || ""; return e; })); }, []);
-    if (!startMs) evs = evs.filter(bbTodayTomorrow);
-    all = all.concat(evs);
-    total = js.data && js.data.totalNum || total;
-    if (!total || page * 100 >= total) break;
+  { /* all pages (today + tomorrow) - served from the 5 min list cache when fresh */
+    var _lst = await bbSportyGetList(base, 8);
+    all = startMs ? _lst.events.slice() : _lst.events.filter(bbTodayTomorrow);
+    total = _lst.total;
   }
   var _srId = ""; try { var _fs = document.getElementById("fixtureSelect"), _fo = _fs && _fs.options[_fs.selectedIndex]; _srId = (_fo && _fo.dataset && (_fo.dataset.srMatchId || "")) || ""; } catch (_eId) {}
   pairs.forEach(function (pr) { var m = bbSportyMatchEvent(all, pr[0], pr[1], startMs, { srMatchId: _srId }); if (m && (!match || m.score > match.score)) match = m; });
@@ -1331,9 +1348,14 @@ async function bbSportyLookup(home, away, startMs) {
 }
 async function bbSportyFetchEvent(ev, memKey) {
   var base = (typeof WORKER_BASE_URL !== "undefined" && WORKER_BASE_URL) ? WORKER_BASE_URL : "https://thebetceo-engine.ridwantunde636.workers.dev";
-  var r2 = await bbFetchT(base + "/sporty/event?id=" + encodeURIComponent(ev.eventId), { headers: { Accept: "application/json" } });
-  var j2 = await r2.json().catch(function () { return null; });
-  if (!r2.ok || !j2 || j2.bizCode !== 10000 || !j2.data) throw new Error((j2 && (j2.error || j2.message)) || ("HTTP " + r2.status));
+  var _evKey = String(ev.eventId), _evHit = _bbSpEventCache[_evKey], j2;
+  if (_evHit && Date.now() - _evHit.at < BB_SP_EVENT_TTL) { j2 = _evHit.js; }
+  else {
+    var r2 = await bbFetchT(base + "/sporty/event?id=" + encodeURIComponent(ev.eventId), { headers: { Accept: "application/json" } });
+    j2 = await r2.json().catch(function () { return null; });
+    if (!r2.ok || !j2 || j2.bizCode !== 10000 || !j2.data) throw new Error((j2 && (j2.error || j2.message)) || ("HTTP " + r2.status));
+    _bbSpEventCache[_evKey] = { at: Date.now(), js: j2 };
+  }
   try { var mem = JSON.parse(localStorage.getItem("BB_SPORTY_MATCHES") || "{}"); mem[memKey] = { home: ev.homeTeamId, away: ev.awayTeamId, eventId: ev.eventId, at: Date.now() }; localStorage.setItem("BB_SPORTY_MATCHES", JSON.stringify(mem)); } catch (_e) {}
   /* Only retain line metadata; retain only market identifiers, specifiers, status and numeric line metadata from the API response. */
   var rawMarkets = Array.isArray(j2.data.markets) ? j2.data.markets : [];
@@ -6443,10 +6465,9 @@ const STANDALONE_BUILD_MARKER = "bb_engine_standalone_build";
 const WORKER_URL = "https://thebetceo-engine.ridwantunde636.workers.dev/";
 
 /* NON-CALC GROUP — external feeds, fixture lookup and source parsing. */
-/* SofaScore: api.sofascore.com now returns 403 {"reason":"challenge"} (anti-bot).
-   The website's own API path on www.sofascore.com is used first; api.* kept as fallback. */
+/* SofaScore: MANUAL ONLY. The engine never calls SofaScore itself (no auto-fetch, no Worker fallback).
+   SOFA_API_BASE is only used to build the "open this link, then paste the JSON" buttons. */
 const SOFA_API_BASE = "https://www.sofascore.com/api/v1";
-const SOFA_API_BASE_LEGACY = "https://api.sofascore.com/api/v1";
 
 /* NON-CALC GROUP — runtime setup and non-calculation support. */
 const CLIENT_RATE_GATE_TOKEN = (function () {
@@ -7860,42 +7881,6 @@ function ssPickTeamFromSearch(teams, leagueKey) {
   return list[0] || null;
 }
 
-/* NON-CALC GROUP — external feeds, fixture lookup and source parsing. */
-async function ssFetchTeamLastEvents(teamId) {
-  const id = String(teamId || "").trim();
-  if (!/^[0-9]+$/.test(id)) return [];
-  if (typeof proxyFetch !== "function") return [];
-  const pages = [];
-  try {
-    for (let page = 0; page <= 3; page++) {
-      try {
-        let payload = null;
-        try {
-          payload = await proxyFetch(SOFA_API_BASE + "/team/" + id + "/events/last/" + page);
-        } catch (_eWww) {
-          payload = await proxyFetch(SOFA_API_BASE_LEGACY + "/team/" + id + "/events/last/" + page);
-        }
-        if (!payload) break;
-        pages.push(payload);
-        if (page >= 3) break;
-      } catch (_ePage) {
-        if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents/p" + page, _ePage);
-        break;
-      }
-    }
-  } catch (_e0) {
-    if (typeof reportSoftFailure === "function") reportSoftFailure("ssFetchTeamLastEvents", _e0);
-    return [];
-  }
-  const merged = new Map();
-  pages.forEach(function (payload) {
-    ssExtractPastedEvents(payload).forEach(function (ev) {
-      if (ev && ev.id != null) merged.set(ev.id, ev);
-    });
-  });
-  return Array.from(merged.values());
-}
-
 /* NON-CALC GROUP — league/team identity mapping and operational metadata. */
 async function ssApplySearchPaste(side, parsed, st) {
   const leagueSelect = document.getElementById("leagueSelect")?.value || "";
@@ -7917,16 +7902,8 @@ async function ssApplySearchPaste(side, parsed, st) {
       picked.name +
       " (" +
       picked.id +
-      "). Fetching last events…";
+      "). Manual mode: open the JSON " + side + " links and paste /events/last/0.";
   }
-  const _fetchTagId = side === "A" ? "aAutoTag" : "bAutoTag";
-  const _fetchIntegrityId = side === "A" ? "aIntegrityTag" : "bIntegrityTag";
-  const _fetchTagEl = document.getElementById(_fetchTagId);
-  const _fetchIntegrityEl = document.getElementById(_fetchIntegrityId);
-  if (_fetchTagEl) { _fetchTagEl.style.display = "inline"; _fetchTagEl.textContent = "⏳ Fetching…"; _fetchTagEl.style.color = "#d98a00"; }
-  if (_fetchIntegrityEl) { _fetchIntegrityEl.style.display = "inline"; _fetchIntegrityEl.style.color = "#d98a00"; _fetchIntegrityEl.textContent = "· waiting"; }
-  const events = await ssFetchTeamLastEvents(picked.id);
-  if (events.length) return { resolvedTeam: picked, events: events };
   if (st) {
     st.style.color = "#2f8f4a";
     st.textContent =
@@ -19062,9 +19039,6 @@ async function _bbRdProxyFetchNet(url, timeoutMs = 12000) {
     if (/site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com/i.test(u)) {
       return "DirectESPN";
     }
-    if (/api\.sofascore\.com|www\.sofascore\.com|api\.sofascore\.app/i.test(u)) {
-      return "DirectSofa";
-    }
     if (/feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net/i.test(u)) {
       if (/\/competitions\/U(?:\/|$|\?)/i.test(u) || /\/seasons\/U\d+/i.test(u) || /[?&]competition=U\b/i.test(u)) {
         return "DirectEurocup";
@@ -19130,7 +19104,7 @@ async function _bbRdProxyFetchNet(url, timeoutMs = 12000) {
       throw new Error("proxyFetch: URL unparseable");
     }
     const _allowedHost =
-      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|api\.sofascore\.com|www\.sofascore\.com|api\.sofascore\.app|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net|api\.kbl\.or\.kr)$/i.test(_host);
+      /^(?:site\.api\.espn\.com|site\.web\.api\.espn\.com|sports\.core\.api\.espn\.com|feeds\.incrowdsports\.com|api-live\.euroleague\.net|live\.euroleague\.net|api\.kbl\.or\.kr)$/i.test(_host);
     if (!_allowedHost) {
       engineDebug("proxyFetch blocked non-allowlisted host", { request: fetchLabel, host: _host });
       throw new Error("proxyFetch: target host not allowlisted");
@@ -22401,12 +22375,38 @@ function pendingTrackedEventIdsByLeague() {
 }
 
 /* NON-CALC GROUP — external feeds, fixture lookup and source parsing. */
+/* WORKER-LIMIT FIX B: the poll used to re-run every 28 s forever, even with the app hidden and even when every pending game
+   was hours away. Now: hidden app = no poll (resume restarts it); live game = 28 s; a game starting/finished-but-unsettled = 60 s;
+   all games still >15 min away = sleep until ~15 min before the earliest start (max 5 min). */
+function bbLivePollDelayMs() {
+  try {
+    if (g_liveGameStatus && g_liveGameStatus.size > 0) return 28000;
+    const now = Date.now();
+    const active = Array.isArray(g_trackerState && g_trackerState.activePicks) ? g_trackerState.activePicks : [];
+    let earliest = Infinity, anyPending = false;
+    for (const p of active) {
+      if (!p || !p.eventId) continue;
+      if (String(p.resultStatus || "pending").toLowerCase() !== "pending") continue;
+      anyPending = true;
+      const ts = safeParseDate(p.eventDate);
+      if (!ts) return 60000; /* start time unknown: keep polling */
+      if (ts < earliest) earliest = ts;
+    }
+    if (!anyPending) return 300000;
+    const untilWindow = earliest - 15 * 60000 - now;
+    if (untilWindow <= 0) return 60000;
+    return Math.min(300000, Math.max(60000, untilWindow));
+  } catch (_e) { return 60000; }
+}
 function scheduleLiveClockPoll(delayMs) {
   clearTimeout(_liveClockPollTimer);
   _liveClockPollTimer = null;
-  const wait = Number.isFinite(delayMs) ? Math.max(0, delayMs) : 28000;
+  const explicit = Number.isFinite(delayMs);
+  if (!explicit && typeof document !== "undefined" && document.hidden) return; /* hidden: no timer; resumeLiveTrackerNow() restarts it */
+  const wait = explicit ? Math.max(0, delayMs) : bbLivePollDelayMs();
   _liveClockPollTimer = setTimeout(async () => {
     _liveClockPollTimer = null;
+    if (typeof document !== "undefined" && document.hidden) return; /* went hidden while waiting */
     await pollLiveGameClocks();
   }, wait);
 }
@@ -40593,12 +40593,19 @@ const fixtureSelect = document.getElementById("fixtureSelect");
     (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)
   );
   let _lastResumeAt = 0;
+  /* WORKER-LIMIT FIX C: every app switch used to run a full cloud-sync (manifest GET + save) after only 1.5 s.
+     Now the cloud refresh runs at most once per 3 min on resume; the first one after load is covered by the startup refresh. */
+  const RESUME_SYNC_MIN_MS = 3 * 60 * 1000;
+  let _lastResumeSyncAt = Date.now();
   function resumeLiveTrackerNow() {
     // focus + pageshow + visibilitychange all fire together on app resume; run one refresh, not three
     const _nowR = Date.now();
     if (_nowR - _lastResumeAt < 1500) return;
     _lastResumeAt = _nowR;
-    refreshTrackerInBackground(true);
+    if (_nowR - _lastResumeSyncAt >= RESUME_SYNC_MIN_MS) {
+      _lastResumeSyncAt = _nowR;
+      refreshTrackerInBackground(true);
+    }
     scheduleLiveClockPoll(0);
     const modalOpen = document.getElementById("trackerModal")?.classList.contains("open");
     if (modalOpen) startLiveClockTicker();
