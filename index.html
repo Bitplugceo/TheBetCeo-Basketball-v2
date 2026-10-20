@@ -1,4 +1,3 @@
-Q
 <!DOCTYPE html>
 <html lang="en">
 <!-- NON-CALC GROUP: document metadata, resource links and manifest. -->
@@ -41431,20 +41430,31 @@ body.dark-mode #apBody,html.dark-mode #apBody{background:#0c0c0c}
 .apTblWrap{width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
 #apParlayTbl,#apAllTbl{
   width:100%;border-collapse:collapse;table-layout:fixed;
-  font-size:11px;background:var(--panel,#fff);
+  font-size:10px;background:var(--panel,#fff);
 }
 #apParlayTbl th,#apAllTbl th{
-  background:#1a1a1a;color:#fff;font-weight:700;font-size:10px;
-  padding:10px 4px;text-align:center;border:1px solid #2a2a2a;
-  letter-spacing:.3px;text-transform:uppercase;
+  background:#1a1a1a;color:#fff;font-weight:700;font-size:9px;
+  padding:10px 2px;text-align:center;border:1px solid #2a2a2a;
+  letter-spacing:.2px;text-transform:uppercase;
 }
 #apParlayTbl td,#apAllTbl td{
   background:var(--panel,#fff);color:var(--text,#1f2430);
-  font-weight:600;font-size:11px;padding:10px 4px;
+  font-weight:600;font-size:10px;padding:10px 2px;
   text-align:center;vertical-align:middle;
   border:1px solid var(--panel-border,#e0e0e0);
-  word-break:break-word;
+  word-break:break-word;line-height:1.25;
 }
+#apAllTbl th:nth-child(1),#apAllTbl td:nth-child(1){width:11%}
+#apAllTbl th:nth-child(2),#apAllTbl td:nth-child(2){width:12%}
+#apAllTbl th:nth-child(3),#apAllTbl td:nth-child(3){width:18%}
+#apAllTbl th:nth-child(4),#apAllTbl td:nth-child(4){width:14%}
+#apAllTbl th:nth-child(5),#apAllTbl td:nth-child(5){width:9%}
+#apAllTbl th:nth-child(6),#apAllTbl td:nth-child(6){width:12%}
+#apAllTbl th:nth-child(7),#apAllTbl td:nth-child(7){width:10%}
+#apAllTbl th:nth-child(8),#apAllTbl td:nth-child(8){width:10%}
+#apAllTbl td:nth-child(3){font-weight:800;text-transform:uppercase}
+#apAllTbl td:nth-child(6){font-weight:900}
+
 body.dark-mode #apParlayTbl td,body.dark-mode #apAllTbl td,
 html.dark-mode #apParlayTbl td,html.dark-mode #apAllTbl td{
   background:#161616;color:#f2f2f2;border-color:#2a2a2a;
@@ -42034,31 +42044,76 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     renderAllGames(dk, c);
   }
 
+  function lineOf(b) {
+    if (!b) return "—";
+    if (b.line != null && isFinite(Number(b.line))) return String(b.line);
+    var t = String(b.pick || "");
+    var m = t.match(/-?\d+(?:\.\d+)?/g);
+    return m && m.length ? m[m.length - 1] : "—";
+  }
+  function dirPick(b) {
+    var t = String(b && b.pick || "").trim();
+    var m = /^(OVER|UNDER)\b/i.exec(t);
+    if (m) return m[1].toUpperCase();
+    /* strip trailing line numbers for a short pick label */
+    return t.replace(/\s*-?\d+(?:\.\d+)?\s*$/, "").trim() || t || "—";
+  }
   function renderAllGames(dk, c) {
     var wrap = $("apAllWrap"); if (!wrap) return;
-    var games = scopeGames(dk).slice().sort(function (a, b) { return (startMs(a) || 9e15) - (startMs(b) || 9e15); });
-    if (!games.length) {
+    var running = ctx.running;
+    var all = scopeGames(dk).slice();
+    /* Finished view: only PLAY rows (Tracked Picks style). While running, also show pending. Never list no-play. */
+    var games = all.filter(function (g) {
+      if (!g) return false;
+      if (g.status === "play" && g.best) return true;
+      if (running && (g.status === "pending" || g.status === "error" || g.status === "nodata")) return true;
+      return false;
+    }).sort(function (a, b) { return (startMs(a) || 9e15) - (startMs(b) || 9e15); });
+
+    var playN = all.filter(function (g) { return g && g.status === "play"; }).length;
+    var noplayN = all.filter(function (g) { return g && g.status === "noplay"; }).length;
+
+    if (!all.length) {
       wrap.innerHTML = '<div class="apEmpty">No games scanned yet for this day.</div>';
       return;
     }
+    if (!games.length) {
+      wrap.innerHTML = '<div class="apEmpty">No plays yet'
+        + (noplayN ? " · " + noplayN + " no-play hidden" : "")
+        + (running ? " · still running…" : "")
+        + "</div>";
+      return;
+    }
+
     var rows = games.map(function (g) {
-      var stClass = "apSt-" + (g.status || "pending");
-      var stLabel = g.status === "play" ? "PLAY" : g.status === "noplay" ? "NO PLAY" : g.status === "pending" ? "PENDING" : g.status === "error" ? "ERROR" : g.status === "nodata" ? "NO DATA" : g.status === "gone" ? "GONE" : String(g.status || "").toUpperCase();
-      var det = "";
-      if (g.status === "play" && g.best) det = esc(pickLabel(g.best)) + " · " + esc(g.best.grade || "") + " · " + Math.round(g.best.win * 100) + "%";
-      else if (g.err) det = esc(g.err);
-      else if (g.status === "noplay") det = "Engine: no play";
+      if (g.status !== "play" || !g.best) {
+        var st = g.status === "pending" ? "PENDING" : g.status === "error" ? "ERROR" : String(g.status || "").toUpperCase();
+        return "<tr>"
+          + "<td>" + esc(fmtTime(g)) + "</td>"
+          + "<td>" + esc(g.leagueLabel || g.league) + "</td>"
+          + "<td>" + esc(g.home) + " vs " + esc(g.away) + "</td>"
+          + "<td colspan="3" style="opacity:.65">" + st + (g.err ? " · " + esc(g.err) : "") + "</td>"
+          + "<td>—</td><td>—</td>"
+          + "</tr>";
+      }
+      var b = g.best;
       return "<tr>"
         + "<td>" + esc(fmtTime(g)) + "</td>"
         + "<td>" + esc(g.leagueLabel || g.league) + "</td>"
         + "<td>" + esc(g.home) + " vs " + esc(g.away) + "</td>"
-        + '<td class="' + stClass + '">' + stLabel + "</td>"
-        + "<td>" + det + (g.at ? '<span class="apMk">' + ago(g.at) + "</span>" : "") + "</td>"
+        + "<td>" + esc(marketLabel(b, g)) + "</td>"
+        + "<td>" + esc(lineOf(b)) + "</td>"
+        + "<td>" + esc(pickLabel(b)) + "</td>"
+        + "<td>" + esc(b.grade || "—") + "</td>"
+        + '<td class="apWin">' + Math.round(Number(b.win) * 100) + "%</td>"
         + "</tr>";
     }).join("");
-    wrap.innerHTML = '<div class="apSectionTitle">All predicted games · ' + games.length + '</div>'
+
+    wrap.innerHTML = '<div class="apSectionTitle">Plays · ' + playN
+      + (noplayN ? " <span class="apMuted">(" + noplayN + " no-play hidden)</span>" : "")
+      + "</div>"
       + '<div class="apTblWrap"><table id="apAllTbl"><thead><tr>'
-      + "<th>Time</th><th>League</th><th>Match</th><th>Status</th><th>Detail</th>"
+      + "<th>Time</th><th>League</th><th>Match</th><th>Market</th><th>Line</th><th>Pick</th><th>Grade</th><th>Win%</th>"
       + "</tr></thead><tbody>" + rows + "</tbody></table></div>";
   }
 
@@ -42066,10 +42121,16 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     var wrap = $("apParlayWrap"); if (!wrap) return;
     var dk = dayKeyOf(S.cfg.day), want = S.cfg.legs;
     var out = { dropGrade: 0, dropEv: 0, dropNoPrice: 0, dropDiv: 0 };
-    var sel = selectParlayEx(scopeGames(dk), want, {
+    var pack = selectParlayEx(scopeGames(dk), want, {
       minGrade: S.cfg.minGrade, ttlH: S.cfg.ttlH, diversify: S.cfg.diversify,
-      skipNegEv: S.cfg.skipNegEv, rankBy: S.cfg.rankBy, onlyPriced: S.cfg.onlyPriced
-    }, out);
+      skipNegEv: S.cfg.skipNegEv, rankBy: S.cfg.rankBy, onlyPriced: S.cfg.onlyPriced,
+      oddsOf: oddsOf
+    });
+    var sel = pack.sel || [];
+    out.dropGrade = pack.dropGrade || 0;
+    out.dropEv = pack.dropEv || 0;
+    out.dropNoPrice = pack.dropNoPrice || 0;
+    out.dropDiv = pack.dropCap || 0;
     var why = [];
     if (out.dropGrade) why.push(out.dropGrade + " below min grade");
     if (out.dropEv) why.push(out.dropEv + " negative EV");
