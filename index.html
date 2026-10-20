@@ -1,3 +1,4 @@
+Q
 <!DOCTYPE html>
 <html lang="en">
 <!-- NON-CALC GROUP: document metadata, resource links and manifest. -->
@@ -41996,11 +41997,18 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     $("apPause").disabled = !running;
     $("apStart").textContent = running ? "Running…" : (c.pending ? "▶ Resume" : "▶ Predict");
 
-    var done = c.total - c.pending, pct = c.total ? Math.round(done / c.total * 100) : 0;
+    var done = c.total - c.pending, pct = c.total ? Math.round(done / c.total * 100) : (running ? 2 : 0);
     var status = $("apStatus");
     if (status) {
-      if (c.total) {
-        status.innerHTML = "<b>" + done + "/" + c.total + "</b> processed · ✅ " + c.play + " play · ⛔ " + c.noplay + " no play"
+      if (running && c.total) {
+        status.innerHTML = "<b>" + pct + "%</b> · " + done + "/" + c.total + " processed · ✅ " + c.play + " play · ⛔ " + c.noplay + " no play"
+          + (c.pending ? " · ⏳ " + c.pending + " left" : "")
+          + (c.nodata ? " · ⚠ " + c.nodata + " no data" : "")
+          + (c.error ? " · ❌ " + c.error + " failed" : "");
+      } else if (running && !c.total) {
+        status.innerHTML = "<b>…</b> Discovering games in selected leagues…";
+      } else if (c.total) {
+        status.innerHTML = "<b>" + pct + "%</b> · " + done + "/" + c.total + " processed · ✅ " + c.play + " play · ⛔ " + c.noplay + " no play"
           + (c.nodata ? " · ⚠ " + c.nodata + " no data" : "")
           + (c.error ? " · ❌ " + c.error + " failed" : "")
           + (c.stale ? " · 🕒 " + c.stale + " stale" : "");
@@ -42011,7 +42019,10 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
       }
     }
     var bar = $("apBar") && $("apBar").querySelector("i");
-    if (bar) bar.style.width = pct + "%";
+    if (bar) {
+      bar.style.width = Math.max(running && !c.total ? 4 : 0, pct) + "%";
+      bar.style.opacity = running || c.total ? "1" : "0.35";
+    }
 
     var pill = $("apPill");
     if (pill) {
@@ -42191,18 +42202,7 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     var m = $("apLeagueModal"), q = $("apLeagueSearch");
     q.value = "";
     m.classList.add("open"); m.setAttribute("aria-hidden", "false");
-    var dk = dayKeyOf(S.cfg.day);
-    var map = availableMap(dk);
-    var all = leagueOptions();
-    var probed = all.filter(function (l) { return Object.prototype.hasOwnProperty.call(map, l.v); }).length;
     drawLeagues("");
-    /* If we have never scanned this day (or only partially), probe now so only leagues with games appear */
-    if (probed < all.length) {
-      probeAvailableLeagues(dk, { showProgress: true }).catch(function (e) {
-        ctx.lastErr = String(e && e.message || e);
-        try { drawLeagues(""); } catch (e2) {}
-      });
-    }
   }
   function closeLeagues() {
     _probeToken++; /* cancel any in-flight probe */
@@ -42216,41 +42216,28 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     var list = $("apLeagueList"); if (!list) return;
     list.innerHTML = "";
     var dk = dayKeyOf(S.cfg.day);
-    var map = availableMap(dk);
     var all = leagueOptions();
-    var shown = 0, withGames = 0;
-    var hasAnyProbe = all.some(function (l) { return Object.prototype.hasOwnProperty.call(map, l.v); });
+    var shown = 0;
 
     all.forEach(function (l) {
-      var n = leagueGameCount(dk, l.v);
-      var selected = S.cfg.leagues.indexOf(l.v) >= 0;
-      var matchesDay = n > 0;
-      /* Rule: only show leagues that have matches for this day.
-         Exception: keep already-selected leagues visible (even if 0) so the user can uncheck them. */
-      if (!matchesDay && !selected) return;
       if (q && l.t.toLowerCase().indexOf(q) < 0 && l.v.indexOf(q) < 0) return;
-
       shown++;
-      if (matchesDay) withGames++;
+      var selected = S.cfg.leagues.indexOf(l.v) >= 0;
+      var n = leagueGameCount(dk, l.v); /* -1 if never probed; optional badge only */
       var lab = document.createElement("label");
       var cb = document.createElement("input");
       cb.type = "checkbox"; cb.value = l.v; cb.checked = selected;
       lab.appendChild(cb);
       var labelTxt = l.t;
-      if (n >= 0) labelTxt += (n > 0 ? "  ·  " + n + " game" + (n === 1 ? "" : "s") : "  ·  no games");
-      else labelTxt += "  ·  …";
+      if (n > 0) labelTxt += "  ·  " + n + " game" + (n === 1 ? "" : "s");
       lab.appendChild(document.createTextNode(labelTxt));
-      if (n === 0) lab.style.opacity = "0.55";
       list.appendChild(lab);
     });
 
     var countEl = $("apLeagueCount");
-    if (countEl) {
-      if (!hasAnyProbe) countEl.textContent = "Scanning available leagues…";
-      else countEl.textContent = withGames + " with games · " + shown + " shown · " + S.cfg.leagues.length + " selected";
-    }
-    if (shown === 0 && hasAnyProbe) {
-      list.innerHTML = '<div class="apMuted" style="padding:18px 8px">No leagues have upcoming matches for this day.</div>';
+    if (countEl) countEl.textContent = shown + " shown · " + S.cfg.leagues.length + " selected";
+    if (shown === 0) {
+      list.innerHTML = '<div class="apMuted" style="padding:18px 8px">No leagues match your search.</div>';
     }
   }
   function setLeague(v, on) { var i = S.cfg.leagues.indexOf(v); if (on && i < 0) S.cfg.leagues.push(v); if (!on && i >= 0) S.cfg.leagues.splice(i, 1); }
@@ -42289,16 +42276,9 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     function setDay(d) {
       if (ctx.running) return;
       S.cfg.day = d; save(); render(); renderParlay();
-      /* League list is day-specific — refresh / re-probe when day changes */
       var modal = $("apLeagueModal");
       if (modal && modal.classList.contains("open")) {
-        var dk = dayKeyOf(S.cfg.day);
         drawLeagues(($("apLeagueSearch") && $("apLeagueSearch").value) || "");
-        var map = availableMap(dk), all = leagueOptions();
-        var probed = all.filter(function (l) { return Object.prototype.hasOwnProperty.call(map, l.v); }).length;
-        if (probed < all.length) {
-          probeAvailableLeagues(dk, { showProgress: true }).catch(function () {});
-        }
       }
     }
     /* Single day button + dropdown (Today / Tomorrow) */
@@ -42362,4 +42342,3 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
 
 </body>
 </html>
- 
