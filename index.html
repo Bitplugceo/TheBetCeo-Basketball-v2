@@ -1,3 +1,4 @@
+H
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-LEG-0001 | LEGEND | Comments containing ">> BB-" are chunk headers added for auditing (comments only, no code). BB-JS/CSS/HTML-nnnn = one chunk; BB-BLK = script/style block; CALC / NON-CALC follows the existing section markers. Full list: BB_SECTION_INDEX.txt -->
@@ -2418,7 +2419,7 @@ function bbQxModel(opts) {
     res.tier = lg.tier; res.meta.leagueGames = lg.games.length; res.meta.leagueTier = lg.tier; res.meta.leagueKey = lg.key;
     /* >> BB-JS-0255 | CALC | bbQxModel > if-block | 3 lines */
     if (lg.tier === "insufficient") { res.reason = lg.games.length === 0
-      ? "no per-quarter (Q1-Q4) scores stored for these teams: Fetch Stats for both teams first; if you already did, this league's feed returned no quarter scores for their games"
+      ? "no per-quarter (Q1-Q4) scores stored for these teams: Fetch Stats for both teams first; if you already did, none of their stored same-competition games has complete validated Q1-Q4 values (see the quarter coverage note under the fetch status)"
       : "not enough quarter-score history stored (" + lg.games.length + " full-quarter games; need " + BB_QX.minTeamsPool + "). Fetch Stats for both teams so their games are stored"; return res; }
     var lgShares = bbQxShares(lg.games);
     var lgMeanG = lg.games.reduce(function (a, x) { return a + x.G; }, 0) / lg.games.length;
@@ -35595,7 +35596,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
   const h1Allowed10 = [];
   const qScored10 = [[], [], [], []];
   const qAllowed10 = [[], [], [], []];
-  let qSummaryFailures = 0;
+  let qSummaryErrors = 0;
   const paintScoredArr = [];
   const paintAllowedArr = [];
   const fbScoredArr = [];
@@ -35653,15 +35654,18 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
             const lm = mine?.linescores || [];
             const lo = opp?.linescores || [];
             gotLS = lm.length >= 1 && lo.length >= 1;
-            /* QFIX-ESPN-DIRECT: use only validated regulation Q1-Q4 values from this exact completed game. Never derive quarters from FT totals. */
-            if (_verifiedRegP === 4 && typeof bbQxQ4 === "function") {
-              const _qm = bbQxQ4(mine), _qo = bbQxQ4(opp);
-              if (_qm && _qo) {
+            /* QFIX-ESPN-DIRECT: use only validated Q1-Q4 values from this exact completed game. Never derive quarters from FT totals. */
+            if (_verifiedRegP === 4) {
+              const _allM = Array.isArray(lm) ? lm.map(readVal) : [];
+              const _allO = Array.isArray(lo) ? lo.map(readVal) : [];
+              const _finalM = Number(mine.score), _finalO = Number(opp.score);
+              const _validLineM = _allM.length >= 4 && _allM.every((v) => Number.isFinite(v) && v >= 0) && Number.isFinite(_finalM) && _finalM > 0 && Math.abs(_allM.reduce((a, v) => a + v, 0) - _finalM) < 1e-6;
+              const _validLineO = _allO.length >= 4 && _allO.every((v) => Number.isFinite(v) && v >= 0) && Number.isFinite(_finalO) && _finalO > 0 && Math.abs(_allO.reduce((a, v) => a + v, 0) - _finalO) < 1e-6;
+              /* Reconcile every supplied period to the final score. If the provider supplied OT periods, those periods reconcile the final score but remain outside Q1-Q4. */
+              if (_validLineM && _validLineO) {
+                const _qm = _allM.slice(0, 4), _qo = _allO.slice(0, 4);
                 const _sumQm = _qm.reduce((a, v) => a + v, 0), _sumQo = _qo.reduce((a, v) => a + v, 0);
-                const _finalM = Number(mine.score), _finalO = Number(opp.score);
-                const _fitsM = !(Number.isFinite(_finalM) && _finalM > 0 && _sumQm > _finalM);
-                const _fitsO = !(Number.isFinite(_finalO) && _finalO > 0 && _sumQo > _finalO);
-                if (_sumQm > 0 && _sumQo > 0 && _fitsM && _fitsO) { qMine = _qm; qOpp = _qo; }
+                if (_sumQm > 0 && _sumQo > 0) { qMine = _qm; qOpp = _qo; }
               }
             }
             /* >> BB-JS-3093 | NON-CALC | fetchScheduleCore > const _wentToOT | 3 lines */
@@ -35731,7 +35735,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
           }
         }
       } catch (e) {
-        qSummaryFailures++;
+        qSummaryErrors++;
         logDebug("fetchScheduleCore summary failed", e);
       }
       if (isNaN(ms) || isNaN(os) || ms <= 0 || os <= 0) return null;
@@ -35824,7 +35828,7 @@ async function fetchScheduleCore(base, teamId, leagueKey, requiredVenue, allowFa
         qAllowed: qAllowed10.map((a) => a.slice(0, 10)),
         qGames: qScored10[0].length,
         ftGames: scored10.length,
-        qRequestFailures: qSummaryFailures,
+        qSummaryErrors: qSummaryErrors,
         qHistoryAuthoritative: true,
         competitionTags: summaries.filter(Boolean).slice(0, 10).map((g) => ({
           seasonType: g.seasonType ?? null,
@@ -40392,6 +40396,7 @@ async function fetchESPNCore(league, teamAName, teamBName) {
       compactFetchStatus ? `<div style="font-weight:bold;">${compactFetchStatus}</div>` : "",
       statusClass,
     );
+    try { bbQxSetDirect("A", teamAId, aStats, aVenueStats, teamAVenue); bbQxSetDirect("B", teamBId, bStats, bVenueStats, teamBVenue); } catch (_qd) {} /* QFIX-ESPN-HANDOFF: same FT-aligned Q1-Q4 arrays as the FT boxes (NCAA path has none -> store fallback) */
     try { if (typeof bbQxFillQuarterInputs === "function") bbQxFillQuarterInputs(); } catch (_qfe) {}
     const _last10Issues = applyLast10SeriesAlert();
     /* >> BB-JS-3550 | NON-CALC | fetchESPNCore > if-block | 3 lines */
@@ -49715,16 +49720,16 @@ function bbQxSnapshotSeries() {
 }
 
 /* >> BB-JS-4423 | NON-CALC | assign window.__bbQxDirect | 1 line */
-/* QFIX-ALIGN: the quarter boxes now show the SAME games as the FT / 1H boxes.
-   1) Sportradar / KBL / EuroLeague fetches hand over Q1-Q4 built from the very games chosen for FT (bbQxSetDirect), scaled exactly like FT.
-   2) Every other route (ESPN ...) reads the quarter store, but only the games whose date matches a game in the FT box (FT order), instead of the
-      newest ten games that happen to have four quarters (which silently shifted the boxes onto different games).
-   3) When a feed truly has no quarter scores for some of the FT games, the fetch status says so, with the exact counts. Nothing is ever invented. */
+/* QFIX-ALIGN: quarter inputs use complete records only; unavailable periods are never inferred.
+   1) Sportradar / KBL / EuroLeague routes can hand over Q1-Q4 arrays from their selected game sample through bbQxSetDirect.
+   2) ESPN (fetchESPNCore, used for NBA) passes validated Q1-Q4 arrays directly from the same completed summaries used for FT / 1H via bbQxSetDirect (QFIX-ESPN-HANDOFF). The series is aligned to the accepted FT
+      sample; an authoritative empty series clears the inputs rather than falling back to possibly stale localStorage rows.
+   3) Store-only routes retain the existing date-alignment fallback. Coverage wording reports counts and does not assert a feed-level cause without evidence. */
 window.__bbQxDirect = window.__bbQxDirect || { A: null, B: null };
 /* >> BB-JS-4424 | NON-CALC | function bbQxSetDirect | 6 lines */
 function bbQxSetDirect(side, teamId, stats, venueStats, venueRole) {
   window.__bbQxDirect = window.__bbQxDirect || { A: null, B: null };
-  var pack = function (st) { return st && Array.isArray(st.qScored) && Array.isArray(st.qAllowed) && (st.qGames > 0 || st.qHistoryAuthoritative === true) ? { sc: st.qScored, al: st.qAllowed, n: Number(st.qGames) || 0, ft: Number(st.ftGames) || 0, authoritative: st.qHistoryAuthoritative === true, failures: Number(st.qRequestFailures) || 0 } : null; };
+  var pack = function (st) { return st && Array.isArray(st.qScored) && Array.isArray(st.qAllowed) && (st.qGames > 0 || st.qHistoryAuthoritative === true) ? { sc: st.qScored, al: st.qAllowed, n: Number(st.qGames) || 0, ft: Number(st.ftGames) || 0, authoritative: st.qHistoryAuthoritative === true, failures: Number(st.qSummaryErrors) || 0 } : null; };
   var ov = pack(stats);
   window.__bbQxDirect[side] = ov ? { id: String(teamId || ""), overall: ov, venue: pack(venueStats), role: venueRole || "" } : null;
 }
@@ -49743,7 +49748,7 @@ function bbQxReportCoverage() {
     if (ft > 0 && q < ft) {
       var direct = window.__bbQxDirect && window.__bbQxDirect[t[0]] && window.__bbQxDirect[t[0]].overall;
       var reason = (ft - q) + " selected recent-game row(s) do not have complete validated Q1-Q4 values; none were inferred";
-      if (direct && direct.authoritative === true && direct.failures > 0) reason += "; " + direct.failures + " summary request(s) failed (see runtime diagnostics)";
+      if (direct && direct.authoritative === true && direct.failures > 0) reason += "; " + direct.failures + " summary processing/request error(s) were recorded (see runtime diagnostics)";
       msgs.push((nm || t[2]) + " Q1-Q4: " + q + " of " + ft + " selected FT games have complete quarter data (" + reason + ")");
     }
   });
@@ -49877,8 +49882,9 @@ PRIORITY 0 — QUARTER-DATA FETCHING REPAIR
 - Location: bbQxStoreLoad / bbQxStoreSave; bbQxIngestRows; fetchScheduleCore; bbQxSetDirect; bbQxFillQuarterInputs; bbQxReportCoverage.
 - Why we should upgrade it: the ESPN path ingested quarter values into localStorage, but fetchScheduleCore returned FT/1H series without Q1-Q4 arrays. Quarter inputs therefore depended on the separate store and its matching/cache behavior. Coverage text also asserted “the feed has no quarter scores” without evidence to distinguish missing fields from request or matching failure.
 - Proof — Executed or Hand-computed: source inspection confirms the missing direct Q-array handoff and the unsupported status wording. A live ESPN request was not verified in this environment; prior access attempt returned HTTP 403. Fixture tests and syntax/preservation checks are documented below.
-- Upgrades to the engine: fetchScheduleCore now validates regulation Q1-Q4 values from each ESPN summary, carries them with that same summary record, aggregates only rows also accepted into the selected FT sample, and returns request-failure counts. An authoritative empty result clears quarter inputs rather than falling back to possibly stale cached records. The non-ESPN quarter store now has an in-memory session mirror and explicit persistence status. Each store ingest records reason counts/examples. No quarter values are inferred from full-game totals.
-- One exact Permanent implementation: use complete, finite, non-negative Q1-Q4 scores from the same completed game-summary response, include them only when their FT record is admitted, and treat absent/incomplete values as unavailable; retain in-memory storage only as a session fallback when browser persistence fails.
+- Upgrades to the engine: fetchScheduleCore validates the complete ESPN linescore against the final score (all supplied periods, including OT when present), takes only the first four regulation periods for Q1-Q4, carries those values with that same summary record, and aggregates only rows also admitted to the selected FT sample. An authoritative empty result clears quarter inputs rather than falling back to possibly stale cached records. The non-ESPN quarter store now has an in-memory session mirror and explicit persistence status. Each store ingest records reason counts/examples. No quarter values are inferred from full-game totals.
+- One exact Permanent implementation: use finite, non-negative period scores only when all supplied linescore periods reconcile to the final score within 1e-6; take only the first four regulation periods as Q1-Q4, include them only when the same FT record is admitted, and treat incomplete or mismatched values as unavailable; retain in-memory storage only as a session fallback when browser persistence fails.
+- Follow-up correction (ESPN/NBA hand-off): the first pass built the Q1-Q4 arrays in fetchScheduleCore but fetchESPNCore never called bbQxSetDirect, so ESPN/NBA quarter boxes still came from the localStorage store, which drops games whose season type differs from the current fixture (early season: last spring's playoff games -> "1 of 10"). Fixed by calling bbQxSetDirect for both teams (overall and venue) immediately before bbQxFillQuarterInputs in fetchESPNCore. The NO-PLAY reason for an empty quarter store no longer asserts the feed returned no quarter scores. The quarter model itself still reads the same-competition store by design (unchanged).
 - Improvement after the fix: the ESPN quarter boxes no longer depend on prior localStorage rows when the current summary pipeline returned successfully; zero usable quarter rows are explicitly represented, and coverage messaging no longer attributes the gap to the feed without evidence. Live ESPN operation still requires verification outside this restricted environment.
 
 1. PRICE-AWARE EXPECTED-VALUE GATE
@@ -49909,7 +49915,7 @@ PRIORITY 0 — QUARTER-DATA FETCHING REPAIR
 - Location: quarter ingest diagnostics and fetchScheduleCore outputs.
 - Why we should upgrade it: missing, rejected, or stale data must not be indistinguishable from a successful complete fetch.
 - Proof — Executed or Hand-computed: code inspection plus local fixture tests listed below; no live ESPN result was available.
-- Upgrades to the engine: per-row ingest reason ledger, persistent-versus-memory storage status, direct quarter coverage counts and failed summary-request counts added.
+- Upgrades to the engine: per-row ingest reason ledger, persistent-versus-memory storage status, direct quarter coverage counts and summary processing/request error counts added.
 - One exact Permanent implementation: validate rows at the provider boundary and record accepted/rejected reason counts and persistence status without manufacturing missing values.
 - Improvement after the fix: quarter ingestion and coverage failures are more diagnosable; provenance of unrelated legacy input fields is not comprehensively stamped.
 
@@ -50002,29 +50008,40 @@ PRIORITY 0 — QUARTER-DATA FETCHING REPAIR
 - Improvement after the fix: quarter row omissions are traceable while the existing NO-PLAY policy remains intact; full model-wide reason coverage was not independently measured.
 
 TEST REPORT
-Execution classifications: “fixture” = direct unit-style execution of selected implementation logic with synthetic provider-like records; “source check” = static parse/diff/count. No fixture is evidence of live ESPN functionality.
-- SRC-01 — Purpose: verify source preserves HTML structure and all source sections. Input: complete modified NEW.txt. Expected: HTML document shell and closing tags remain; actual: checked by HTML parser; result: PASS (source check).
-- SRC-02 — Purpose: parse JavaScript blocks. Input: every executable inline script extracted from the complete HTML. Expected: syntax parse succeeds. Actual: all 21 script blocks extracted and passed `node --check`; result: PASS (JavaScript syntax check, not browser execution).
-- LOCK-01 — Purpose: retain audit-locked lines exactly and in order. Input: every line carrying the audit-locked source marker before and after edit. Expected: exact line sequence identical. Actual: 666 locked-line records before and after; exact text and order identical. PASS (programmatic source comparison).
-- QFIX-01 — Purpose: accept one complete 4-quarter home/away row. Input: Q1-Q4 arrays with finite, non-negative values and final scores at least quarter sums. Expected: ingest accepts row. Actual: not run; no fixture execution recorded. NOT RUN.
-- QFIX-02 — Purpose: reject missing quarter. Input: only 3 periods on one side. Expected: record rejected as missing_or_incomplete_quarters; actual: not executed in this session. NOT RUN.
-- QFIX-03 — Purpose: reject quarter sums above final score. Input: complete quarter arrays whose sum exceeds a valid final score. Expected: quarters_exceed_final_score. Actual: not run; no fixture execution recorded. NOT RUN.
-- QFIX-04 — Purpose: reject live/incomplete game. Input: isEnded=false. Expected: unfinished_or_live. Actual: not run; no fixture execution recorded. NOT RUN.
-- QFIX-05 — Purpose: storage write failure does not delete half of data. Input: mock localStorage setItem throws after one valid in-memory record. Expected: memory mirror retains row and status reports persisted=false. Actual: not run; no fixture execution recorded. NOT RUN.
-- QFIX-06 — Purpose: zero complete quarters do not fall back to old store. Input: direct stats have qHistoryAuthoritative=true and qGames=0, with stale store seeded. Expected: Q boxes cleared and direct path terminates without reading store. Actual: source inspection confirms the authoritative-empty guard; runtime behavior not executed. NOT RUN (runtime).
-- NET-01 — Purpose: verify live ESPN summary schema/access. Input: live provider request. Expected: 2xx body with summary linescores. Actual: not run in final environment; prior sandbox attempt returned HTTP 403. Live source behavior remains unverified.
-- REG-01 — Purpose: 7/10 pass/fail and NO-PLAY regression. Input: existing engine cases. Expected: original thresholds and semantics unchanged. Actual: source diff kept those sections untouched; complete end-to-end cases not run here.
-- PAR-01 — Purpose: parlay eligibility/dependence regression. Input: existing parlay cases. Expected: safeguards unchanged. Actual: parlay source was not edited; full runtime cases not run here.
-- NAN-01 — Purpose: preserve intentional NaN behavior. Input: unchanged prediction sections. Expected: no conversion to zero/fabricated value. Actual: no prediction formula edits; full runtime case not run here.
+Execution classifications: “fixture” means the actual extracted engine functions ran with controlled fixture inputs in Node; “source check” means static structure/parse/preservation inspection. No fixture proves live provider operation.
+- SRC-01 | Purpose: check the HTML structure remains complete. | Input/fixture: the complete modified HTML source in NEW.txt. | Expected: no unclosed or structurally mismatched tags. | Actual: Python HTMLParser reported 0 unclosed tags and 0 structural errors. | Result: PASS. | Execution type: source check.
+- SRC-02 | Purpose: parse executable inline JavaScript. | Input/fixture: all executable script blocks extracted from the complete HTML. | Expected: every script passes Node syntax parsing. | Actual: 21 blocks checked with node --check; 0 syntax errors. | Result: PASS. | Execution type: source check.
+- LOCK-01 | Purpose: preserve all audit-locked text and order. | Input/fixture: source lines carrying the audit-locked marker before/after edit. | Expected: identical text and order. | Actual: all 666 marked lines matched exactly in order. | Result: PASS. | Execution type: programmatic preservation check.
+- QFIX-01 | Purpose: accept a complete game with four valid periods for both teams. | Input/fixture: fixture-1, home Q=[25,25,25,25]/final 100; away Q=[20,25,25,25]/final 95; completed, IDs present. | Expected: one row added and one row accepted. | Actual: added=1, accepted=1, stored row count=1. | Result: PASS. | Execution type: fixture using bbQxIngestRows.
+- QFIX-02 | Purpose: reject incomplete quarter data. | Input/fixture: same game with only three away-period scores. | Expected: no row added and reason missing_or_incomplete_quarters. | Actual: added=0 and the expected rejection reason count=1. | Result: PASS. | Execution type: fixture using bbQxIngestRows.
+- QFIX-03 | Purpose: reject quarters that exceed the final score. | Input/fixture: home Q=[30,30,25,25]/final 100; quarter sum=110. | Expected: no row added; quarters_exceed_final_score. | Actual: added=0 and the expected rejection reason count=1. | Result: PASS. | Execution type: fixture using bbQxIngestRows.
+- QFIX-04 | Purpose: reject a live/incomplete game. | Input/fixture: otherwise valid fixture with isEnded=false. | Expected: no row added; unfinished_or_live. | Actual: added=0 and the expected rejection reason count=1. | Result: PASS. | Execution type: fixture using bbQxIngestRows.
+- QFIX-05 | Purpose: test browser storage write failure without destructive trimming. | Input/fixture: localStorage.setItem throws a quota/security error while a complete row is ingested. | Expected: current-session row survives in memory; persisted=false and error visible. | Actual: row remains in BB_QX_STORE_MEMORY, persisted=false, write error retained; no half-store deletion. | Result: PASS. | Execution type: fixture using store/ingest functions.
+- QFIX-06 | Purpose: check duplicate game handling. | Input/fixture: ingest the same stable game ID twice. | Expected: first call adds one row; second call adds zero new rows. | Actual: added values were 1 then 0; unique stored row count remained 1. | Result: PASS. | Execution type: fixture using bbQxIngestRows.
+- QFIX-07 | Purpose: reject missing stable team identifiers. | Input/fixture: complete quarter scores but home ID/code/team ID removed. | Expected: no row added; missing_stable_team_id. | Actual: added=0 and the expected rejection reason count=1. | Result: PASS. | Execution type: fixture using bbQxIngestRows.
+- QFIX-08 | Purpose: test a browser storage read failure. | Input/fixture: localStorage.getItem throws. | Expected: memory backend is returned and the read error is recorded. | Actual: bbQxStoreLoad returned the session-memory object; backend=memory and readError was set. | Result: PASS. | Execution type: fixture using store functions.
+- QFIX-09 | Purpose: ensure authoritative-empty direct quarter data blocks stale-store fallback. | Input/fixture: both teams have qHistoryAuthoritative=true, qGames=0; UI fields begin with stale text; store lookup is instrumented to fail if called. | Expected: quarter fields clear and no store lookup occurs. | Actual: fields cleared and storeCalls=0. | Result: PASS. | Execution type: fixture using bbQxSetDirect and bbQxFillQuarterInputs with a mocked DOM.
+- QFIX-10 | Purpose: fill each period from valid direct quarter arrays. | Input/fixture: two-game arrays for Q1-Q4 scored/allowed. | Expected: input strings reproduce the four supplied series. | Actual: aQ1Scored="25,26", aQ4Allowed="26,25"; no store lookup occurred. | Result: PASS. | Execution type: fixture using bbQxSetDirect and bbQxFillQuarterInputs with a mocked DOM.
+- QFIX-11 | Purpose: verify the actual fetchScheduleCore direct quarter aggregation. | Input/fixture: mocked schedule plus two completed ESPN-like summary payloads with full quarter arrays. | Expected: FT and Q histories both contain two games, and Q arrays preserve each quarter's order. | Actual: ftGames=2, qGames=2; qScored=[[25,26],[25,24],[25,25],[25,25]], qAllowed=[[20,21],[25,24],[25,25],[25,25]]. | Result: PASS. | Execution type: fixture using the actual fetchScheduleCore implementation.
+- QFIX-12 | Purpose: verify an incomplete summary does not become a quarter record or fabricated value. | Input/fixture: same two-game schedule, but one team's second-game summary has one quarter removed. | Expected: FT remains two games; Q sample contains only the one complete game. | Actual: ftGames=2, qGames=1; each Q array length=1; no value was inferred for the incomplete row. | Result: PASS. | Execution type: fixture using the actual fetchScheduleCore implementation.
+- QFIX-13 | Purpose: reject a four-period score total inconsistent with the reported final score even when it is not above the final score. | Input/fixture: second game away line scores total 94 while final score is 95, with exactly four supplied periods. | Expected: row remains in FT history but is excluded from Q history. | Actual: ftGames=2, qGames=1. | Result: PASS. | Execution type: fixture using the actual fetchScheduleCore implementation.
+- QFIX-14 | Purpose: retain regulation Q1-Q4 while validating overtime reconciliation. | Input/fixture: second game has four regulation periods and a fifth OT period; all periods sum to the reported 100-point final score for each team. | Expected: OT contributes to full-score validation but is not appended as Q4; complete Q history remains eligible. | Actual: ftGames=2, qGames=2; Q4 arrays remain [25,25], OT score 5 excluded from Q1-Q4. | Result: PASS. | Execution type: fixture using the actual fetchScheduleCore implementation.
+- REG-710-PASS | Purpose: check a 7/10 pass case. | Input/fixture: A and B each have ten scores above line 100; direction OVER. | Expected: gate returns ok=true. | Actual: gate returned ok=true, 10 valid scores and 10 overs for each side. | Result: PASS. | Execution type: fixture using the actual bb710Evaluate function.
+- REG-710-FAIL | Purpose: check a 7/10 fail case. | Input/fixture: A and B each have six scores above 100 and four below; direction OVER. | Expected: NO approval and 6-of-10-below-7 reasons. | Actual: gate returned ok=false with TEAM_A_OVER_6_OF_10_BELOW_7 and TEAM_B_OVER_6_OF_10_BELOW_7. | Result: PASS. | Execution type: fixture using the actual bb710Evaluate function.
+- REG-710-PUSH | Purpose: check a push is not counted as an over hit. | Input/fixture: six scores above 100, one exactly 100, three below; direction OVER. | Expected: push count=1, only six over hits and gate fails. | Actual: push=1; gate failed with the push count in the reason. | Result: PASS. | Execution type: fixture using the actual bb710Evaluate function.
+- NET-01 | Purpose: verify live ESPN summary endpoint access and response shape. | Input/fixture: live provider request. | Expected: provider returns a successful summary response with Q1-Q4 linescores. | Actual: not run during final fixture pass; the prior sandbox attempt reported HTTP 403, so live schema/access remains unverified. | Result: NOT RUN. | Execution type: not run / external access unavailable.
+- REG-01 | Purpose: run end-to-end 7/10, NO-PLAY, and representative prediction regressions against the full app. | Input/fixture: browser-driven typical, over, under, near-line, insufficient-data and invalid-input cases. | Expected: existing decisions and thresholds remain unchanged. | Actual: exact bb710Evaluate pass/fail/push fixtures passed, but end-to-end prediction/UI regressions were not run; prediction gate code was not edited. | Result: PARTIAL; end-to-end not run. | Execution type: fixture plus source-scope check.
+- PAR-01 | Purpose: check parlay eligibility, duplicate/same-game legs, and that NO-PLAY cannot be bypassed. | Input/fixture: full engine parlay cases with settlement/price inputs. | Expected: current safeguards remain enforced. | Actual: no parlay code was edited, but full parlay runtime cases were not run; quantitative dependence is not established. | Result: NOT RUN. | Execution type: source-scope inspection only.
+- NAN-01 | Purpose: preserve intentional NaN output. | Input/fixture: original engine's missing/unsupported-market case. | Expected: NaN remains unavailable instead of being converted to zero or a fabricated number. | Actual: no prediction formulas or NaN-display code were edited; the end-to-end case was not run. | Result: NOT RUN. | Execution type: source-scope inspection only.
 
 PRESERVATION / REMAINING LIMITATIONS
-- Original backup: bball_work/NEW.original.backup.txt created before editing; output is built from the matching source.
-- Locked lines: exact sequence comparison result is recorded below by the source builder.
+- Original backup: bball_work/NEW.original.backup.txt was created before editing; the working source matched it byte-for-byte before patches were applied.
+- Locked lines: 666 source lines with audit-lock markers are identical and in the original order (programmatic comparison PASS).
 - UI/CSS/header and model formulas: not redesigned. Prediction thresholds, 7/10 semantics, confidence/NO-PLAY logic, parlay logic and intended NaN behavior were not deliberately changed.
 - No quarter scores are synthesized. OT remains outside the first four regulation linescores when the provider supplies them in order; overtime remains subject to the engine's existing rules.
 - Live ESPN access was not verified; request failure, missing quarter fields and invalid linescores can still result in fewer quarter records. The updated UI note reports measured coverage and request-failure count without claiming a specific root cause.
 - Historical calibration, profitability, walk-forward performance, market freshness, injury freshness, and empirical method correlation remain unverified because suitable external data was not supplied.
-- Remaining caution: no browser-driven end-to-end test was possible in the present execution; fixture/source checks must be distinguished from live validation.
+- Remaining caution: no full browser-driven end-to-end test was performed. All fixture tests used mocked inputs/DOM; live ESPN access and actual user-browser behavior remain unverified.
 
 RUN INSTRUCTIONS
 1. Save this TXT file as an .html file, preserving all contents, then open it in a modern browser.
