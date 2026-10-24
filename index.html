@@ -1,3 +1,4 @@
+O
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-HTML-0002 | <head> -->
@@ -48688,8 +48689,8 @@ const fixtureSelect = document.getElementById("fixtureSelect");
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 })();
 </script>
-/* AUTO-PARLAY DISPLAY: show only the ranked candidate table; hide the separate parlay table. */
-#apParlayWrap{display:none!important}
+<!-- AUTO-PARLAY DISPLAY: only the ranked candidate table is visible. -->
+<style id="bbAutoParlaySingleTableFix">#apParlayWrap{display:none!important}</style>
 
 <!-- SECTION: AUTO PARLAY (added 20 Oct 2026). Drives the existing Auto-Fetch + Run pipeline game by game and keeps results in its own memory.
      It never changes any engine threshold, projection or gate: a game is usable only when the engine itself returns a full play. -->
@@ -49010,6 +49011,9 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
 .apEdgeNeg{color:#c62828;font-weight:800;font-size:9px}
 /* >> BB-CSS-0551 | #apChips | 1 line */
 #apChips{display:none} /* chips moved; kept for JS safety */
+/* User-requested UI cleanup: show only the candidate table; hide the separate parlay-summary table/panel and footer tools. */
+#apParlayWrap{display:none!important}
+.apFooter{display:none!important}
 </style>
 
 <!-- >> BB-HTML-0783 | <div #apModal> -->
@@ -49194,7 +49198,7 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     s.cfg.legs = clampInt(s.cfg.legs, 1, 40, 8);
     s.cfg.day = s.cfg.day === 1 ? 1 : 0;
     if (!Array.isArray(s.cfg.leagues)) s.cfg.leagues = [];
-    s.cfg.minGrade = ["ANY", "C", "B", "A"].indexOf(s.cfg.minGrade) >= 0 ? s.cfg.minGrade : "C";
+    s.cfg.minGrade = s.cfg.minGrade === "B+" ? "B" : ( ["ANY", "C", "B", "A"].indexOf(s.cfg.minGrade) >= 0 ? s.cfg.minGrade : "B" );
     /* Permanent Auto Parlay rules: 6-hour freshness, no spread caps, reject negative EV,
        rank by calibrated win probability, and require valid odds. */
     s.cfg.ttlH = 6;
@@ -49940,20 +49944,34 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
       return (startMs(a) || 9e15) - (startMs(b) || 9e15);
     });
 
-    /* Keep the candidate table tied to the requested leg count. First collect and rank
-       every table-eligible play; then show only the strongest N. This is a display-only
-       change: it reuses saved predictions and does not start another prediction run. */
+    /* Candidate table is NOT the parlay builder. Show the strongest saved PLAY
+       predictions that meet the user's grade, freshness, start-time and price rules.
+       Do not apply parlay-only gates (minimum calibrated leg probability or negative EV)
+       to this table; those gates can otherwise hide valid B-grade candidates. */
     var playN = all.filter(function (g) { return g && g.status === "play"; }).length;
     var legLimit = clampInt(S.cfg.legs, 1, 40, 8);
-    var trackForTable = null;
-    try { trackForTable = getTrack(); } catch (e) { trackForTable = null; }
-    var tablePack = selectParlayEx(scopeGames(dk), legLimit, {
-      minGrade: S.cfg.minGrade, ttlH: S.cfg.ttlH, diversify: S.cfg.diversify,
-      skipNegEv: S.cfg.skipNegEv, rankBy: S.cfg.rankBy, onlyPriced: S.cfg.onlyPriced,
-      oddsOf: oddsOf, track: trackForTable
+    var nowForTable = Date.now();
+    var eligibleCandidates = all.filter(function (g) {
+      if (!g || g.status !== "play" || !g.best) return false;
+      var st = startMs(g);
+      if (isFinite(st) && st <= nowForTable) return false;
+      if (S.cfg.ttlH > 0 && g.at > 0 && nowForTable - g.at > S.cfg.ttlH * 3600000) return false;
+      if (needG && gradeRank(g.best.grade) < needG) return false;
+      if (S.cfg.onlyPriced) { var o = oddsOf(g, g.best); if (!(isFinite(o) && o > 1)) return false; }
+      return true;
     });
-    var rankedPlays = (tablePack.sel || []).slice();
-    var eligibleN = Number(tablePack.eligibleGames) || 0;
+    eligibleCandidates.sort(function (a, b) {
+      var ap = Number(a.best && a.best.win) || 0, bp = Number(b.best && b.best.win) || 0;
+      if (S.cfg.rankBy === "EV") {
+        var ao = oddsOf(a, a.best), bo = oddsOf(b, b.best);
+        var ae = isFinite(ao) && ao > 1 ? ap * ao - 1 : -Infinity;
+        var be = isFinite(bo) && bo > 1 ? bp * bo - 1 : -Infinity;
+        if (be !== ae) return be - ae;
+      } else if (bp !== ap) return bp - ap;
+      return (gradeRank(b.best.grade) - gradeRank(a.best.grade)) || ((startMs(a) || 9e15) - (startMs(b) || 9e15));
+    });
+    var eligibleN = eligibleCandidates.length;
+    var rankedPlays = eligibleCandidates.slice(0, legLimit);
     var statusRows = games.filter(function (g) { return g && g.status !== "play"; });
     var shownN = rankedPlays.length;
     var hiddenByCount = Math.max(0, eligibleN - shownN);
@@ -49969,7 +49987,7 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     /* >> BB-JS-4362 | renderAllGames > if-block | 8 lines */
     if (!games.length) {
       wrap.innerHTML = '<div class="apEmpty">No qualifying plays yet'
-        + (filteredBySettings ? " · " + filteredBySettings + " hidden by min grade / price settings" : "")
+        + (filteredBySettings ? " · " + filteredBySettings + " excluded by grade / price / freshness / start-time rules" : "")
         + (noplayN ? " · " + noplayN + " no-play" : "")
         + (running ? " · still running…" : "")
         + "</div>";
