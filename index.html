@@ -1,10 +1,9 @@
-O
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-HTML-0002 | <head> -->
 <head>
 <!-- >> BB-HTML-0003 | <meta> -->
-<meta name="generator" content="bb-engine-audit-patch-v17-h2h-ramp-20-27-35-tiers-3-4-5-last5-flat-h2-handicap-wired-20261027" />
+<meta name="generator" content="bb-engine-audit-patch-v18-h2-h2h-autofill-h2h-ramp-tiers-last5-handicap-wired-20261027" />
   <!-- >> BB-HTML-0004 | <meta> -->
   <meta charset="UTF-8" />
   <!-- >> BB-HTML-0005 | <meta> -->
@@ -798,6 +797,7 @@ function bbOtAllowance(league, marketKey, margin) {
    2H: typed 2H boxes (last five, both teams) work without team ids; 2H and handicap added to the tracker list, market-name mapper, tuner list, FT-wipe set and stored-score check.
    Parlay / league: a lone tournament-name match is rejected when its country contradicts the SportyBet category; 2H / handicap get their own parlay market families.
    H2H weight ramp: 3 meetings 20%, 4 meetings 27%, 5 meetings 35% of the blend (cap), divided by the divergence / volatility / injury risk penalty (before: n / (n + 20 x risk), about 12-19% at 3-5 meetings).
+   2H H2H boxes: Fetch Stats now fills them (Q3+Q4 per meeting, else regulation FT minus 1H); the 2H gate fallback needs 3 meetings, not 5.
    Inputs: the last remaining 10-game reads (trap sample, quarter box fill) now read five. Settlement now also matches feeds that only carry team.id.
    ===== */
 var BB_710 = { enabled: true, minGames: 5, minHits: 3, formVeto: false, h2hRequired: false, h2hMode: "support", h2hConflictShare: 0.8, h2hWindow: 5, h2hMinMeetings: 3, h2hMinShare: 0.6, venueWindow: 5, venueMinGames: 3, venueVeto: false };
@@ -1193,7 +1193,7 @@ function bb710H2H(mk) {
       }
       /* Otherwise derive H2 from paired regulation FT and H1 entries when both lists align. */
       var _ftA = g("aFTH2H"), _ftB = g("bFTH2H"), _h1A = g("a1HH2H"), _h1B = g("b1HH2H");
-      if (_ftA.length >= 5 && _ftA.length === _ftB.length && _ftA.length === _h1A.length && _ftA.length === _h1B.length) {
+      if (_ftA.length >= BB_710.h2hMinMeetings && _ftA.length === _ftB.length && _ftA.length === _h1A.length && _ftA.length === _h1B.length) {
         var _derivedH2 = [];
         for (var _i2 = 0; _i2 < _ftA.length; _i2++) {
           if (_ftA[_i2] < _h1A[_i2] || _ftB[_i2] < _h1B[_i2]) return null;
@@ -37014,13 +37014,33 @@ function bbApplyAutoH2HToBoxes(h2hGames, teamAId, opts) {
   } /* >> BB-JS-6262 | bbApplyAutoH2HToBoxes > else-block | 3 lines */ else {
     h1Note = "1H H2H: quarter data for " + h1.A.length + " of " + picked.length + " meetings — left out (min 2) ❌";
   }
+  /* 2H H2H: Q3+Q4 per meeting when the feed has all four quarters, otherwise regulation FT minus 1H (regulation only, never overtime). Needs at least two meetings, like 1H. */
+  const h2 = { A: [], B: [] };
+  picked.forEach(function (g) {
+    const aq = isTeamA(g.teamAId) ? g.qA : g.qB, bq = isTeamA(g.teamAId) ? g.qB : g.qA;
+    let x = NaN, y = NaN;
+    if (Array.isArray(aq) && Array.isArray(bq) && aq.length === 4 && bq.length === 4) { x = Number(aq[2]) + Number(aq[3]); y = Number(bq[2]) + Number(bq[3]); }
+    else {
+      const sA = Number(mine(g, "scoreA", "scoreB")), sB = Number(mine(g, "scoreB", "scoreA")), hA = Number(mine(g, "h1A", "h1B")), hB = Number(mine(g, "h1B", "h1A"));
+      if (hA > 0 && hB > 0 && sA >= hA && sB >= hB) { x = sA - hA; y = sB - hB; }
+    }
+    if (Number.isFinite(x) && Number.isFinite(y) && x > 0 && y > 0) { h2.A.push(x); h2.B.push(y); }
+  });
+  let h2Note;
+  if (h2.A.length >= 2 && h2.B.length >= 2) {
+    setBox("a2HH2H", h2.A);
+    setBox("b2HH2H", h2.B);
+    h2Note = "2H H2H: " + h2.A.length + " of " + picked.length + " meetings (Q3+Q4) ✅";
+  } else {
+    h2Note = "2H H2H: second-half data for " + h2.A.length + " of " + picked.length + " meetings — left out (min 2) ❌";
+  }
   try { window.__bbAutoH2H1H = { A: h1.A.slice(), B: h1.B.slice(), n: h1.A.length, of: picked.length }; } catch (_eW) {}
   const qn = bb710FillQuarterBoxes(picked.map(function (g) { const A = isTeamA(g.teamAId); return { aQ: A ? g.qA : g.qB, bQ: A ? g.qB : g.qA }; }));
   const qNote = qn >= 2 ? "Quarter H2H: " + qn + " of " + picked.length + " meetings ✅" : "Quarter H2H: quarter data for " + qn + " of " + picked.length + " meetings — not available ❌";
   try { const _pool = d && Array.isArray(d.sameCompetitionGames) && d.sameCompetitionGames.length ? d.sameCompetitionGames : picked; window.__h2hGateRows = bb710GateRowsFromGames(_pool, isTeamA); } catch (_eG) { window.__h2hGateRows = []; }
   queueH2HCheckboxSync(false);
   if (h1.A.length >= 2 && h1.B.length >= 2) syncH2HCheckbox("h1", true); /* H2H-1H: fresh auto-fetch populates 1H H2H (>= 2 meetings) */
-  return { ok: true, stale: false, picked: picked, sameGames: (d && Array.isArray(d.sameCompetitionGames)) ? d.sameCompetitionGames.slice(0, 10) : picked.slice(), message: message + " · " + h1Note + " · " + qNote, h1: h1 };
+  return { ok: true, stale: false, picked: picked, sameGames: (d && Array.isArray(d.sameCompetitionGames)) ? d.sameCompetitionGames.slice(0, 10) : picked.slice(), message: message + " · " + h1Note + " · " + h2Note + " · " + qNote, h1: h1, h2: h2 };
 }
 
 /* SECTION — UI rendering, display formatting and interaction. */
