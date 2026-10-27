@@ -1,9 +1,10 @@
+C
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-HTML-0002 | <head> -->
 <head>
 <!-- >> BB-HTML-0003 | <meta> -->
-<meta name="generator" content="bb-engine-audit-patch-v18-h2-h2h-autofill-h2h-ramp-tiers-last5-handicap-wired-20261027" />
+<meta name="generator" content="bb-engine-audit-patch-v19-2h-line-fix-h2h-labels-league-bar-crosscheck-20261027" />
   <!-- >> BB-HTML-0004 | <meta> -->
   <meta charset="UTF-8" />
   <!-- >> BB-HTML-0005 | <meta> -->
@@ -2132,6 +2133,14 @@ function bbSportyResolveHandicapLine(markets, home, away, wantLine) {
 /* One resolver for every market-line field: exact id -> alternate ids (description-checked) -> description. Used by BOTH fetch paths.
    (Before v10 the live path, bbSportyApply, only tried the main id, so the alt-id / description fallback in this function was dead code.) */
 var BB_SPORTY_LEGACY_FALLBACK = false; /* the alt-id / description fallback for the six ORIGINAL fields is OFF: it can pull another market's number into a field. Original id-only behaviour is kept. */
+/* [V19-FIX-2H] Is a 2H total line consistent with the FT and 1H lines already resolved for this fixture? Unknown FT/1H => cannot judge => true. */
+function bbSportyH2Plausible(line, ctx) {
+  var ft = ctx ? Number(ctx.ft) : NaN, h1 = ctx ? Number(ctx.h1) : NaN, v = Number(line);
+  if (!(ft > 0) || !Number.isFinite(v)) return true;
+  if (v < ft * 0.40 || v > ft * 0.58) return false;
+  if (h1 >= ft * 0.42 && h1 <= ft * 0.58) return Math.abs(v - (ft - h1)) <= Math.max(4, ft * 0.018);
+  return true;
+}
 /* >> BB-JS-0231 | function bbSportyResolveField | 36 lines */
 function bbSportyResolveField(markets, f, home, away, want, ctx) {
   var kind = BB_SPORTY_KINDS[f[0]], isQx = String(f[0]).indexOf("__qx_") === 0;
@@ -2145,7 +2154,11 @@ function bbSportyResolveField(markets, f, home, away, want, ctx) {
   /* >> BB-JS-0233 | bbSportyResolveField > loop | 25 lines */
   for (var wi = 0; wi < wants.length; wi++) {
     var w = wants[wi], r = null;
-    var _anchor = isQx && ctx && Number(ctx.ft) > 0 ? Number(ctx.ft) / 4 : NaN;
+    /* [V19-FIX-2H] The "nearest FT/4" anchor made bbSportyPickLine take the BOTTOM rung of any multi-line ladder it was given: the 2H total came out
+       ~6 points too low (e.g. 103.5 when FT 222.5 - 1H 113.5 = 109), the highest-quarter line too low and the lowest-quarter line too high.
+       Every market now uses the same rule as FT / 1H: the line whose Over and Under prices are closest to balanced (the sportsbook's main line).
+       The sanity guards in bbSportyQxSanity (quarter ranges, 2H vs FT-1H) still apply afterwards. */
+    var _anchor = NaN;
     /* >> BB-JS-0234 | bbSportyResolveField > if-block | 11 lines */
     if (!r && /^q[1-4]$/.test(kind)) { /* QFIX: Sportradar market 236 = "<n> quarter - total" (combined); the quarter number is read from the specifier, else the description */
       var _qn = kind.charAt(1);
@@ -2164,9 +2177,9 @@ function bbSportyResolveField(markets, f, home, away, want, ctx) {
     /* >> BB-JS-0236 | bbSportyResolveField > if-block | 4 lines */
     if (!r) {
       var byDesc = markets.filter(function (m) { return bbSportyDescMatch(m, kind, home, away); }).map(function (m) { return Object.assign({}, m, { id: "__desc_" + f[0], _rid: m.id }); });
-      r = bbSportyPickLine(byDesc, "__desc_" + f[0], w, isQx ? (ctx && Number(ctx.ft) > 0 ? Number(ctx.ft) / 4 : NaN) : NaN);
+      r = bbSportyPickLine(byDesc, "__desc_" + f[0], w, _anchor); /* [V19-FIX-2H] anchor only for Q1-Q4 */
     }
-    if (r) return r;
+    if (r && (kind !== "h2" || bbSportyH2Plausible(r.line, ctx))) return r; /* [V19-FIX-2H] a typed / stale 2H rung that does not fit FT - 1H is ignored */
   }
   return null;
 }
@@ -2178,7 +2191,7 @@ function bbSportyParseEvent(data) {
   /* >> BB-JS-0238 | bbSportyParseEvent > call BB_SPORTY_FIELDS.forEach() | 4 lines */
   BB_SPORTY_FIELDS.forEach(function (f) {
     var r = bbSportyResolveField(markets, f, home, away, NaN, _ctx);
-    if (r) { out[f[2]] = { field: f, r: r }; if (f[2] === "FT total") _ctx.ft = Number(r.line); }
+    if (r) { out[f[2]] = { field: f, r: r }; if (f[2] === "FT total") _ctx.ft = Number(r.line); if (f[2] === "1H total") _ctx.h1 = Number(r.line); }
   });
   return out;
 }
@@ -2205,6 +2218,13 @@ function bbSportyQxSanity(parsed) {
   var skipped = [], ft = parsed && parsed["FT total"] && Number(parsed["FT total"].r.line);
   if (!(ft > 0)) return skipped;
   var avg = ft / 4;
+  /* [V19-FIX-2H] Half-line cross-check: the 2H total must be consistent with FT total minus 1H total (a basketball game is two halves). */
+  try {
+    var _h2e = parsed["2H total"], _h1e = parsed["1H total"];
+    if (_h2e && !bbSportyH2Plausible(_h2e.r.line, { ft: ft, h1: _h1e ? Number(_h1e.r.line) : NaN })) {
+      skipped.push("2H total " + _h2e.r.line + " (does not fit FT " + ft + (_h1e ? " minus 1H " + _h1e.r.line : "") + ")"); delete parsed["2H total"];
+    }
+  } catch (_h2e2) {}
   /* >> BB-JS-0242 | bbSportyQxSanity > call [["Q1 total", 0.6, 1.4], ["Q2 total", 0.6, 1.4], ["Q3 …() | 4 lines */
   [["Q1 total", 0.6, 1.4], ["Q2 total", 0.6, 1.4], ["Q3 total", 0.6, 1.4], ["Q4 total", 0.6, 1.4], ["Highest Qtr", 0.95, 1.6], ["Lowest Qtr", 0.5, 1.05]].forEach(function (c) {
     var e = parsed[c[0]]; if (!e) return; var ln = Number(e.r.line);
@@ -2231,6 +2251,8 @@ function bbSportyFill(parsed, clearMissingQx) {
     el.dispatchEvent(new Event("change", { bubbles: true }));
     filled.push(name + " " + r.line);
   });
+  /* [V19-FIX-2H] keep-lines refresh: a 2H box with no valid resolved line must not keep an old (possibly wrong) number. */
+  if (!clearMissingQx && !(parsed && parsed["2H total"])) { var _h2el = document.getElementById("h2Market"); if (_h2el && String(_h2el.value || "") !== "") { _h2el.value = ""; _h2el.dispatchEvent(new Event("input", { bubbles: true })); _h2el.dispatchEvent(new Event("change", { bubbles: true })); } }
   /* >> BB-JS-0246 | bbSportyFill > if-block | 5 lines */
   if (clearMissingQx) BB_SPORTY_FIELDS.forEach(function (f) { /* QFIX: a quarter line this game does not offer must not keep a stale value from the previous game */
     if (String(f[0]).indexOf("__qx_") !== 0 || (parsed && parsed[f[2]])) return;
@@ -2610,7 +2632,7 @@ function bbSportyApply(result, opts) {
       if (v !== "" && Number.isFinite(Number(v))) want = Number(v);
     }
     var r = bbSportyResolveField(markets, f, result.data.homeTeamName || result.event.homeTeamName, result.data.awayTeamName || result.event.awayTeamName, want, _rctx);
-    if (r) { parsed[f[2]] = { field: f, r: r }; if (f[2] === "FT total") _rctx.ft = Number(r.line); }
+    if (r) { parsed[f[2]] = { field: f, r: r }; if (f[2] === "FT total") _rctx.ft = Number(r.line); if (f[2] === "1H total") _rctx.h1 = Number(r.line); }
   });
   var _qSkip = []; try { _qSkip = bbSportyQxSanity(parsed); } catch (_qs) {} /* QFIX: shared guard, quarters + highest/lowest */
   var filled = bbSportyFill(parsed, !opts.keepLines);
@@ -8730,57 +8752,62 @@ const BB_LOCK_REGISTRY = Object.freeze([
     </h3>
 
     <!-- H2H is always used by the engine; there is intentionally no enable/disable checkbox. -->
-    <label id="useFTH2HLabel"><b>FT H2H points</b> (five latest valid meetings, 2024+; left = Team A (home), right = Team B (away))</label>
-    <!-- >> BB-HTML-0698 | <div> -->
-    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px">
-      <!-- >> BB-HTML-0699 | <input #aFTH2H> -->
-      <input id="aFTH2H" placeholder="Team A (home) points in H2H, newest first" aria-label="Team A (home) points in H2H" />
-      <!-- >> BB-HTML-0700 | <input #bFTH2H> -->
-      <input id="bFTH2H" placeholder="Team B (away) points in H2H, newest first" aria-label="Team B (away) points in H2H" />
-    </div>
-
-    <!-- >> BB-HTML-0701 | <div #h2h1HSection> -->
-    <div id="h2h2HSection" style="margin-top: 6px">
-      <label><b>2H H2H points</b> (five latest valid meetings, newest first; Team A / Team B)</label>
+    <!-- V19: H2H labels now match the Last-5 form boxes: left = Scored (Team A points), right = Allowed (Team B points). Order: FT, 1H, 2H, Q1-Q4, highest / lowest quarter. Input ids unchanged. -->
+    <div class="market-history-block">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
-        <input id="a2HH2H" placeholder="Team A 2H points, newest first" aria-label="Team A second-half points in H2H" />
-        <input id="b2HH2H" placeholder="Team B 2H points, newest first" aria-label="Team B second-half points in H2H" />
+        <div><label id="useFTH2HLabel" for="aFTH2H">FT Scored <span style="font-size:10px;color:#888">(newest → oldest, max 5)</span></label><input id="aFTH2H" placeholder="Team A (home) points in H2H, newest first" aria-label="FT Scored in H2H (newest to oldest, max 5)" /></div>
+        <div><label id="useFTH2HAllowedLabel" for="bFTH2H">FT Allowed <span style="font-size:10px;color:#888">(newest → oldest, max 5)</span></label><input id="bFTH2H" placeholder="Team B (away) points in H2H, newest first" aria-label="FT Allowed in H2H (newest to oldest, max 5)" /></div>
       </div>
     </div>
 
-    <div id="h2h1HSection" style="display: none; margin-top: 6px">
-      <label id="use1HH2HLabel"><b>1H H2H points</b> (five latest valid meetings; left = Team A, right = Team B)</label>
-      <!-- >> BB-HTML-0703 | <div> -->
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px">
-        <!-- >> BB-HTML-0704 | <input #a1HH2H> -->
-        <input id="a1HH2H" placeholder="41,39,43,38,41" aria-label="41,39,43,38,41" />
-        <!-- >> BB-HTML-0705 | <input #b1HH2H> -->
-        <input id="b1HH2H" placeholder="39,41,38,42,39" aria-label="39,41,38,42,39" />
+    <div id="h2h1HSection" style="display: none">
+      <div class="market-history-block">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div><label id="use1HH2HLabel" for="a1HH2H">1H Scored <span style="font-size:10px;color:#888">(newest → oldest, max 5)</span></label><input id="a1HH2H" placeholder="41,39,43,38,41" aria-label="1H Scored in H2H (newest to oldest, max 5)" /></div>
+          <div><label for="b1HH2H">1H Allowed <span style="font-size:10px;color:#888">(newest → oldest, max 5)</span></label><input id="b1HH2H" placeholder="39,41,38,42,39" aria-label="1H Allowed in H2H (newest to oldest, max 5)" /></div>
+        </div>
       </div>
     </div>
 
-    <!-- >> BB-HTML-0707Q | <div #h2hQxSection> -->
-    <div id="h2hQxSection" style="margin-top: 8px">
-      <label id="h2hQxLabel"><b>Quarter H2H</b> (2024+, newest first; left = Team A, right = Team B)</label>
-      <div style="margin-top: 4px; font-size: 12px; color: #666">Q1 points</div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px">
-        <input id="aQ1H2H" placeholder="Team A Q1" aria-label="Team A Q1 points in H2H" /><input id="bQ1H2H" placeholder="Team B Q1" aria-label="Team B Q1 points in H2H" />
+    <div id="h2h2HSection">
+      <div class="market-history-block">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div><label for="a2HH2H">2H Scored <span style="font-size:10px;color:#888">(newest → oldest, max 5)</span></label><input id="a2HH2H" placeholder="42,38,45,40,41" aria-label="2H Scored in H2H (newest to oldest, max 5)" /></div>
+          <div><label for="b2HH2H">2H Allowed <span style="font-size:10px;color:#888">(newest → oldest, max 5)</span></label><input id="b2HH2H" placeholder="39,36,41,35,38" aria-label="2H Allowed in H2H (newest to oldest, max 5)" /></div>
+        </div>
       </div>
-      <div style="margin-top: 4px; font-size: 12px; color: #666">Q2 points</div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px">
-        <input id="aQ2H2H" placeholder="Team A Q2" aria-label="Team A Q2 points in H2H" /><input id="bQ2H2H" placeholder="Team B Q2" aria-label="Team B Q2 points in H2H" />
+    </div>
+
+    <div id="h2hQxSection">
+      <div class="market-history-block">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div><label id="h2hQxLabel" for="aQ1H2H">Q1 Scored</label><input id="aQ1H2H" placeholder="24,21,28,19,26" aria-label="Q1 Scored in H2H" /></div>
+          <div><label for="bQ1H2H">Q1 Allowed</label><input id="bQ1H2H" placeholder="22,25,23,27,21" aria-label="Q1 Allowed in H2H" /></div>
+        </div>
       </div>
-      <div style="margin-top: 4px; font-size: 12px; color: #666">Q3 points</div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px">
-        <input id="aQ3H2H" placeholder="Team A Q3" aria-label="Team A Q3 points in H2H" /><input id="bQ3H2H" placeholder="Team B Q3" aria-label="Team B Q3 points in H2H" />
+      <div class="market-history-block">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div><label for="aQ2H2H">Q2 Scored</label><input id="aQ2H2H" placeholder="24,21,28,19,26" aria-label="Q2 Scored in H2H" /></div>
+          <div><label for="bQ2H2H">Q2 Allowed</label><input id="bQ2H2H" placeholder="22,25,23,27,21" aria-label="Q2 Allowed in H2H" /></div>
+        </div>
       </div>
-      <div style="margin-top: 4px; font-size: 12px; color: #666">Q4 points</div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px">
-        <input id="aQ4H2H" placeholder="Team A Q4" aria-label="Team A Q4 points in H2H" /><input id="bQ4H2H" placeholder="Team B Q4" aria-label="Team B Q4 points in H2H" />
+      <div class="market-history-block">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div><label for="aQ3H2H">Q3 Scored</label><input id="aQ3H2H" placeholder="24,21,28,19,26" aria-label="Q3 Scored in H2H" /></div>
+          <div><label for="bQ3H2H">Q3 Allowed</label><input id="bQ3H2H" placeholder="22,25,23,27,21" aria-label="Q3 Allowed in H2H" /></div>
+        </div>
       </div>
-      <div style="margin-top: 4px; font-size: 12px; color: #666">Highest quarter | Lowest quarter (both teams combined, per meeting)</div>
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px">
-        <input id="hqH2H" placeholder="Highest quarter total" aria-label="Highest quarter combined total in H2H" /><input id="lqH2H" placeholder="Lowest quarter total" aria-label="Lowest quarter combined total in H2H" />
+      <div class="market-history-block">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div><label for="aQ4H2H">Q4 Scored</label><input id="aQ4H2H" placeholder="24,21,28,19,26" aria-label="Q4 Scored in H2H" /></div>
+          <div><label for="bQ4H2H">Q4 Allowed</label><input id="bQ4H2H" placeholder="22,25,23,27,21" aria-label="Q4 Allowed in H2H" /></div>
+        </div>
+      </div>
+      <div class="market-history-block">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px">
+          <div><label for="hqH2H">Highest Qtr</label><input id="hqH2H" placeholder="69,56,65,65,59" aria-label="Highest quarter combined total in H2H" /></div>
+          <div><label for="lqH2H">Lowest Qtr</label><input id="lqH2H" placeholder="56,48,49,38,46" aria-label="Lowest quarter combined total in H2H" /></div>
+        </div>
       </div>
     </div>
 
@@ -56784,6 +56811,234 @@ function bbQxFillQuarterInputs() {
   });
 })();
 
+</script>
+
+<!-- V19: League Tier bar always shows the selected league (also while the section is collapsed) and keeps the compact picker size. -->
+<style id="bbLeagueTierSummaryCss">
+.section-toggle .toggle-summary {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 8px;
+  text-align: right;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text, #1f2430);
+}
+.section-toggle .toggle-summary.is-empty { font-weight: 400; color: var(--muted, #888); }
+.section-toggle .toggle-title { flex: 0 0 auto; }
+/* compact picker button: same footprint as a normal input, not a tall block */
+#leagueSection #bbLeaguePickBtn { min-height: 34px !important; padding: 6px 10px !important; margin-bottom: 6px !important; }
+</style>
+<script>
+/* V19 League Tier summary. Reads #leagueSelect (the real control); never writes to it. */
+(function () {
+  var SUMMARY_ID = "leagueTierSummary";
+  function sel() { return document.getElementById("leagueSelect"); }
+  function leagueText() {
+    var s = sel(); if (!s) return "";
+    var v = String(s.value || ""); if (!v) return "";
+    var opt = Array.prototype.find.call(s.options || [], function (o) { return o.value === v; });
+    return opt ? String(opt.textContent || opt.label || "").replace(/\s+/g, " ").trim() : v;
+  }
+  function ensureSpan() {
+    var sec = document.getElementById("leagueSection"); if (!sec) return null;
+    var btn = sec.querySelector(".section-toggle"); if (!btn) return null;
+    var sp = document.getElementById(SUMMARY_ID);
+    if (!sp || !btn.contains(sp)) {
+      sp = document.createElement("span"); sp.id = SUMMARY_ID; sp.className = "toggle-summary";
+      sp.setAttribute("aria-live", "polite");
+      btn.insertBefore(sp, btn.querySelector(".toggle-icon"));
+    }
+    return sp;
+  }
+  function refresh() {
+    var sp = ensureSpan(); if (!sp) return;
+    var t = leagueText();
+    sp.textContent = t || "Not selected";
+    sp.title = t || "";
+    sp.classList.toggle("is-empty", !t);
+  }
+  function hookValue() {
+    var s = sel(); if (!s || s.__bbLeagueSummaryHooked) return;
+    s.__bbLeagueSummaryHooked = true;
+    try {
+      var d = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value");
+      if (d && d.get && d.set) {
+        Object.defineProperty(s, "value", {
+          configurable: true, enumerable: true,
+          get: function () { return d.get.call(this); },
+          set: function (v) { d.set.call(this, v); try { refresh(); } catch (_e) {} }
+        });
+      }
+    } catch (_e) {}
+    ["change", "input"].forEach(function (ev) { s.addEventListener(ev, refresh); });
+  }
+  function boot(tries) {
+    hookValue();
+    if (ensureSpan()) { refresh(); } else if (tries > 0) { setTimeout(function () { boot(tries - 1); }, 150); return; }
+    [0, 250, 900, 2000].forEach(function (ms) { setTimeout(refresh, ms); });
+  }
+  window.addEventListener("pageshow", refresh);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) refresh(); });
+  window.bbLeagueTierSummaryRefresh = refresh;
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", function () { boot(80); }); else boot(80);
+})();
+</script>
+
+<!-- V19: input cross-check banner (sits above Run; read-only, never edits an input). -->
+<style id="bbCrossCheckCss">
+#bbCrossCheckBanner { margin: 8px 0; padding: 8px 10px; border: 1px solid #d98a00; border-left-width: 4px; border-radius: 8px; background: #fff4e0; color: #5a3b00; font-size: 12px; line-height: 1.35; }
+#bbCrossCheckBanner ul { margin: 4px 0 0; padding-left: 18px; }
+#bbCrossCheckBanner li { margin: 2px 0; }
+body.dark-mode #bbCrossCheckBanner { background: #3a2a0a; color: #ffd99a; border-color: #e0a030; }
+input.bb-xc-flag { box-shadow: 0 0 0 2px #d98a00 !important; }
+</style>
+<script>
+/* V19 CROSS-CHECK: read-only consistency checks over the numbers the engine is about to use (market lines, H2H, last-5 form).
+   It never changes an input. Problems are shown in an amber banner above Run and the offending boxes get an amber outline. */
+(function () {
+  var W = typeof window !== "undefined" ? window : {};
+  var D = typeof document !== "undefined" ? document : null;
+  var WATCH = ["teamAName","teamBName","ftMarket","h1Market","h2Market","handicapMarket","teamAMarket","teamBMarket","h1TeamAMarket","h1TeamBMarket","q1Market","q2Market","q3Market","q4Market","hqMarket","lqMarket",
+    "aFTH2H","bFTH2H","a1HH2H","b1HH2H","a2HH2H","b2HH2H","aQ1H2H","bQ1H2H","aQ2H2H","bQ2H2H","aQ3H2H","bQ3H2H","aQ4H2H","bQ4H2H","hqH2H","lqH2H",
+    "aFTScored","aFTAllowed","a1HScored","a1HAllowed","a2HScored","a2HAllowed","bFTScored","bFTAllowed","b1HScored","b1HAllowed","b2HScored","b2HAllowed"];
+  function nums(v) { var out = []; String(v == null ? "" : v).split(/[,;\s|]+/).forEach(function (t) { if (t === "") return; var n = Number(t); out.push(Number.isFinite(n) ? n : NaN); }); return out; }
+  function num(v) { var s = String(v == null ? "" : v).trim(); if (s === "") return NaN; var n = Number(s.replace(/^\+/, "")); return Number.isFinite(n) ? n : NaN; }
+  function ok(x) { return Number.isFinite(x); }
+  function mean(a) { var v = a.filter(ok); return v.length ? v.reduce(function (s, x) { return s + x; }, 0) / v.length : NaN; }
+  function r1(x) { return String(Math.round(x * 10) / 10); }
+
+  /* g(id) -> raw string of that input. ctx: optional { sporty:{...}, startMs } for fixture-match checks. Returns [{msg, ids}] */
+  function check(g, ctx) {
+    var issues = [];
+    function add(msg, ids) { issues.push({ msg: msg, ids: ids || [] }); }
+    var ft = num(g("ftMarket")), h1 = num(g("h1Market")), h2 = num(g("h2Market")), hcp = num(g("handicapMarket"));
+    var ta = num(g("teamAMarket")), tb = num(g("teamBMarket")), h1a = num(g("h1TeamAMarket")), h1b = num(g("h1TeamBMarket"));
+    var q = [1, 2, 3, 4].map(function (i) { return num(g("q" + i + "Market")); }), hq = num(g("hqMarket")), lq = num(g("lqMarket"));
+    var tol = function (base, abs, pct) { return Math.max(abs, base * pct); };
+
+    /* ---------- market lines ---------- */
+    if (ok(ft) && ok(h1) && ok(h2) && Math.abs(h1 + h2 - ft) > tol(ft, 4, 0.018))
+      add("2H total " + h2 + " does not fit FT " + ft + " − 1H " + h1 + " (≈ " + r1(ft - h1) + ").", ["h2Market", "h1Market", "ftMarket"]);
+    if (ok(ft) && ok(ta) && ok(tb) && Math.abs(ta + tb - ft) > tol(ft, 4, 0.02))
+      add("Team totals " + ta + " + " + tb + " = " + r1(ta + tb) + " but FT total is " + ft + ".", ["teamAMarket", "teamBMarket", "ftMarket"]);
+    if (ok(h1) && ok(h1a) && ok(h1b) && Math.abs(h1a + h1b - h1) > tol(h1, 3, 0.025))
+      add("1H team totals " + h1a + " + " + h1b + " = " + r1(h1a + h1b) + " but 1H total is " + h1 + ".", ["h1TeamAMarket", "h1TeamBMarket", "h1Market"]);
+    if (ok(ta) && ok(tb) && ok(hcp) && Math.abs((ta - tb) + hcp) > 3)
+      add("Handicap " + hcp + " (home) does not match team totals " + ta + " vs " + tb + " — home/away may be swapped.", ["handicapMarket", "teamAMarket", "teamBMarket"]);
+    if (ok(hcp) && ok(ft) && Math.abs(hcp) >= ft * 0.3) add("Handicap " + hcp + " is unusually large for a " + ft + " total.", ["handicapMarket"]);
+    var qs = q.filter(ok);
+    if (ok(ft) && qs.length === 4 && Math.abs(qs[0] + qs[1] + qs[2] + qs[3] - ft) > tol(ft, 5, 0.025))
+      add("Q1–Q4 lines add up to " + r1(qs[0] + qs[1] + qs[2] + qs[3]) + " but FT total is " + ft + ".", ["q1Market", "q2Market", "q3Market", "q4Market", "ftMarket"]);
+    if (ok(h1) && ok(q[0]) && ok(q[1]) && Math.abs(q[0] + q[1] - h1) > tol(h1, 4, 0.035)) add("Q1 + Q2 lines (" + r1(q[0] + q[1]) + ") do not fit the 1H total " + h1 + ".", ["q1Market", "q2Market", "h1Market"]);
+    if (ok(hq) && ok(lq) && hq <= lq) add("Highest-quarter line " + hq + " must be above lowest-quarter line " + lq + ".", ["hqMarket", "lqMarket"]);
+    if (ok(hq) && qs.length && hq < Math.max.apply(null, qs)) add("Highest-quarter line " + hq + " is below a single-quarter line (" + Math.max.apply(null, qs) + ").", ["hqMarket"]);
+    if (ok(lq) && qs.length && lq > Math.min.apply(null, qs)) add("Lowest-quarter line " + lq + " is above a single-quarter line (" + Math.min.apply(null, qs) + ").", ["lqMarket"]);
+
+    /* ---------- H2H ---------- */
+    var names = [["FT", "FTH2H"], ["1H", "1HH2H"], ["2H", "2HH2H"], ["Q1", "Q1H2H"], ["Q2", "Q2H2H"], ["Q3", "Q3H2H"], ["Q4", "Q4H2H"]];
+    var H = {};
+    names.forEach(function (n) {
+      var aId = "a" + n[1], bId = "b" + n[1], A = nums(g(aId)), B = nums(g(bId));
+      H[n[0]] = { A: A, B: B };
+      if ((A.length || B.length) && A.length !== B.length) add("H2H " + n[0] + ": left has " + A.length + " values, right has " + B.length + ".", [aId, bId]);
+      if (A.concat(B).some(function (x) { return !ok(x); })) add("H2H " + n[0] + " has a non-numeric value.", [aId, bId]);
+    });
+    var bad = function (list) { return list.slice(0, 4).map(function (i) { return "#" + (i + 1); }).join(", "); };
+    ["A", "B"].forEach(function (s) {
+      var F = H.FT[s], P1 = H["1H"][s], P2 = H["2H"][s], n = Math.min(F.length, P1.length, P2.length), off = [];
+      for (var i = 0; i < n; i++) { var d = F[i] - (P1[i] + P2[i]); if (ok(d) && (d < -0.5 || d > 30)) off.push(i); }
+      if (off.length) add("H2H Team " + s + ": FT, 1H and 2H lists do not line up at meeting " + bad(off) + " (1H + 2H must not exceed FT, OT aside).", ["a1HH2H", "b1HH2H", "a2HH2H", "b2HH2H", "aFTH2H", "bFTH2H"]);
+      var Q = [H.Q1[s], H.Q2[s], H.Q3[s], H.Q4[s]], nq = Math.min(Q[0].length, Q[1].length, Q[2].length, Q[3].length);
+      if (nq) {
+        var o1 = [], o2 = [];
+        for (var j = 0; j < Math.min(nq, P1.length); j++) if (ok(Q[0][j] + Q[1][j] - P1[j]) && Math.abs(Q[0][j] + Q[1][j] - P1[j]) > 0.5) o1.push(j);
+        for (var k = 0; k < Math.min(nq, P2.length); k++) if (ok(Q[2][k] + Q[3][k] - P2[k]) && Math.abs(Q[2][k] + Q[3][k] - P2[k]) > 0.5) o2.push(k);
+        if (o1.length) add("H2H Team " + s + ": Q1 + Q2 ≠ 1H at meeting " + bad(o1) + ".", ["a1HH2H", "b1HH2H", "aQ1H2H", "bQ1H2H", "aQ2H2H", "bQ2H2H"]);
+        if (o2.length) add("H2H Team " + s + ": Q3 + Q4 ≠ 2H at meeting " + bad(o2) + ".", ["a2HH2H", "b2HH2H", "aQ3H2H", "bQ3H2H", "aQ4H2H", "bQ4H2H"]);
+      }
+    });
+    var HQ = nums(g("hqH2H")), LQ = nums(g("lqH2H"));
+    var nQ = Math.min(H.Q1.A.length, H.Q1.B.length, H.Q2.A.length, H.Q2.B.length, H.Q3.A.length, H.Q3.B.length, H.Q4.A.length, H.Q4.B.length);
+    if (nQ && (HQ.length || LQ.length)) {
+      var oh = [], ol = [];
+      for (var m = 0; m < Math.min(nQ, Math.max(HQ.length, LQ.length)); m++) {
+        var t = [1, 2, 3, 4].map(function (z) { return H["Q" + z].A[m] + H["Q" + z].B[m]; });
+        if (HQ.length > m && ok(HQ[m]) && HQ[m] !== Math.max.apply(null, t)) oh.push(m);
+        if (LQ.length > m && ok(LQ[m]) && LQ[m] !== Math.min.apply(null, t)) ol.push(m);
+      }
+      if (oh.length) add("H2H highest quarter does not match Q1–Q4 at meeting " + bad(oh) + ".", ["hqH2H"]);
+      if (ol.length) add("H2H lowest quarter does not match Q1–Q4 at meeting " + bad(ol) + ".", ["lqH2H"]);
+    }
+    var hm = mean(H.FT.A) + mean(H.FT.B);
+    if (ok(hm) && ok(ft) && Math.abs(hm - ft) > tol(ft, 25, 0.15)) add("H2H average total " + r1(hm) + " is far from the FT line " + ft + " — confirm the H2H is for these two teams.", ["aFTH2H", "bFTH2H", "ftMarket"]);
+
+    /* ---------- last-5 form ---------- */
+    ["a", "b"].forEach(function (p) {
+      var S = nums(g(p + "FTScored")), Al = nums(g(p + "FTAllowed")), side = p.toUpperCase();
+      if ((S.length || Al.length) && S.length !== Al.length) add("Team " + side + " form: FT Scored has " + S.length + " values, FT Allowed has " + Al.length + ".", [p + "FTScored", p + "FTAllowed"]);
+      [["Scored", S], ["Allowed", Al]].forEach(function (pair) {
+        var F = pair[1], P1 = nums(g(p + "1H" + pair[0])), P2 = nums(g(p + "2H" + pair[0])), n = Math.min(F.length, P1.length, P2.length), off = [];
+        for (var i = 0; i < n; i++) { var d = F[i] - (P1[i] + P2[i]); if (ok(d) && (d < -0.5 || d > 30)) off.push(i); }
+        if (off.length) add("Team " + side + " form " + pair[0] + ": FT, 1H and 2H do not line up at game " + bad(off) + ".", [p + "FTScored", p + "FTAllowed", p + "1H" + pair[0], p + "2H" + pair[0]]);
+      });
+      var fm = mean(S) + mean(Al);
+      if (ok(fm) && ok(ft) && Math.abs(fm - ft) > tol(ft, 30, 0.18)) add("Team " + side + " form averages " + r1(fm) + " total points per game vs FT line " + ft + " — check the team / league.", [p + "FTScored", p + "FTAllowed", "ftMarket"]);
+    });
+
+    /* ---------- fixture match ---------- */
+    var sl = ctx && ctx.sporty;
+    if (sl && sl.ok) {
+      var nameA = String(g("teamAName") || "").trim(), nameB = String(g("teamBName") || "").trim();
+      if (!sl.byId && nameA && nameB && sl.home && sl.away && ctx.nameMatch && !(ctx.nameMatch(nameA, sl.home) && ctx.nameMatch(nameB, sl.away)))
+        add("Market lines came from SportyBet game “" + sl.home + " v " + sl.away + "” — confirm it is " + nameA + " v " + nameB + ".", ["ftMarket"]);
+      var ko = Number(sl.ko); if (ok(ko) && ko > 0 && ko < 1e12) ko *= 1000;
+      if (ok(ko) && ko > 0 && ctx.startMs > 0 && Math.abs(ko - ctx.startMs) > 6 * 3600 * 1000) add("SportyBet kickoff differs from the selected fixture by " + Math.round(Math.abs(ko - ctx.startMs) / 3600000) + " h — it may be a different game.", ["ftMarket"]);
+    }
+    return issues;
+  }
+  W.bbCrossCheckValues = check;
+  if (!D) return;
+
+  /* ---------- UI ---------- */
+  var FLAG = "bb-xc-flag", lastSig = null, timer = null;
+  function getter(id) { var el = D.getElementById(id); return el ? el.value : ""; }
+  function ctxNow() {
+    var c = { sporty: W.__bbSportyLast || null, startMs: 0, nameMatch: typeof W.bbStrictTeamNameMatch === "function" ? W.bbStrictTeamNameMatch : null };
+    try { if (typeof W.bbFixtureStartMs === "function") c.startMs = W.bbFixtureStartMs(); } catch (_e) {}
+    return c;
+  }
+  function banner() {
+    var b = D.getElementById("bbCrossCheckBanner"); if (b) return b;
+    var actions = D.querySelector(".wrapper .actions") || D.querySelector(".actions"); if (!actions || !actions.parentNode) return null;
+    b = D.createElement("div"); b.id = "bbCrossCheckBanner"; b.setAttribute("role", "alert"); b.style.display = "none";
+    actions.parentNode.insertBefore(b, actions); return b;
+  }
+  function render(issues) {
+    var b = banner(); if (!b) return;
+    Array.prototype.forEach.call(D.querySelectorAll("." + FLAG), function (el) { el.classList.remove(FLAG); });
+    if (!issues.length) { b.style.display = "none"; b.textContent = ""; return; }
+    b.textContent = "";
+    var h = D.createElement("b"); h.textContent = "⚠ Check these before running (" + issues.length + ")"; b.appendChild(h);
+    var ul = D.createElement("ul");
+    issues.slice(0, 8).forEach(function (i) { var li = D.createElement("li"); li.textContent = i.msg; ul.appendChild(li); i.ids.forEach(function (id) { var el = D.getElementById(id); if (el) el.classList.add(FLAG); }); });
+    issues.slice(8).forEach(function (i) { i.ids.forEach(function (id) { var el = D.getElementById(id); if (el) el.classList.add(FLAG); }); });
+    b.appendChild(ul);
+    if (issues.length > 8) { var more = D.createElement("div"); more.textContent = "+ " + (issues.length - 8) + " more"; b.appendChild(more); }
+    b.style.display = "block";
+  }
+  function sig() { var s = WATCH.map(function (id) { return getter(id); }).join("\u0001"); var sl = W.__bbSportyLast; return s + "\u0002" + (sl ? (sl.eventId || "") + (sl.at || "") : ""); }
+  function run() { try { render(check(getter, ctxNow())); } catch (e) { try { console.warn("[BB cross-check]", e); } catch (_e) {} } }
+  function tick() { if (D.hidden) return; var s = sig(); if (s !== lastSig) { lastSig = s; run(); } }
+  function schedule() { clearTimeout(timer); timer = setTimeout(function () { lastSig = null; tick(); }, 200); }
+  W.bbCrossCheck = function () { lastSig = null; tick(); return check(getter, ctxNow()); };
+  function boot() { D.addEventListener("input", schedule, true); D.addEventListener("change", schedule, true); setInterval(tick, 1200); setTimeout(tick, 500); }
+  if (D.readyState === "loading") D.addEventListener("DOMContentLoaded", boot); else boot();
+})();
 </script>
 
 </body>
