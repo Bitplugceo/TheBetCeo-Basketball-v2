@@ -1,4 +1,3 @@
-X
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-HTML-0002 | <head> -->
@@ -1966,6 +1965,7 @@ var BB_SPORTY_FIELDS = [
   ["225", "ftMarket", "FT total"],
   ["68", "h1Market", "1H total"],
   ["__qx_h2", "h2Market", "2H total"],
+  ["__qx_hcp", "handicapMarket", "FT Handicap (Home assigned)"],
   ["227", "teamAMarket", "Team A total"],
   ["228", "teamBMarket", "Team B total"],
   ["69", "h1TeamAMarket", "1H Team A"],
@@ -1979,7 +1979,7 @@ var BB_SPORTY_FIELDS = [
    description match below is used. The status line prints the quarter-related markets the fetch saw, so the ids can be read off it. */
 var BB_SPORTY_QX_IDS = { hq: [], lq: [], q1: [], q2: [], q3: [], q4: [] };
 /* >> BB-JS-0223 | var BB_SPORTY_KINDS | 1 line */
-var BB_SPORTY_KINDS = { "225": "ft", "68": "h1", "__qx_h2": "h2", "227": "a", "228": "b", "69": "h1a", "70": "h1b", "__qx_hq": "hq", "__qx_lq": "lq", "__qx_q1": "q1", "__qx_q2": "q2", "__qx_q3": "q3", "__qx_q4": "q4" };
+var BB_SPORTY_KINDS = { "225": "ft", "68": "h1", "__qx_h2": "h2", "__qx_hcp": "handicap", "227": "a", "228": "b", "69": "h1a", "70": "h1b", "__qx_hq": "hq", "__qx_lq": "lq", "__qx_q1": "q1", "__qx_q2": "q2", "__qx_q3": "q3", "__qx_q4": "q4" };
 /* >> BB-JS-0224 | var BB_SPORTY_ALT_IDS | 1 line */
 /* BRUTAL-1 (line mapping): some events (e.g. NBA Preseason exhibitions) carry the 1H / Home / Away O/U markets under the
    regular-time ids (18/19/20, 1H 68-70 variants) or only identify them by description. Try the main id, then alternate ids,
@@ -2033,6 +2033,48 @@ function bbSportyDescMatch(m, kind, home, away) {
   if (kind === "h1b") return h1 && isAway && !isHome;
   return false;
 }
+/* SPORTY HANDICAP: read the full-game signed handicap assigned to the home side.
+   Never infer from total points and never carry a previous fixture's line forward. */
+function bbSportyResolveHandicapLine(markets, home, away, wantLine) {
+  var candidates = [];
+  (markets || []).forEach(function (m) {
+    if (!m || m.status == null || Number(m.status) !== 0) return;
+    var d = String(m.desc || m.name || m.description || "").toLowerCase().replace(/[\u2013\u2014]/g, "-");
+    if (!/(handicap|spread)/.test(d)) return;
+    if (/1st half|first half|2nd half|second half|\b1h\b|\b2h\b|quarter|period/.test(d)) return;
+    var spec = String(m.specifier || "");
+    var mt = /(?:^|[|;&,\s])(?:hcp|handicap|spread)=([+-]?\d+(?:\.\d+)?)(?=$|[|;&,\s])/i.exec(spec);
+    var line = mt ? Number(mt[1]) : NaN;
+    if (!Number.isFinite(line)) {
+      var md = /(?:home|host)\s*(?:handicap|spread)?\s*[:=]?\s*([+-]\d+(?:\.\d+)?)/i.exec(d);
+      if (md) line = Number(md[1]);
+    }
+    if (!Number.isFinite(line) || Math.abs(line) > 50) return;
+    if (Number.isFinite(wantLine) && Math.abs(line - wantLine) > 1e-9) return;
+    var arr = m.outcomes || m.outcomeList || m.selections || [];
+    var ho = null, ao = null;
+    if (Array.isArray(arr)) arr.forEach(function (o) {
+      if (!o || o.isActive === 0 || o.isActive === false || o.active === 0 || o.active === false || (o.status != null && Number(o.status) !== 0)) return;
+      var label = String(o.desc || o.description || o.name || o.label || "").toLowerCase();
+      var raw = o.odds != null ? o.odds : (o.odd != null ? o.odd : (o.price != null ? o.price : o.decimalOdds));
+      var price = Number(raw);
+      if (!(Number.isFinite(price) && price > 1 && price < 100)) return;
+      if (/\bhome\b|\bhost\b/.test(label) || bbSportyNameIn(label, home)) ho = price;
+      if (/\baway\b|\bvisitor\b/.test(label) || bbSportyNameIn(label, away)) ao = price;
+    });
+    var score = Number.isFinite(ho) && Number.isFinite(ao) ? Math.abs(Math.log(ho / ao)) : Infinity;
+    candidates.push({ line: line, score: score, specifier: spec, mid: String(m.id), homePrice: ho, awayPrice: ao });
+  });
+  if (!candidates.length) return null;
+  candidates.sort(function (a, b) {
+    if (a.score !== b.score) return a.score - b.score;
+    return Math.abs(a.line) - Math.abs(b.line) || a.line - b.line;
+  });
+  /* If several ladder lines have no usable home/away prices, selecting one would be guesswork. */
+  if (candidates.length > 1 && !Number.isFinite(candidates[0].score) && !Number.isFinite(candidates[1].score)) return null;
+  return { line: candidates[0].line, specifier: candidates[0].specifier, mid: candidates[0].mid, over: null, under: null, oids: null };
+}
+
 /* >> BB-JS-0230 | var BB_SPORTY_LEGACY_FALLBACK | 1 line */
 /* One resolver for every market-line field: exact id -> alternate ids (description-checked) -> description. Used by BOTH fetch paths.
    (Before v10 the live path, bbSportyApply, only tried the main id, so the alt-id / description fallback in this function was dead code.) */
@@ -2040,6 +2082,7 @@ var BB_SPORTY_LEGACY_FALLBACK = false; /* the alt-id / description fallback for 
 /* >> BB-JS-0231 | function bbSportyResolveField | 36 lines */
 function bbSportyResolveField(markets, f, home, away, want, ctx) {
   var kind = BB_SPORTY_KINDS[f[0]], isQx = String(f[0]).indexOf("__qx_") === 0;
+  if (kind === "handicap") return bbSportyResolveHandicapLine(markets, home, away, want);
   /* >> BB-JS-0232 | bbSportyResolveField > if-block | 4 lines */
   if (!isQx && !BB_SPORTY_LEGACY_FALLBACK) { /* exactly the original live-path behaviour */
     var r0 = Number.isFinite(want) ? bbSportyPickLine(markets, f[0], want) : null;
@@ -2185,7 +2228,8 @@ async function bbFetchSportyLines() {
     if (!requestStillCurrent()) return null;
     var parsed = bbSportyParseEvent(j2.data), _qSk = bbSportyQxSanity(parsed), filled = bbSportyFill(parsed, true), _qn2 = ""; try { _qn2 = bbSportyQxNote(j2.data.markets || [], parsed); } catch (_qne) {}
     try { var mem = JSON.parse(localStorage.getItem("BB_SPORTY_MATCHES") || "{}"); mem[match.memKey] = { home: match.event.homeTeamId, away: match.event.awayTeamId, eventId: match.event.eventId, at: Date.now() }; localStorage.setItem("BB_SPORTY_MATCHES", JSON.stringify(mem)); } catch (_e) {}
-    bbSportyStatus("SportyBet " + j2.data.homeTeamName + " v " + j2.data.awayTeamName + ": filled " + filled.length + " market(s): " + filled.join("; ") + "." + _qn2 + (_qSk.length ? " (skipped, not a plausible quarter line: " + _qSk.join("; ") + ")" : "") + " Check them, then Run.");
+    /* Successful fetches are represented by the Auto-filled badge, not a verbose market-lines paragraph. */
+    bbSportyStatus("", false);
     return { match: match.event.eventId, filled: filled };
   } catch (e) {
     if (!requestStillCurrent()) return null;
@@ -2258,7 +2302,7 @@ function bbSportyNamePairs() {
 
 /* SECTION — UI rendering, display formatting and interaction. */
 /* >> BB-JS-0261 | function bbMarketStatus | 1 line */
-function bbMarketStatus(msg, bad) { var el = document.getElementById("marketAutoStatus"); if (el) { el.textContent = msg || ""; el.style.color = bad ? "#d92d2a" : ""; } }
+function bbMarketStatus(msg, bad) { var el = document.getElementById("marketAutoStatus"); if (el) { el.textContent = bad ? (msg || "") : ""; el.style.color = bad ? "#d92d2a" : ""; el.style.display = bad && msg ? "block" : "none"; } }
 
 /* SECTION — league/team identity mapping and operational metadata. */
 /* >> BB-JS-0262 | function bbFixtureStartMs | 11 lines */
@@ -2529,8 +2573,9 @@ function bbSportyApply(result, opts) {
   };
   try { window.__bbSportyLast.prices = bbSportyCollectPrices(parsed); window.__bbSportyRaw = result.data; } catch (_pxe) {} /* [ODDS-V1] */
   var tag = document.getElementById("mAutoTag"); if (tag) tag.style.display = filled.length ? "inline" : "none";
-  bbSportyStatus("Market lines fetched for " + (result.data.homeTeamName || result.event.homeTeamName || "Team A") + " v " + (result.data.awayTeamName || result.event.awayTeamName || "Team B") + ": " + filled.length + " line(s) filled." + _qxNote);
-  bbMarketStatus("Market lines loaded: " + filled.join("; ") + _qxNote);
+  /* The UI uses the single Auto-filled badge; verbose per-line notes stay out of the market panel. */
+  bbSportyStatus("", false);
+  bbMarketStatus("", false);
   return filled;
 }
 /* >> BB-JS-0292 | function bbSportyRun | 13 lines */
@@ -8243,26 +8288,44 @@ const BB_LOCK_REGISTRY = Object.freeze([
     <!-- >> BB-HTML-0580 | <div #marketCoreGrid> -->
     <div
       id="marketCoreGrid"
-      style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 0"
+      style="display: grid; grid-template-columns: 1fr 1fr; grid-template-areas: &quot;ft handicap&quot; &quot;h1 h2&quot;; gap: 8px; margin-top: 0"
     >
       <!-- >> BB-HTML-0581 | <div #ftMarketCell> -->
-      <div id="ftMarketCell">
+      <div id="ftMarketCell" style="grid-area:ft">
         <!-- >> BB-HTML-0582 | <label #ftMarketLabel> -->
         <label id="ftMarketLabel">FT Total</label
         ><input id="ftMarket" placeholder="150.5 - 160.5" aria-label="FT Total" />
       </div>
 
       <!-- >> BB-HTML-0583 | <div #h1MarketSection> -->
-      <div id="h1MarketSection">
+      <div id="h1MarketSection" style="grid-area:h1">
         <label>1H Total</label><input id="h1Market" placeholder="75.5 - 85.5" aria-label="1H Total" />
       </div>
-      <div id="h2MarketSection">
+      <div id="h2MarketSection" style="grid-area:h2">
         <label>2H Total (regulation)</label><input id="h2Market" placeholder="75.5 - 85.5" aria-label="2H Total" />
       </div>
-      <div id="handicapMarketSection">
-        <label>Handicap — Team A signed line</label><input id="handicapMarket" placeholder="-4.5 or +4.5" aria-label="Handicap for Team A; negative means Team A gives points" inputmode="decimal" />
+      <div id="handicapMarketSection" style="grid-area:handicap">
+        <label>FT Handicap (Home assigned)</label><input id="handicapMarket" placeholder="-4.5 or +4.5" aria-label="FT Handicap (Home assigned); negative means the home team gives points" inputmode="decimal" />
       </div>
     </div>
+
+    <!-- >> BB-HTML-0599 | <div #h1TeamMarketSection> -->
+    <div
+      id="h1TeamMarketSection"
+      style="display: none; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px"
+    >
+      <!-- >> BB-HTML-0600 | <div> -->
+      <div>
+        <!-- >> BB-HTML-0601 | <label> -->
+        <label>1H Team A</label><input id="h1TeamAMarket" placeholder="52.5" aria-label="52.5" />
+      </div>
+      <!-- >> BB-HTML-0602 | <div> -->
+      <div>
+        <!-- >> BB-HTML-0603 | <label> -->
+        <label>1H Team B</label><input id="h1TeamBMarket" placeholder="53.5" aria-label="53.5" />
+      </div>
+    </div>
+
 
     <!-- >> BB-HTML-0585 | <div #teamMarketSection> -->
     <div
@@ -8316,22 +8379,6 @@ const BB_LOCK_REGISTRY = Object.freeze([
       </div>
     </div>
 
-    <!-- >> BB-HTML-0599 | <div #h1TeamMarketSection> -->
-    <div
-      id="h1TeamMarketSection"
-      style="display: none; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px"
-    >
-      <!-- >> BB-HTML-0600 | <div> -->
-      <div>
-        <!-- >> BB-HTML-0601 | <label> -->
-        <label>1H Team A</label><input id="h1TeamAMarket" placeholder="52.5" aria-label="52.5" />
-      </div>
-      <!-- >> BB-HTML-0602 | <div> -->
-      <div>
-        <!-- >> BB-HTML-0603 | <label> -->
-        <label>1H Team B</label><input id="h1TeamBMarket" placeholder="53.5" aria-label="53.5" />
-      </div>
-    </div>
   </div>
 
 <!-- >> BB-HTML-0604 | <div #teamASection> -->
@@ -28202,7 +28249,7 @@ function validateLast10SeriesInputs() {
 /* Audit fix: no-data output is explicit, uses em dashes rather than fake NaN values, and includes every always-available market. */
 function bbNoDataResultsHtml(reason) {
   const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
-  const names = ["FT Total", "1H Total", "2H Total", "Team A Total", "Team B Total", "Team A 1H", "Team B 1H", "Highest Quarter O/U", "Lowest Quarter O/U", "Q1 Total O/U", "Q2 Total O/U", "Q3 Total O/U", "Q4 Total O/U", "Winner / Margin", "Handicap"];
+  const names = ["FT Total", "1H Total", "2H Total", "Team A Total", "Team B Total", "Team A 1H", "Team B 1H", "FT Handicap (Home assigned)", "Q1 Total O/U", "Q2 Total O/U", "Q3 Total O/U", "Q4 Total O/U", "Highest Quarter O/U", "Lowest Quarter O/U", "Winner / Margin"];
   return "<tr><th>Pick</th><th>Projection</th><th>Edge</th><th>Model Grade</th><th>Prediction</th></tr>" +
     names.map((n) => '<tr><td>' + n + '</td><td>—</td><td>—</td><td class="conf-none">—</td><td class="pred-noplay" title="' + esc(reason) + '">NO PLAY</td></tr>').join("") +
     '<tr><td colspan="5" style="font-size:11px;color:#d98a00">⚠ ' + esc(reason) + "</td></tr>";
@@ -32723,7 +32770,7 @@ function renderTrackerAnalytics() {
       ft: "FT Total",
       h1: "1H Total",
       h2: "2H Total",
-      handicap: "Handicap",
+      handicap: "FT Handicap (Home assigned)",
       team_a: "Team A Total",
       team_b: "Team B Total",
     };
@@ -51581,7 +51628,7 @@ let ftConfidence = getConfidenceGrade({
       },
       /* >> BB-JS-8454 | data picks : { _idx: 14, name: "Team… */
       {
-        _idx: 14,
+        _idx: 5,
         name: "Team A 1H",
         marketKey: "h1_team_a",
         marketType: "h1",
@@ -51602,7 +51649,7 @@ let ftConfidence = getConfidenceGrade({
         coeffFitted: _signalFitByBucket.h1team,
       },
       {
-        _idx: 15,
+        _idx: 6,
         name: "Team B 1H",
         marketKey: "h1_team_b",
         marketType: "h1",
@@ -51624,7 +51671,7 @@ let ftConfidence = getConfidenceGrade({
       },
       /* >> BB-JS-8455 | data picks : { _idx: 16, name: "High… */
       {
-        _idx: 16,
+        _idx: 12,
         name: "Highest Quarter O/U",
         marketKey: "hq",
         marketType: "quarter",
@@ -51647,7 +51694,7 @@ let ftConfidence = getConfidenceGrade({
         gameBlowoutGap: ftCalc.blowoutGap,
       },
       {
-        _idx: 17,
+        _idx: 13,
         name: "Lowest Quarter O/U",
         marketKey: "lq",
         marketType: "quarter",
@@ -51671,7 +51718,7 @@ let ftConfidence = getConfidenceGrade({
       },
       /* >> BB-JS-8456 | data picks : ...["q1","q2","q3","q4"… */
       ...["q1","q2","q3","q4"].map((k, i) => ({
-        _idx: 20 + i,
+        _idx: 8 + i,
         name: k.toUpperCase() + " Total O/U",
         marketKey: k,
         marketType: "quarter",
@@ -51694,7 +51741,7 @@ let ftConfidence = getConfidenceGrade({
         gameBlowoutGap: ftCalc.blowoutGap,
       })),
       {
-        _idx: 10,
+        _idx: 14,
         name: "Winner / Margin",
         marketKey: "winner",
         marketType: "winner",
@@ -51718,7 +51765,7 @@ let ftConfidence = getConfidenceGrade({
         gameBlowoutGap: ftCalc.blowoutGap,
       },
       {
-        _idx: 11, name: "Handicap", marketKey: "handicap", marketType: "handicap", league,
+        _idx: 7, name: "FT Handicap (Home assigned)", marketKey: "handicap", marketType: "handicap", league,
         context: { teamSc: winnerMarginProjection }, line: handicapLine, proj: winnerMarginProjection, edge: handicapEdge,
         marginEdgePoints: Number.isFinite(handicapEdge) ? Math.abs(Number(handicapEdge)) : NaN,
         pick: handicapPick, confidence: handicapConfidence, note: null, fullModel: ftCalc.teamFullModel,
@@ -52758,7 +52805,8 @@ function onLeagueChange() {
   const h1MarketEl = document.getElementById("h1MarketSection");
   /* >> BB-JS-8625 | onLeagueChange > if-block | 5 lines */
   if (marketCoreGrid && ftMarketCell && h1MarketEl) {
-    marketCoreGrid.style.gridTemplateAreas = '"ft h1" "h2 handicap"';
+    /* Requested visual order: FT Total | FT Handicap (home assigned), then 1H | 2H. */
+    marketCoreGrid.style.gridTemplateAreas = '"ft handicap" "h1 h2"';
     ftMarketCell.style.gridArea = "ft";
     h1MarketEl.style.gridArea = "h1";
     const h2El = document.getElementById("h2MarketSection"), handicapEl = document.getElementById("handicapMarketSection");
@@ -53678,7 +53726,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
         return ok1 && ok2 && k.length === 2 && okOt;
       })());
       t("BB-QX: description matcher takes the combined total, not team/half/which-quarter variants", bbSportyDescMatch({ desc: "Highest scoring quarter - Over/Under" }, "hq", "A", "B") && bbSportyDescMatch({ desc: "Lowest scoring quarter - Over/Under" }, "lq", "A", "B") && !bbSportyDescMatch({ desc: "Home team highest scoring quarter - Over/Under" }, "hq", "A", "B") && !bbSportyDescMatch({ desc: "Highest scoring quarter" }, "hq", "A", "B") && !bbSportyDescMatch({ desc: "Lowest scoring quarter - Over/Under" }, "hq", "A", "B"));
-      t("SportyBet market line fields are defined", BB_SPORTY_FIELDS.length === 12 && BB_SPORTY_FIELDS.every(function (f) { return f.length === 3 && typeof f[1] === "string"; }));
+      t("SportyBet market line fields are defined", BB_SPORTY_FIELDS.length === 14 && BB_SPORTY_FIELDS.every(function (f) { return f.length === 3 && typeof f[1] === "string"; }));
       var rr = rng(9), syn = [], i; for (i = 0; i < 600; i++) { var p = 0.5 + rr() * 0.25; syn.push({ modelProb: p, resultStatus: rr() < p ? "win" : "loss", ts: i }); }
       var bt = bbBacktest(syn); t("backtest: calibrated synthetic data has small ECE", bt.calibration.ece < 0.07, "ece=" + bt.calibration.ece.toFixed(3));
       t("backtest is deterministic", JSON.stringify(bbBacktest(syn).calibration) === JSON.stringify(bt.calibration));
@@ -53777,7 +53825,7 @@ const fixtureSelect = document.getElementById("fixtureSelect");
 <!-- >> BB-BLK-021 | league-picker modal CSS -->
 <style id="bbLeaguePickerCss">
 /* >> BB-CSS-0454 | #bbLeaguePickBtn | 1 line */
-#bbLeaguePickBtn{display:flex;justify-content:space-between;align-items:center;gap:6px;text-align:left;cursor:pointer;font-family:inherit;font-weight:normal;line-height:normal;touch-action:manipulation}
+#bbLeaguePickBtn{display:flex!important;justify-content:space-between;align-items:center;gap:8px;text-align:left;cursor:pointer;font-family:inherit;font-weight:normal;line-height:normal;touch-action:manipulation;width:100%;max-width:390px;min-height:38px;padding:8px 10px;background:var(--input-bg,#fff);color:var(--text,#1f2430);border:1px solid var(--input-border,#c8ccd4);box-sizing:border-box}
 /* >> BB-CSS-0455 | #bbLeaguePickBtn span:first-child | 1 line */
 #bbLeaguePickBtn span:first-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* >> BB-CSS-0456 | #bbLeaguePickBtn span.bbcar | 1 line */
@@ -53822,11 +53870,21 @@ const fixtureSelect = document.getElementById("fixtureSelect");
 (function () {
   /* >> BB-JS-8787 | function init | 71 lines */
   function init() {
-    var sel = document.getElementById("leagueSelect"); if (!sel || document.getElementById("bbLeaguePickBtn")) return;
+    var sel = document.getElementById("leagueSelect");
+    if (!sel) { setTimeout(init, 60); return; }
+    var existingBtn = document.getElementById("bbLeaguePickBtn");
+    if (existingBtn) {
+      var existingValue = String(sel.value || "");
+      var existingOpt = existingValue ? Array.prototype.find.call(sel.options, function (o) { return o.value === existingValue; }) : null;
+      existingBtn.textContent = String(existingOpt ? (existingOpt.textContent || existingOpt.label || "") : "- Select League -").trim() || "- Select League -";
+      existingBtn.style.display = "flex";
+      return;
+    }
     var btn = document.createElement("button"); btn.type = "button"; btn.id = "bbLeaguePickBtn"; btn.className = sel.className || "league-box"; /* same compact look as the original select */
+    btn.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;max-width:390px;min-height:38px;padding:8px 10px;background:var(--input-bg,#fff);color:var(--text,#1f2430);border:1px solid var(--input-border,#c8ccd4);text-align:left;white-space:normal";
+    btn.textContent = "- Select League -"; /* visible fallback until the selected option is resolved */
     btn.setAttribute("aria-haspopup", "dialog");
     sel.parentNode.insertBefore(btn, sel.nextSibling);
-    sel.style.display = "none";
     var modal = document.createElement("div"); modal.id = "bbLeagueModal"; modal.setAttribute("role", "dialog");
     modal.innerHTML = '<div id="bbLeagueSheet"><div id="bbLeagueHead"><input id="bbLeagueSearch" type="search" placeholder="Search league or country" autocomplete="off"><button type="button" id="bbLeagueClose">Close</button></div><div id="bbLeagueBody"><div id="bbLeagueList"></div><div id="bbLeagueAZ"></div></div></div>';
     document.body.appendChild(modal);
@@ -53844,9 +53902,9 @@ const fixtureSelect = document.getElementById("fixtureSelect");
       if (!text) text = "- Select League -";
       btn.textContent = "";
       var sp = document.createElement("span");
-      sp.textContent = text;
-      sp.style.color = "var(--text, #1f2430)";
-      var c = document.createElement("span"); c.className = "bbcar"; c.textContent = "▾";
+      sp.textContent = text || "- Select League -";
+      sp.style.cssText = "display:block;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text,#1f2430);font-size:14px";
+      var c = document.createElement("span"); c.className = "bbcar"; c.textContent = "▾"; c.style.cssText = "flex:0 0 auto;color:var(--text,#1f2430);opacity:.7";
       btn.appendChild(sp); btn.appendChild(c);
       btn.setAttribute("data-selected-league", value);
       btn.setAttribute("aria-label", text);
@@ -53917,10 +53975,14 @@ const fixtureSelect = document.getElementById("fixtureSelect");
     window.addEventListener("pageshow", label);
     document.addEventListener("visibilitychange", function () { if (!document.hidden) label(); });
     label();
+    /* Hide the native select only after a fully labelled replacement is already visible. If any setup above fails, the native control remains available. */
+    btn.style.display = "flex";
+    sel.style.display = "none";
     window.bbLeaguePicker = { open: open, close: close, jump: jump, refresh: label };
-    /* Initial restore can set the native select after this picker initializes. Refresh once the startup turn settles. */
+    /* Initial restore can set the native select after this picker initializes. Refresh after startup restoration and page re-entry. */
     setTimeout(label, 0);
     setTimeout(label, 250);
+    setTimeout(label, 900);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init); else init();
 })();
@@ -54871,7 +54933,7 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
   function marketLabel(b, g) {
     var m = String(b && b.market || ""), mk = String(b && b.marketKey || "").toLowerCase(), h = (g && g.home) || "Home", a = (g && g.away) || "Away";
     if (mk === "h2") return "2H Total";
-    if (mk === "handicap") return "Handicap";
+    if (mk === "handicap") return "FT Handicap (Home assigned)";
     if (mk === "team_a" || mk === "h1_team_a") return (mk === "h1_team_a" ? "1H " : "") + h + " Total";
     if (mk === "team_b" || mk === "h1_team_b") return (mk === "h1_team_b" ? "1H " : "") + a + " Total";
     return m.replace(/\bTeam A\b/g, h).replace(/\bTeam B\b/g, a);
