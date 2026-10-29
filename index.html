@@ -1,4 +1,3 @@
-X
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-HTML-0002 | <head> -->
@@ -57247,8 +57246,19 @@ function bbQxFillQuarterInputs() {
   let bbALPendingWrites = [];
   let bbALLastTrainingTimer = null;
   let bbALTrainingBusy = false;
+  let bbALTrainingRerunRequested = false;
   let bbALLastRenderAt = 0;
   let bbALRunCounter = 0;
+  let bbALWriteChain = Promise.resolve();
+  let bbALFallbackBatchWriteTimer = null;
+  let bbALFallbackBatchWriteQueue = new Map();
+  let bbALFallbackBatchWriteResolvers = [];
+  let bbALMarketRowsCache = null;
+  let bbALTrainingRowsCache = new Map();
+  let bbALThresholdEventsCache = new Map();
+  let bbALInsightsCache = null;
+  let bbALSizeEstimateDirty = true;
+  let bbALApproxBytesById = new Map();
 
   const g_bbAL = {
     schemaVersion: BB_AL_SCHEMA_VERSION,
@@ -57274,6 +57284,19 @@ function bbQxFillQuarterInputs() {
   };
 
   function bbALNowIso() { return new Date().toISOString(); }
+  function bbALYieldToBrowser() {
+    /* Long history scans yield between bounded chunks so they cannot monopolize the UI thread. */
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  function bbALInvalidateCaches(includeRows) {
+    if (includeRows !== false) {
+      bbALMarketRowsCache = null;
+      bbALTrainingRowsCache.clear();
+      bbALThresholdEventsCache.clear();
+    }
+    bbALInsightsCache = null;
+  }
+  function bbALMarkSizeEstimateDirty() { bbALSizeEstimateDirty = true; }
   function bbALNum(v) {
     if (v == null || v === "") return null;
     const n = Number(v);
@@ -57369,7 +57392,7 @@ function bbQxFillQuarterInputs() {
       thresholdMultipliers: g_bbAL.thresholdMultipliers,
       models: g_bbAL.models,
       changes: g_bbAL.changes.slice(-BB_AL_MAX_CHANGE_LOG),
-      canaries: g_bbAL.canaries,
+      canaries: g_bbAL.canaries.slice(-200),
       lastTrainingAt: g_bbAL.lastTrainingAt,
       lastTrainingBatchCount: g_bbAL.lastTrainingBatchCount,
       lastTrainingSettledKeys: g_bbAL.lastTrainingSettledKeys,
@@ -57392,38 +57415,119 @@ function bbQxFillQuarterInputs() {
       catch (_e) { g_bbAL.fallbackWarning = "Fallback storage is full. Export a backup and clear old site data only after preserving it."; }
     }
   }
-  function bbALPutBatch(batch) {
-    if (!batch || !batch.id) return Promise.resolve(false);
-    if (bbALDB) return new Promise((resolve) => {
-      try {
-        const tx = bbALDB.transaction(["batches"], "readwrite");
-        tx.objectStore("batches").put(batch);
-        tx.oncomplete = function () { resolve(true); };
-        tx.onerror = function () { g_bbAL.fallbackWarning = "A batch could not be saved. Export the learner data soon."; resolve(false); };
-        tx.onabort = function () { resolve(false); };
-      } catch (_e) { resolve(false); }
-    });
+  function bbALFlushFallbackBatchWrites() {
+    if (bbALFallbackBatchWriteTimer != null) {
+      try { clearTimeout(bbALFallbackBatchWriteTimer); } catch (_e) {}
+      bbALFallbackBatchWriteTimer = null;
+    }
+    const queued = Array.from(bbALFallbackBatchWriteQueue.values());
+    bbALFallbackBatchWriteQueue.clear();
+    const waiters = bbALFallbackBatchWriteResolvers.splice(0);
+    if (!queued.length) { waiters.forEach((resolve) => resolve(true)); return true; }
     try {
       const key = "BB_AUTONOMOUS_LEARNER_FALLBACK_BATCHES";
       let rows = JSON.parse(localStorage.getItem(key) || "[]");
       if (!Array.isArray(rows)) rows = [];
-      const ix = rows.findIndex((r) => r && r.id === batch.id);
-      if (ix >= 0) rows[ix] = batch; else rows.push(batch);
-      rows = rows.slice(-250);
+      const byId = new Map(rows.filter((r) => r && r.id).map((r) => [r.id, r]));
+      queued.forEach((b) => { byId.delete(b.id); byId.set(b.id, b); });
+      rows = Array.from(byId.values()).slice(-250);
       localStorage.setItem(key, JSON.stringify(rows));
-      return Promise.resolve(true);
+      waiters.forEach((resolve) => resolve(true));
+      return true;
     } catch (_e) {
-      g_bbAL.fallbackWarning = "Browser fallback storage is full. IndexedDB is recommended; export any records currently visible.";
-      return Promise.resolve(false);
+      g_bbAL.fallbackWarning = "Browser fallback storage is full. Export a backup; fallback storage retains at most 250 runs.";
+      waiters.forEach((resolve) => resolve(false));
+      return false;
     }
   }
+  function bbALPutBatch(batch) {
+    if (!batch || !batch.id) return Promise.resolve(false);
+    if (bbALDB) {
+      /* Avoid launching hundreds/thousands of simultaneous transactions during legacy import. */
+      const write = () => new Promise((resolve) => {
+        const db = bbALDB;
+        if (!db) { resolve(false); return; }
+        try {
+          const tx = db.transaction(["batches"], "readwrite");
+          tx.objectStore("batches").put(batch);
+          tx.oncomplete = function () { resolve(true); };
+          tx.onerror = function () { g_bbAL.fallbackWarning = "A batch could not be saved. Export the learner data soon."; resolve(false); };
+          tx.onabort = function () { resolve(false); };
+        } catch (_e) { resolve(false); }
+      });
+      const result = bbALWriteChain.then(write, write);
+      bbALWriteChain = result.then(() => undefined, () => undefined);
+      return result;
+    }
+    /* localStorage is a constrained fallback: coalesce writes and serialize the queue only once per burst. */
+    return new Promise((resolve) => {
+      bbALFallbackBatchWriteQueue.delete(batch.id);
+      bbALFallbackBatchWriteQueue.set(batch.id, batch);
+      bbALFallbackBatchWriteResolvers.push(resolve);
+      if (bbALFallbackBatchWriteTimer == null) bbALFallbackBatchWriteTimer = setTimeout(bbALFlushFallbackBatchWrites, 80);
+    });
+  }
   function bbALSaveBatch(batch) { return bbALPutBatch(batch); }
+  function bbALEstimateBatchBytes(batch) {
+    /* Approximate byte count without serializing the entire archive. The previous implementation
+       JSON.stringify-ed every saved game after every new game: migration and settlement therefore
+       became O(n²) work and froze the page as the ledger grew. */
+    if (!batch || typeof batch !== "object") return 1024;
+    let units = 1800;
+    const addText = (v, scale) => { if (typeof v === "string") units += Math.min(v.length, 12000) * (scale || 1); };
+    [batch.id, batch.eventId, batch.eventKey, batch.league, batch.teamAName, batch.teamBName,
+      batch.homeTeam, batch.awayTeam, batch.capturedAt, batch.eventDate].forEach((v) => addText(v, 1));
+    const source = batch.sourceSnapshots || {};
+    Object.keys(source).slice(0, 40).forEach((k) => {
+      units += 80;
+      const v = source[k];
+      if (Array.isArray(v)) {
+        units += Math.min(v.length, 160) * 100;
+        v.slice(0, 160).forEach((r) => { if (r && typeof r === "object") { addText(r.label, 1); addText(r.value, 1); } });
+      } else if (v && typeof v === "object") units += Math.min(Object.keys(v).length, 220) * 60;
+      else addText(v, 1);
+    });
+    (Array.isArray(batch.markets) ? batch.markets : []).forEach((m) => {
+      units += 1000;
+      if (!m || typeof m !== "object") return;
+      [m.marketKey, m.marketName, m.pick, m.originalPick, m.reason, m.settlementNote, m.modelVersion].forEach((v) => addText(v, 1));
+      const f = m.features;
+      if (f && typeof f === "object") {
+        const keys = Object.keys(f).slice(0, 160);
+        units += keys.length * 70;
+        keys.forEach((k) => { const v = f[k]; if (typeof v === "string") addText(v, 1); else if (Array.isArray(v)) units += Math.min(v.length, 60) * 12; else if (v && typeof v === "object") units += Math.min(Object.keys(v).length, 120) * 18; });
+      }
+    });
+    return Math.max(1024, Math.ceil(units * 1.7));
+  }
   function bbALRefreshSizeEstimate() {
+    if (!bbALSizeEstimateDirty) return;
     try {
-      g_bbAL.storageBytesEstimate = g_bbAL.batches.reduce((n, b) => n + (JSON.stringify(b).length * 2), 0);
+      const next = new Map();
+      let total = 0;
+      g_bbAL.batches.forEach((b) => {
+        if (!b || !b.id) return;
+        const estimate = Math.max(1024, Number(b.__bbALApproxBytes) || bbALEstimateBatchBytes(b));
+        b.__bbALApproxBytes = estimate;
+        next.set(b.id, estimate);
+        total += estimate;
+      });
+      bbALApproxBytesById = next;
+      g_bbAL.storageBytesEstimate = total;
+      bbALSizeEstimateDirty = false;
     } catch (_e) { g_bbAL.storageBytesEstimate = 0; }
   }
+  function bbALUpdateBatchSizeEstimate(batch) {
+    if (bbALSizeEstimateDirty) bbALRefreshSizeEstimate();
+    if (!batch || !batch.id) return;
+    const oldBytes = Number(bbALApproxBytesById.get(batch.id)) || 0;
+    const nextBytes = bbALEstimateBatchBytes(batch);
+    batch.__bbALApproxBytes = nextBytes;
+    bbALApproxBytesById.set(batch.id, nextBytes);
+    g_bbAL.storageBytesEstimate = Math.max(0, Number(g_bbAL.storageBytesEstimate) - oldBytes + nextBytes);
+  }
   function bbALNotify() {
+    bbALInvalidateCaches(false);
     bbALRefreshSizeEstimate();
     if (typeof renderConfigsPanel === "function" && typeof isTrackerConfigsView === "function" && isTrackerConfigsView()) {
       try { renderConfigsPanel(); } catch (_e) {}
@@ -57442,6 +57546,7 @@ function bbQxFillQuarterInputs() {
           if (Array.isArray(rows)) g_bbAL.batches = rows;
         } catch (_e) {}
         bbALPendingWrites.splice(0).forEach((b) => { if (!g_bbAL.batches.some((x) => x.id === b.id)) g_bbAL.batches.push(b); });
+        bbALInvalidateCaches(true); bbALMarkSizeEstimateDirty();
         g_bbAL.dbStatus = "local fallback";
         bbALNotify();
         resolve(false);
@@ -57472,6 +57577,7 @@ function bbQxFillQuarterInputs() {
           const rows = JSON.parse(localStorage.getItem("BB_AUTONOMOUS_LEARNER_FALLBACK_BATCHES") || "[]");
           if (Array.isArray(rows)) g_bbAL.batches = rows;
         } catch (_e) {}
+        bbALInvalidateCaches(true); bbALMarkSizeEstimateDirty();
         resolve(false);
       };
       req.onsuccess = function () {
@@ -57480,12 +57586,14 @@ function bbQxFillQuarterInputs() {
         try {
           const tx = bbALDB.transaction(["meta", "batches"], "readonly");
           const mr = tx.objectStore("meta").get("main");
-          const br = tx.objectStore("batches").getAll();
+          /* Stream ledger rows through a cursor instead of cloning the whole archive in one getAll burst. */
+          const br = tx.objectStore("batches").openCursor();
           let metaDone = false, batchesDone = false, metaVal = null, batchesVal = [];
           const done = function () {
             if (!metaDone || !batchesDone) return;
             if (metaVal) bbALMergeMeta(metaVal);
             g_bbAL.batches = Array.isArray(batchesVal) ? batchesVal : [];
+            bbALInvalidateCaches(true); bbALMarkSizeEstimateDirty();
             bbALPendingWrites.splice(0).forEach((b) => {
               const ix = g_bbAL.batches.findIndex((x) => x.id === b.id);
               if (ix >= 0) g_bbAL.batches[ix] = b; else g_bbAL.batches.push(b);
@@ -57500,7 +57608,16 @@ function bbQxFillQuarterInputs() {
           };
           mr.onsuccess = function () { metaVal = mr.result || null; metaDone = true; done(); };
           mr.onerror = function () { metaDone = true; done(); };
-          br.onsuccess = function () { batchesVal = br.result || []; batchesDone = true; done(); };
+          br.onsuccess = function () {
+            const cursor = br.result;
+            if (cursor) {
+              batchesVal.push(cursor.value);
+              cursor.continue();
+            } else {
+              batchesDone = true;
+              done();
+            }
+          };
           br.onerror = function () { batchesDone = true; done(); };
         } catch (_e) {
           g_bbAL.dbStatus = "IndexedDB open / read warning";
@@ -57516,7 +57633,7 @@ function bbQxFillQuarterInputs() {
     g_bbAL.thresholdMultipliers = Object.assign({}, BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers || {}, meta.thresholdMultipliers || {});
     g_bbAL.models = Object.assign({}, BB_AL_HARDCODED_DEFAULTS.projectionModels || {}, meta.models || {});
     if (Array.isArray(meta.changes)) g_bbAL.changes = meta.changes.slice(-BB_AL_MAX_CHANGE_LOG);
-    if (Array.isArray(meta.canaries)) g_bbAL.canaries = meta.canaries;
+    if (Array.isArray(meta.canaries)) g_bbAL.canaries = meta.canaries.slice(-200);
     g_bbAL.lastTrainingAt = meta.lastTrainingAt || null;
     g_bbAL.lastTrainingBatchCount = Number(meta.lastTrainingBatchCount) || 0;
     g_bbAL.lastTrainingSettledKeys = Number(meta.lastTrainingSettledKeys) || 0;
@@ -57529,11 +57646,14 @@ function bbQxFillQuarterInputs() {
     g_bbAL.legacyShadowScanned = !!meta.legacyShadowScanned;
   }
   function bbALAddBatch(batch) {
-    const ix = g_bbAL.batches.findIndex((b) => b.id === batch.id);
+    if (!batch || !batch.id) return;
+    if (bbALSizeEstimateDirty) bbALRefreshSizeEstimate();
+    const ix = g_bbAL.batches.findIndex((b) => b && b.id === batch.id);
     if (ix >= 0) g_bbAL.batches[ix] = batch; else g_bbAL.batches.push(batch);
-    if (!bbALDB) bbALPendingWrites.push(batch);
+    bbALInvalidateCaches(true);
+    bbALUpdateBatchSizeEstimate(batch);
+    if (!bbALDB && g_bbAL.dbStatus === "opening") bbALPendingWrites.push(batch);
     else bbALSaveBatch(batch);
-    bbALRefreshSizeEstimate();
   }
   function bbALGetLegacyTrackerState() {
     try {
@@ -57717,17 +57837,23 @@ function bbQxFillQuarterInputs() {
     await bbALInit();
     let importedTracker = 0, importedShadow = 0, foundTrackerState = false;
     const tracker = bbALGetLegacyTrackerState();
-    if (tracker && Array.isArray(tracker.activePicks) && Array.isArray(tracker.archivedPicks)) {
+    if (!g_bbAL.legacyTrackerScanned && tracker && Array.isArray(tracker.activePicks) && Array.isArray(tracker.archivedPicks)) {
       const active = tracker.activePicks, archived = tracker.archivedPicks;
-      if (active.length + archived.length > 0 || finalAttempt || !g_bbAL.legacyTrackerScanned) {
+      if (active.length + archived.length > 0 || finalAttempt) {
         foundTrackerState = true;
         const seen = new Set();
-        [...active, ...archived].forEach((pick) => {
-          if (!pick || typeof pick !== "object") return;
-          const key = String(pick.pickId || pick.signature || pick.id || [pick.eventId, pick.marketKey, pick.side, pick.lineAtPick ?? pick.line, pick.createdAt, pick.actualScore].join("|"));
-          if (seen.has(key)) return; seen.add(key);
-          try { if (bbALImportLegacyTrackerPick(pick)) importedTracker++; } catch (_e) {}
-        });
+        const legacyPicks = [...active, ...archived];
+        for (let i = 0; i < legacyPicks.length; i++) {
+          const pick = legacyPicks[i];
+          if (pick && typeof pick === "object") {
+            const key = String(pick.pickId || pick.signature || pick.id || [pick.eventId, pick.marketKey, pick.side, pick.lineAtPick ?? pick.line, pick.createdAt, pick.actualScore].join("|"));
+            if (!seen.has(key)) {
+              seen.add(key);
+              try { if (bbALImportLegacyTrackerPick(pick)) importedTracker++; } catch (_e) {}
+            }
+          }
+          if ((i + 1) % 100 === 0) await bbALYieldToBrowser();
+        }
         g_bbAL.legacyTrackerImported += importedTracker;
         g_bbAL.legacyTrackerScanned = true;
       }
@@ -57735,8 +57861,11 @@ function bbQxFillQuarterInputs() {
     {
       let oldShadow = [];
       try { const raw = localStorage.getItem("BB_SHADOW_BLOCKED"); const parsed = raw ? JSON.parse(raw) : []; if (Array.isArray(parsed)) oldShadow = parsed; } catch (_e) {}
-      if (oldShadow.length > 0 || finalAttempt) {
-        oldShadow.forEach((entry, i) => { try { if (bbALImportLegacyShadow(entry, i)) importedShadow++; } catch (_e) {} });
+      if (!g_bbAL.legacyShadowScanned && (oldShadow.length > 0 || finalAttempt)) {
+        for (let i = 0; i < oldShadow.length; i++) {
+          try { if (bbALImportLegacyShadow(oldShadow[i], i)) importedShadow++; } catch (_e) {}
+          if ((i + 1) % 100 === 0) await bbALYieldToBrowser();
+        }
         g_bbAL.legacyShadowImported += importedShadow;
         g_bbAL.legacyShadowScanned = true;
       }
@@ -57755,9 +57884,9 @@ function bbQxFillQuarterInputs() {
     return false;
   }
   async function bbALForceLegacyMigration() {
-    /* A visible manual retry is intentionally provided for slow Safari hydration and repeat-safe imports. */
-    if (g_bbAL.legacyTrackerImported === 0) g_bbAL.legacyTrackerScanned = false;
-    if (g_bbAL.legacyShadowImported === 0) g_bbAL.legacyShadowScanned = false;
+    /* Manual retries can discover records that appeared after first load; deterministic IDs skip duplicates. */
+    g_bbAL.legacyTrackerScanned = false;
+    g_bbAL.legacyShadowScanned = false;
     const ok = await bbALTryLegacyMigration(true);
     g_bbAL.lastNotice = "Legacy import check finished. Imported tracker: " + g_bbAL.legacyTrackerImported + "; old shadow log: " + g_bbAL.legacyShadowImported + ". Records without pre-game identity/time remain history-only.";
     bbALSaveMeta(); bbALNotify();
@@ -57870,14 +57999,15 @@ function bbQxFillQuarterInputs() {
       const diagnostics = bbALSafeClone(args.diagnostics || {}, 0, { nodes: 0, maxNodes: 2500 }) || {};
       const marketRows = finalPicks.map((p, index) => {
         if (!p || typeof p !== "object") return null;
-        const mk = String(p.marketKey || "unknown").toLowerCase();
-        const lineRaw = p.displayLineUsed != null && p.displayLineUsed !== "" ? p.displayLineUsed : p.line != null ? p.line : finalLines[mk];
+        const rawMarketKey = String(p.marketKey || "unknown").toLowerCase();
+        const mk = bbALLegacyMarketKey(rawMarketKey);
+        const lineRaw = p.displayLineUsed != null && p.displayLineUsed !== "" ? p.displayLineUsed : p.line != null ? p.line : (finalLines[rawMarketKey] != null ? finalLines[rawMarketKey] : finalLines[mk]);
         const line = bbALNum(lineRaw);
         const projection = bbALNum((mk === "winner" || mk === "handicap") && p.marginProjection != null ? p.marginProjection : p.proj != null ? p.proj : p.projection != null ? p.projection : p.expectedPoints);
         const rawProjection = bbALNum(p.bbALRawProjection != null ? p.bbALRawProjection : projection);
         const edge = bbALNum(p.edge != null ? p.edge : p.rawEdge);
         const pick = String(p.pick || p.displayPick || "NO PLAY").trim() || "NO PLAY";
-        const side = bbALInferSide(p, names.teamAName, names.teamBName, roleA);
+        const side = bbALInferSide(Object.assign({}, p, { marketKey: mk }), names.teamAName, names.teamBName, roleA);
         const baseThreshold = (function () {
           try { if (bbALOriginalGetLeagueEdgePointThreshold) { const v = bbALOriginalGetLeagueEdgePointThreshold(league, mk); return bbALNum(v); } } catch (_e) {}
           return bbALNum(p.baseThreshold != null ? p.baseThreshold : p.effectiveThreshold);
@@ -58115,6 +58245,7 @@ function bbQxFillQuarterInputs() {
         batch.status = batch.markets.every((m) => !!m.result || !!m.settlementNote) ? "SETTLED / REVIEWED" : (batch.settledMarketCount ? "PARTLY SETTLED" : "PENDING");
         changed.push(batch);
       });
+      if (changed.length) bbALInvalidateCaches(true);
       changed.forEach((b) => bbALSaveBatch(b));
       if (changed.length) {
         g_bbAL.lastNotice = "Auto-settled " + changed.length + " saved prediction run(s) for event " + eid + ". NO PLAY markets were graded too.";
@@ -58147,22 +58278,28 @@ function bbQxFillQuarterInputs() {
     return Array.from(by.values()).sort((a, b) => a.batch.eventDateMs - b.batch.eventDateMs);
   }
   function bbALAllMarketRows() {
+    if (bbALMarketRowsCache) return bbALMarketRowsCache;
     const out = [];
     g_bbAL.batches.forEach((batch) => (batch.markets || []).forEach((market) => out.push({ batch, market })));
+    bbALMarketRowsCache = out;
     return out;
   }
   function bbALAllTrainingRows(marketKey) {
+    const cacheKey = marketKey ? String(marketKey).toLowerCase() : "*";
+    if (bbALTrainingRowsCache.has(cacheKey)) return bbALTrainingRowsCache.get(cacheKey);
     const rows = bbALLatestByEventMarket(bbALAllMarketRows(), (b, m) => {
       if (!bbALRecordPregameEligible(b, m)) return false;
-      if (marketKey && String(m.marketKey).toLowerCase() !== String(marketKey).toLowerCase()) return false;
+      if (marketKey && String(m.marketKey).toLowerCase() !== cacheKey) return false;
       return m.actualValue != null && bbALNum(m.baseProjection) != null && !!m.settledAt;
     });
+    bbALTrainingRowsCache.set(cacheKey, rows);
     return rows;
   }
   function bbALGateAllowedForThreshold(m) {
     return !!m && (m.gateClass === "PLAY" || m.gateClass === "THRESHOLD_BLOCK") && m.side && bbALNum(m.edge) != null && bbALNum(m.baseThreshold) != null && ["WIN", "LOSS", "PUSH"].includes(String(m.result || "").toUpperCase());
   }
   function bbALGetThresholdEvents(bucket) {
+    if (bbALThresholdEventsCache.has(bucket)) return bbALThresholdEventsCache.get(bucket);
     const rows = bbALLatestByEventMarket(bbALAllMarketRows(), (b, m) => {
       if (!bbALRecordPregameEligible(b, m) || !bbALGateAllowedForThreshold(m)) return false;
       return bbALBucket(m.marketKey) === bucket;
@@ -58173,7 +58310,9 @@ function bbQxFillQuarterInputs() {
       if (!by.has(k)) by.set(k, { key: k, eventDateMs: r.batch.eventDateMs, records: [] });
       by.get(k).records.push(r);
     });
-    return Array.from(by.values()).sort((a, b) => a.eventDateMs - b.eventDateMs);
+    const result = Array.from(by.values()).sort((a, b) => a.eventDateMs - b.eventDateMs);
+    bbALThresholdEventsCache.set(bucket, result);
+    return result;
   }
   function bbALReturnForOutcome(outcome) {
     const r = String(outcome || "").toUpperCase();
@@ -58481,6 +58620,7 @@ function bbQxFillQuarterInputs() {
   }
   function bbALSortRows(rows) { return rows.sort((a, b) => Number(a.eventDateMs || 0) - Number(b.eventDateMs || 0)); }
   function bbALBuildInsights() {
+    if (bbALInsightsCache) return bbALInsightsCache;
     const out = { batches: g_bbAL.batches.length, markets: 0, settled: 0, pending: 0, plays: 0, noPlays: 0, wins: 0, losses: 0, pushes: 0, observed: 0, uniqueEvents: new Set(), leagueCounts: {}, marketCounts: {}, noIdCount: 0, pregameEligible: 0, trainingRows: 0, changes: g_bbAL.changes.length, activeCorrectionMarkets: 0, activeThresholdBuckets: 0 };
     g_bbAL.batches.forEach((b) => {
       out.uniqueEvents.add(b.eventKey);
@@ -58508,6 +58648,7 @@ function bbQxFillQuarterInputs() {
     out.trainingRows = g_bbAL.batches.reduce((s, b) => s + (b.trainingEligibleCount || 0), 0);
     out.activeCorrectionMarkets = Object.keys(g_bbAL.models).filter((k) => g_bbAL.models[k] && g_bbAL.models[k].enabled).length;
     out.activeThresholdBuckets = Object.keys(g_bbAL.thresholdMultipliers).filter((k) => Math.abs((Number(g_bbAL.thresholdMultipliers[k]) || 1) - 1) > 0.001).length;
+    bbALInsightsCache = out;
     return out;
   }
   function bbALScheduleTraining() {
@@ -58515,8 +58656,10 @@ function bbQxFillQuarterInputs() {
     bbALLastTrainingTimer = setTimeout(function () { bbALTrainAll().catch(function (e) { g_bbAL.lastNotice = "Learning pass warning: " + String(e && e.message || e); bbALSaveMeta(); }); }, 1100);
   }
   async function bbALTrainAll(force) {
-    if (bbALTrainingBusy || g_bbAL.mode === "OFF") return null;
+    if (g_bbAL.mode === "OFF") return null;
+    if (bbALTrainingBusy) { bbALTrainingRerunRequested = true; return null; }
     await bbALInit();
+    if (bbALTrainingBusy) { bbALTrainingRerunRequested = true; return null; }
     const settledRows = bbALAllMarketRows().filter((r) => bbALRecordPregameEligible(r.batch, r.market) && r.market.actualValue != null && !!r.market.settledAt);
     const uniqueKeys = new Set(settledRows.map((r) => r.batch.eventKey + "|" + r.market.marketKey));
     if (!force && uniqueKeys.size < g_bbAL.lastTrainingSettledKeys + BB_AL_MIN_NEW_SETTLED) return null;
@@ -58533,7 +58676,9 @@ function bbQxFillQuarterInputs() {
     try {
       const tests = {};
       const marketKeys = Array.from(new Set(settledRows.map((r) => String(r.market.marketKey || "").toLowerCase()))).filter((mk) => BB_AL_MARKETS.has(mk));
-      marketKeys.forEach((mk) => {
+      for (let i = 0; i < marketKeys.length; i++) {
+        if (i > 0) await bbALYieldToBrowser();
+        const mk = marketKeys[i];
         const result = bbALFitBiasWithValidation(mk);
         tests["projection:" + mk] = Object.assign({}, result, { model: undefined });
         if (result.status === "PROVEN" && result.model) {
@@ -58543,10 +58688,13 @@ function bbQxFillQuarterInputs() {
             g_bbAL.changes.push({ id: "PROJ-" + Date.now().toString(36) + "-" + mk, at: bbALNowIso(), type: "PROJECTION_CORRECTION_VALIDATED", scope: mk, oldValue: previous ? { enabled: !!previous.enabled, globalBias: previous.globalBias } : { enabled: false }, newValue: { enabled: true, globalBias: result.model.globalBias, n: result.model.n }, evidence: { holdoutN: result.holdoutN, baselineMae: result.baselineMae, correctedMae: result.correctedMae, meanMaeImprovement: result.meanMaeImprovement, ciLow: result.ciLow, ciHigh: result.ciHigh }, rollbackAvailable: true, codeHint: "hard-code this market model via BB_AL_HARDCODED_DEFAULTS.projectionModels." });
           }
         }
-      });
+      }
       let thresholdAnalyses = [];
       const thresholdBuckets = ["ft", "h1", "team", "h1team", "winner", "quarter", "qext"];
-      thresholdBuckets.forEach((bucket) => { thresholdAnalyses.push(bbALAnalyzeThresholdBucket(bucket)); });
+      for (let i = 0; i < thresholdBuckets.length; i++) {
+        await bbALYieldToBrowser();
+        thresholdAnalyses.push(bbALAnalyzeThresholdBucket(thresholdBuckets[i]));
+      }
       tests.thresholdBuckets = thresholdAnalyses.map((x) => Object.assign({}, x));
       if (g_bbAL.mode === "GUARD") {
         const proposals = thresholdAnalyses.filter((x) => x.status === "PROVEN" && Math.abs(Number(x.candidateMultiplier) - Number(x.currentMultiplier)) >= 0.049);
@@ -58556,7 +58704,19 @@ function bbQxFillQuarterInputs() {
           g_bbAL.thresholdMultipliers[p.bucket] = Number(p.candidateMultiplier);
           const change = { id: "THR-" + Date.now().toString(36) + "-" + p.bucket, at: bbALNowIso(), type: "THRESHOLD_MULTIPLIER_AUTO_APPLIED", scope: p.bucket, oldValue: p.currentMultiplier, newValue: p.candidateMultiplier, evidence: { distinctEvents: p.eventCount, trainEvents: p.trainCount, holdoutEvents: p.testCount, holdoutDelta: p.testDelta, ciLow: p.ciLow, ciHigh: p.ciHigh, baselineSelectedEvents: p.baselineSelectedEvents, candidateSelectedEvents: p.candidateSelectedEvents, baselineHitRate: p.baselineHitRate, candidateHitRate: p.candidateHitRate }, rollbackAvailable: true, codeHint: "Copy the multiplier into BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers." };
           g_bbAL.changes.push(change);
+          g_bbAL.canaries.forEach((prior) => {
+            if (prior && prior.type === "threshold" && prior.bucket === p.bucket && prior.status === "WATCHING") {
+              prior.status = "SUPERSEDED";
+              prior.resolvedAt = change.at;
+              prior.reason = "A newer validated threshold change replaced this canary; the newest setting is now monitored.";
+            }
+          });
           g_bbAL.canaries.push({ id: change.id, type: "threshold", bucket: p.bucket, oldValue: p.currentMultiplier, newValue: p.candidateMultiplier, appliedAt: change.at, checkedEventKeys: [], status: "WATCHING", reason: "Auto-rollback if forward results convincingly underperform the previous multiplier." });
+          if (g_bbAL.canaries.length > 200) {
+            const activeCanaries = g_bbAL.canaries.filter((c) => c && c.status === "WATCHING");
+            const closedCanaries = g_bbAL.canaries.filter((c) => !c || c.status !== "WATCHING");
+            g_bbAL.canaries = closedCanaries.slice(-Math.max(0, 200 - activeCanaries.length)).concat(activeCanaries).slice(-200);
+          }
           g_bbAL.lastNotice = "GUARD auto-applied proven " + p.bucket + " threshold multiplier " + p.currentMultiplier.toFixed(2) + " → " + p.candidateMultiplier.toFixed(2) + ". Forward canary started.";
         } else {
           const provenProjection = Object.keys(g_bbAL.models).filter((k) => g_bbAL.models[k] && g_bbAL.models[k].enabled).length;
@@ -58571,10 +58731,17 @@ function bbQxFillQuarterInputs() {
       g_bbAL.lastTrainingSettledKeys = uniqueKeys.size;
       g_bbAL.changes = g_bbAL.changes.slice(-BB_AL_MAX_CHANGE_LOG);
       bbALCheckCanaries();
+      bbALInvalidateCaches(false);
       bbALSaveMeta();
       bbALNotify();
       return g_bbAL.lastTrainingSummary;
-    } finally { bbALTrainingBusy = false; }
+    } finally {
+      bbALTrainingBusy = false;
+      if (bbALTrainingRerunRequested && g_bbAL.mode !== "OFF") {
+        bbALTrainingRerunRequested = false;
+        bbALScheduleTraining();
+      }
+    }
   }
   function bbALCheckCanaries() {
     g_bbAL.canaries.forEach((canary) => {
@@ -58610,6 +58777,7 @@ function bbQxFillQuarterInputs() {
     if (!m || actual == null) return { ok: false, reason: "Choose a saved market and enter its actual settled value." };
     m.actualValue = actual; m.settledAt = bbALNowIso(); m.settlementNote = "Manually settled market value.";
     m.result = bbALScoreResult(m, actual) || "OBSERVED";
+    bbALInvalidateCaches(true);
     b.settledMarketCount = b.markets.filter((x) => !!x.result).length;
     b.trainingEligibleCount = b.markets.filter((x) => bbALRecordPregameEligible(b, x) && x.actualValue != null).length;
     b.status = b.markets.every((x) => !!x.result || !!x.settlementNote) ? "SETTLED / REVIEWED" : "PARTLY SETTLED";
@@ -58652,11 +58820,12 @@ function bbQxFillQuarterInputs() {
         const known = new Set(g_bbAL.batches.map((b) => b.id));
         let imported = 0;
         data.batches.forEach((b) => { if (b && b.id && !known.has(b.id)) { g_bbAL.batches.push(b); known.add(b.id); bbALSaveBatch(b); imported++; } });
+        if (imported) { bbALInvalidateCaches(true); bbALMarkSizeEstimateDirty(); }
         if (data.learner && typeof data.learner === "object") {
           g_bbAL.thresholdMultipliers = Object.assign({}, g_bbAL.thresholdMultipliers, data.learner.thresholdMultipliers || {});
           g_bbAL.models = Object.assign({}, g_bbAL.models, data.learner.models || {});
           if (Array.isArray(data.learner.changes)) g_bbAL.changes = g_bbAL.changes.concat(data.learner.changes).slice(-BB_AL_MAX_CHANGE_LOG);
-          if (Array.isArray(data.learner.canaries)) g_bbAL.canaries = g_bbAL.canaries.concat(data.learner.canaries);
+          if (Array.isArray(data.learner.canaries)) g_bbAL.canaries = g_bbAL.canaries.concat(data.learner.canaries).slice(-200);
         }
         g_bbAL.lastNotice = "Imported " + imported + " new prediction runs. Existing records were retained; duplicates were skipped.";
         bbALSaveMeta(); bbALScheduleTraining(); bbALNotify();
@@ -58839,6 +59008,7 @@ function bbQxFillQuarterInputs() {
   window.bbALGetDiagnostics = function () { return { summary: bbALBuildInsights(), dbStatus: g_bbAL.dbStatus, warning: g_bbAL.fallbackWarning, mode: g_bbAL.mode, lastTrainingSummary: g_bbAL.lastTrainingSummary }; };
   window.bbALSettleFromCompetition = bbALSettleFromCompetition;
   window.bbALCapturePredictionBatch = bbALCapturePredictionBatch;
+  if (typeof window.addEventListener === "function") window.addEventListener("pagehide", bbALFlushFallbackBatchWrites);
 
   /* Replace the legacy read-only disabled card with the full autonomous control room. */
   window.renderConfigsPanel = function () {
