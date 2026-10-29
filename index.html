@@ -1,3 +1,4 @@
+X
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-HTML-0002 | <head> -->
@@ -57212,6 +57213,1651 @@ function bbQxFillQuarterInputs() {
         });
       });
     });
+  });
+})();
+
+</script>
+
+<script>
+/* BB AUTONOMOUS LEARNING ENGINE v1.0 — isolated ledger + validated Guard overlay. */
+(function installBBAutonomousLearner() {
+  "use strict";
+  if (window.__bbAutonomousLearnerInstalled) return;
+  window.__bbAutonomousLearnerInstalled = true;
+
+  /* Hard-code learned settings here when copying proven values out of the dashboard. */
+  let BB_AL_HARDCODED_DEFAULTS = {
+    thresholdMultipliers: {},
+    projectionModels: {}
+  };
+  const BB_AL_DB_NAME = "BB_AUTONOMOUS_LEARNER_DB_V1";
+  const BB_AL_DB_VERSION = 1;
+  const BB_AL_SCHEMA_VERSION = 1;
+  const BB_AL_MAX_VISIBLE_ROWS = 40;
+  const BB_AL_MAX_CHANGE_LOG = 300;
+  const BB_AL_MIN_NEW_SETTLED = 12;
+  const BB_AL_MIN_THRESHOLD_EVENTS = 90;
+  const BB_AL_THRESHOLD_MULT_MIN = 0.80;
+  const BB_AL_THRESHOLD_MULT_MAX = 1.20;
+  const BB_AL_MARKETS = new Set(["ft", "h1", "h2", "team_a", "team_b", "h1_team_a", "h1_team_b", "winner", "handicap", "hq", "lq", "q1", "q2", "q3", "q4"]);
+  const BB_AL_TOTAL_MARKETS = new Set(["ft", "h1", "h2", "hq", "lq", "q1", "q2", "q3", "q4"]);
+  const BB_AL_TEAM_MARKETS = new Set(["team_a", "team_b", "h1_team_a", "h1_team_b"]);
+  let bbALDB = null;
+  let bbALInitPromise = null;
+  let bbALPendingWrites = [];
+  let bbALLastTrainingTimer = null;
+  let bbALTrainingBusy = false;
+  let bbALLastRenderAt = 0;
+  let bbALRunCounter = 0;
+
+  const g_bbAL = {
+    schemaVersion: BB_AL_SCHEMA_VERSION,
+    mode: "GUARD",
+    dbStatus: "opening",
+    fallbackWarning: "",
+    thresholdMultipliers: Object.assign({}, BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers || {}),
+    models: Object.assign({}, BB_AL_HARDCODED_DEFAULTS.projectionModels || {}),
+    changes: [],
+    canaries: [],
+    lastTrainingAt: null,
+    lastTrainingBatchCount: 0,
+    lastTrainingSettledKeys: 0,
+    lastTrainingSummary: {},
+    lastNotice: "Booting autonomous ledger",
+    batches: [],
+    storageBytesEstimate: 0,
+    legacyTrackerImported: 0,
+    legacyShadowImported: 0,
+    legacyMigrationStatus: "NOT STARTED",
+    legacyTrackerScanned: false,
+    legacyShadowScanned: false
+  };
+
+  function bbALNowIso() { return new Date().toISOString(); }
+  function bbALNum(v) {
+    if (v == null || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  function bbALDateMs(v) {
+    if (v == null || v === "") return null;
+    if (typeof v === "number" && Number.isFinite(v)) return v < 1e12 ? v * 1000 : v;
+    const n = Date.parse(String(v));
+    return Number.isFinite(n) ? n : null;
+  }
+  function bbALNormalizeName(v) {
+    let s = String(v || "").trim().toLowerCase();
+    try { if (typeof normalizeTeamName === "function") s = String(normalizeTeamName(s) || s).toLowerCase(); } catch (_e) {}
+    return s.replace(/[^a-z0-9]+/g, " ").trim().replace(/\s+/g, " ");
+  }
+  function bbALEscape(v) {
+    return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
+    });
+  }
+  function bbALSafeClone(value, depth, limits) {
+    const d = depth == null ? 0 : depth;
+    const cap = limits || { nodes: 0, maxNodes: 1500 };
+    cap.nodes++;
+    if (cap.nodes > cap.maxNodes || d > 5) return "[truncated]";
+    if (value == null || typeof value === "boolean") return value;
+    if (typeof value === "number") return Number.isFinite(value) ? value : null;
+    if (typeof value === "string") return value.length > 500 ? value.slice(0, 500) + "…" : value;
+    if (typeof value === "function" || typeof value === "undefined") return undefined;
+    if (Array.isArray(value)) return value.slice(0, 60).map((x) => bbALSafeClone(x, d + 1, cap));
+    if (typeof value === "object") {
+      const out = {};
+      let count = 0;
+      for (const k of Object.keys(value)) {
+        if (k === "__proto__" || k === "constructor" || k === "prototype") continue;
+        if (++count > 160) { out.__truncatedKeys = true; break; }
+        const cloned = bbALSafeClone(value[k], d + 1, cap);
+        if (cloned !== undefined) out[k] = cloned;
+      }
+      return out;
+    }
+    return String(value);
+  }
+  function bbALCanonicalJson(obj) {
+    try {
+      if (obj == null || typeof obj !== "object") return JSON.stringify(obj);
+      if (Array.isArray(obj)) return "[" + obj.map(bbALCanonicalJson).join(",") + "]";
+      return "{" + Object.keys(obj).sort().map((k) => JSON.stringify(k) + ":" + bbALCanonicalJson(obj[k])).join(",") + "}";
+    } catch (_e) { return String(Date.now()); }
+  }
+  function bbALHash(s) {
+    let h = 2166136261;
+    const t = String(s || "");
+    for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return (h >>> 0).toString(36);
+  }
+  function bbALBucket(marketKey) {
+    const mk = String(marketKey || "").toLowerCase();
+    if (mk === "ft") return "ft";
+    if (mk === "h1" || mk === "h2") return "h1";
+    if (mk === "team_a" || mk === "team_b") return "team";
+    if (mk === "h1_team_a" || mk === "h1_team_b") return "h1team";
+    if (mk === "winner" || mk === "handicap") return "winner";
+    if (/^q[1-4]$/.test(mk)) return "quarter";
+    if (mk === "hq" || mk === "lq") return "qext";
+    return null;
+  }
+  function bbALActiveMultiplier(bucket) {
+    const stored = bbALNum(g_bbAL.thresholdMultipliers && g_bbAL.thresholdMultipliers[bucket]);
+    const hard = bbALNum(BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers && BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers[bucket]);
+    const v = stored == null ? (hard == null ? 1 : hard) : stored;
+    return Math.max(BB_AL_THRESHOLD_MULT_MIN, Math.min(BB_AL_THRESHOLD_MULT_MAX, v));
+  }
+  function bbALConfigInventory() {
+    const out = [];
+    try {
+      const reg = typeof TUNABLE_PARAM_REGISTRY === "object" ? TUNABLE_PARAM_REGISTRY : {};
+      Object.keys(reg).sort().forEach((key) => {
+        const entry = reg[key] || {};
+        let runtime = entry.value;
+        try { if (typeof getTunableParam === "function") runtime = getTunableParam(key, null, null); } catch (_e) {}
+        out.push({ key, value: bbALSafeClone(entry.value), runtime: bbALSafeClone(runtime), min: entry.min ?? null, max: entry.max ?? null, scope: entry.scope || "unknown", appliesTo: entry.appliesTo || [], description: entry.description || "" });
+      });
+    } catch (_e) {}
+    return out;
+  }
+  function bbALSaveMeta() {
+    const meta = {
+      key: "main",
+      schemaVersion: BB_AL_SCHEMA_VERSION,
+      mode: g_bbAL.mode,
+      thresholdMultipliers: g_bbAL.thresholdMultipliers,
+      models: g_bbAL.models,
+      changes: g_bbAL.changes.slice(-BB_AL_MAX_CHANGE_LOG),
+      canaries: g_bbAL.canaries,
+      lastTrainingAt: g_bbAL.lastTrainingAt,
+      lastTrainingBatchCount: g_bbAL.lastTrainingBatchCount,
+      lastTrainingSettledKeys: g_bbAL.lastTrainingSettledKeys,
+      lastTrainingSummary: g_bbAL.lastTrainingSummary,
+      lastNotice: g_bbAL.lastNotice,
+      legacyTrackerImported: g_bbAL.legacyTrackerImported,
+      legacyShadowImported: g_bbAL.legacyShadowImported,
+      legacyMigrationStatus: g_bbAL.legacyMigrationStatus,
+      legacyTrackerScanned: g_bbAL.legacyTrackerScanned,
+      legacyShadowScanned: g_bbAL.legacyShadowScanned
+    };
+    if (bbALDB) {
+      try {
+        const tx = bbALDB.transaction(["meta"], "readwrite");
+        tx.objectStore("meta").put(meta);
+        tx.onerror = function () { g_bbAL.dbStatus = "write warning"; g_bbAL.fallbackWarning = "IndexedDB meta write failed; export a backup."; };
+      } catch (e) { g_bbAL.fallbackWarning = "Could not persist learner state: " + String(e && e.message || e); }
+    } else {
+      try { localStorage.setItem("BB_AUTONOMOUS_LEARNER_FALLBACK_META", JSON.stringify(meta)); }
+      catch (_e) { g_bbAL.fallbackWarning = "Fallback storage is full. Export a backup and clear old site data only after preserving it."; }
+    }
+  }
+  function bbALPutBatch(batch) {
+    if (!batch || !batch.id) return Promise.resolve(false);
+    if (bbALDB) return new Promise((resolve) => {
+      try {
+        const tx = bbALDB.transaction(["batches"], "readwrite");
+        tx.objectStore("batches").put(batch);
+        tx.oncomplete = function () { resolve(true); };
+        tx.onerror = function () { g_bbAL.fallbackWarning = "A batch could not be saved. Export the learner data soon."; resolve(false); };
+        tx.onabort = function () { resolve(false); };
+      } catch (_e) { resolve(false); }
+    });
+    try {
+      const key = "BB_AUTONOMOUS_LEARNER_FALLBACK_BATCHES";
+      let rows = JSON.parse(localStorage.getItem(key) || "[]");
+      if (!Array.isArray(rows)) rows = [];
+      const ix = rows.findIndex((r) => r && r.id === batch.id);
+      if (ix >= 0) rows[ix] = batch; else rows.push(batch);
+      rows = rows.slice(-250);
+      localStorage.setItem(key, JSON.stringify(rows));
+      return Promise.resolve(true);
+    } catch (_e) {
+      g_bbAL.fallbackWarning = "Browser fallback storage is full. IndexedDB is recommended; export any records currently visible.";
+      return Promise.resolve(false);
+    }
+  }
+  function bbALSaveBatch(batch) { return bbALPutBatch(batch); }
+  function bbALRefreshSizeEstimate() {
+    try {
+      g_bbAL.storageBytesEstimate = g_bbAL.batches.reduce((n, b) => n + (JSON.stringify(b).length * 2), 0);
+    } catch (_e) { g_bbAL.storageBytesEstimate = 0; }
+  }
+  function bbALNotify() {
+    bbALRefreshSizeEstimate();
+    if (typeof renderConfigsPanel === "function" && typeof isTrackerConfigsView === "function" && isTrackerConfigsView()) {
+      try { renderConfigsPanel(); } catch (_e) {}
+    }
+  }
+  function bbALInit() {
+    if (bbALInitPromise) return bbALInitPromise;
+    bbALInitPromise = new Promise((resolve) => {
+      if (!window.indexedDB) {
+        g_bbAL.dbStatus = "local fallback";
+        g_bbAL.fallbackWarning = "IndexedDB is unavailable in this browser context. A small localStorage fallback is active; export backups regularly.";
+        try {
+          const meta = JSON.parse(localStorage.getItem("BB_AUTONOMOUS_LEARNER_FALLBACK_META") || "null");
+          if (meta) bbALMergeMeta(meta);
+          const rows = JSON.parse(localStorage.getItem("BB_AUTONOMOUS_LEARNER_FALLBACK_BATCHES") || "[]");
+          if (Array.isArray(rows)) g_bbAL.batches = rows;
+        } catch (_e) {}
+        bbALPendingWrites.splice(0).forEach((b) => { if (!g_bbAL.batches.some((x) => x.id === b.id)) g_bbAL.batches.push(b); });
+        g_bbAL.dbStatus = "local fallback";
+        bbALNotify();
+        resolve(false);
+        return;
+      }
+      let req;
+      try { req = indexedDB.open(BB_AL_DB_NAME, BB_AL_DB_VERSION); }
+      catch (e) {
+        g_bbAL.dbStatus = "fallback";
+        g_bbAL.fallbackWarning = "IndexedDB open failed: " + String(e && e.message || e);
+        resolve(false); return;
+      }
+      req.onupgradeneeded = function (ev) {
+        const db = ev.target.result;
+        if (!db.objectStoreNames.contains("batches")) {
+          const store = db.createObjectStore("batches", { keyPath: "id" });
+          store.createIndex("eventId", "eventId", { unique: false });
+          store.createIndex("capturedAtMs", "capturedAtMs", { unique: false });
+        }
+        if (!db.objectStoreNames.contains("meta")) db.createObjectStore("meta", { keyPath: "key" });
+      };
+      req.onerror = function () {
+        g_bbAL.dbStatus = "fallback";
+        g_bbAL.fallbackWarning = "IndexedDB could not open. Local browser storage fallback enabled.";
+        try {
+          const meta = JSON.parse(localStorage.getItem("BB_AUTONOMOUS_LEARNER_FALLBACK_META") || "null");
+          if (meta) bbALMergeMeta(meta);
+          const rows = JSON.parse(localStorage.getItem("BB_AUTONOMOUS_LEARNER_FALLBACK_BATCHES") || "[]");
+          if (Array.isArray(rows)) g_bbAL.batches = rows;
+        } catch (_e) {}
+        resolve(false);
+      };
+      req.onsuccess = function () {
+        bbALDB = req.result;
+        bbALDB.onversionchange = function () { try { bbALDB.close(); } catch (_e) {} bbALDB = null; g_bbAL.dbStatus = "closed"; };
+        try {
+          const tx = bbALDB.transaction(["meta", "batches"], "readonly");
+          const mr = tx.objectStore("meta").get("main");
+          const br = tx.objectStore("batches").getAll();
+          let metaDone = false, batchesDone = false, metaVal = null, batchesVal = [];
+          const done = function () {
+            if (!metaDone || !batchesDone) return;
+            if (metaVal) bbALMergeMeta(metaVal);
+            g_bbAL.batches = Array.isArray(batchesVal) ? batchesVal : [];
+            bbALPendingWrites.splice(0).forEach((b) => {
+              const ix = g_bbAL.batches.findIndex((x) => x.id === b.id);
+              if (ix >= 0) g_bbAL.batches[ix] = b; else g_bbAL.batches.push(b);
+              bbALPutBatch(b);
+            });
+            g_bbAL.dbStatus = "IndexedDB persistent";
+            g_bbAL.lastNotice = g_bbAL.lastNotice || "Ledger loaded";
+            bbALRefreshSizeEstimate();
+            bbALSaveMeta();
+            bbALNotify();
+            resolve(true);
+          };
+          mr.onsuccess = function () { metaVal = mr.result || null; metaDone = true; done(); };
+          mr.onerror = function () { metaDone = true; done(); };
+          br.onsuccess = function () { batchesVal = br.result || []; batchesDone = true; done(); };
+          br.onerror = function () { batchesDone = true; done(); };
+        } catch (_e) {
+          g_bbAL.dbStatus = "IndexedDB open / read warning";
+          resolve(false);
+        }
+      };
+    });
+    return bbALInitPromise;
+  }
+  function bbALMergeMeta(meta) {
+    if (!meta || typeof meta !== "object") return;
+    if (["GUARD", "LEARN", "OFF"].includes(String(meta.mode || "").toUpperCase())) g_bbAL.mode = String(meta.mode).toUpperCase();
+    g_bbAL.thresholdMultipliers = Object.assign({}, BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers || {}, meta.thresholdMultipliers || {});
+    g_bbAL.models = Object.assign({}, BB_AL_HARDCODED_DEFAULTS.projectionModels || {}, meta.models || {});
+    if (Array.isArray(meta.changes)) g_bbAL.changes = meta.changes.slice(-BB_AL_MAX_CHANGE_LOG);
+    if (Array.isArray(meta.canaries)) g_bbAL.canaries = meta.canaries;
+    g_bbAL.lastTrainingAt = meta.lastTrainingAt || null;
+    g_bbAL.lastTrainingBatchCount = Number(meta.lastTrainingBatchCount) || 0;
+    g_bbAL.lastTrainingSettledKeys = Number(meta.lastTrainingSettledKeys) || 0;
+    g_bbAL.lastTrainingSummary = meta.lastTrainingSummary || {};
+    g_bbAL.lastNotice = meta.lastNotice || g_bbAL.lastNotice;
+    g_bbAL.legacyTrackerImported = Number(meta.legacyTrackerImported) || 0;
+    g_bbAL.legacyShadowImported = Number(meta.legacyShadowImported) || 0;
+    g_bbAL.legacyMigrationStatus = meta.legacyMigrationStatus || "NOT STARTED";
+    g_bbAL.legacyTrackerScanned = !!meta.legacyTrackerScanned;
+    g_bbAL.legacyShadowScanned = !!meta.legacyShadowScanned;
+  }
+  function bbALAddBatch(batch) {
+    const ix = g_bbAL.batches.findIndex((b) => b.id === batch.id);
+    if (ix >= 0) g_bbAL.batches[ix] = batch; else g_bbAL.batches.push(batch);
+    if (!bbALDB) bbALPendingWrites.push(batch);
+    else bbALSaveBatch(batch);
+    bbALRefreshSizeEstimate();
+  }
+  function bbALGetLegacyTrackerState() {
+    try {
+      if (typeof AppState !== "undefined" && AppState && AppState.tracker && AppState.tracker.state) return AppState.tracker.state;
+    } catch (_e) {}
+    try { if (window.AppState && window.AppState.tracker && window.AppState.tracker.state) return window.AppState.tracker.state; } catch (_e) {}
+    try { if (typeof g_trackerState !== "undefined" && g_trackerState) return g_trackerState; } catch (_e) {}
+    try { if (window.g_trackerState) return window.g_trackerState; } catch (_e) {}
+    return null;
+  }
+  function bbALLegacyMarketKey(raw) {
+    const k = String(raw || "other").toLowerCase().trim().replace(/[\s-]+/g, "_");
+    const aliases = {
+      full_game_total: "ft", game_total: "ft", full_total: "ft", total: "ft",
+      first_half: "h1", first_half_total: "h1", firsthalf: "h1", h1_total: "h1", "1h": "h1", "1h_total": "h1",
+      second_half: "h2", second_half_total: "h2", h2_total: "h2", "2h": "h2",
+      team_total_a: "team_a", team_a_total: "team_a", team_total_b: "team_b", team_b_total: "team_b",
+      winner_ml: "winner", moneyline: "winner", money_line: "winner", spread: "handicap", point_spread: "handicap",
+      highest_quarter: "hq", lowest_quarter: "lq", q1_total: "q1", q2_total: "q2", q3_total: "q3", q4_total: "q4"
+    };
+    return aliases[k] || k;
+  }
+  function bbALLegacyRoleA(p, teamAName, homeTeam, awayTeam) {
+    const declared = String(p && (p.roleA || p.teamARole || p.snapshot && (p.snapshot.roleA || p.snapshot.teamARole)) || "").toLowerCase();
+    if (declared === "home" || declared === "away") return declared;
+    const aName = bbALNormalizeName(teamAName || p && (p.teamAName || p.teamA) || "");
+    if (aName && aName === bbALNormalizeName(homeTeam)) return "home";
+    if (aName && aName === bbALNormalizeName(awayTeam)) return "away";
+    if (p && (p.teamAIsHome === true || p.snapshot && p.snapshot.teamAIsHome === true)) return "home";
+    if (p && (p.teamAIsHome === false || p.snapshot && p.snapshot.teamAIsHome === false)) return "away";
+    return "unknown";
+  }
+  function bbALLegacyActualValue(p, mk, roleA) {
+    const direct = [p && p.actualValue, p && p.marketActual, p && p.settledActualValue, p && p.numericActual, p && p.actualMarketValue];
+    for (const v of direct) { const n = bbALNum(v); if (n != null) return n; }
+    const raw = p && (p.actualScore != null ? p.actualScore : p.settlementScore != null ? p.settlementScore : p.finalScore);
+    if (raw == null || raw === "") return null;
+    if (["hq", "lq", "q1", "q2", "q3", "q4"].includes(mk)) {
+      const q = String(raw).match(/(?:^|\b)(\d{1,3})(?:\s*points?)?$/i);
+      if (q) return bbALNum(q[1]);
+      return null;
+    }
+    const n = bbALNum(raw);
+    if (n != null && !["winner", "handicap"].includes(mk)) return n;
+    const pair = String(raw).match(/^(\d{1,3})\s*[-–:]\s*(\d{1,3})$/);
+    if (pair) {
+      const first = Number(pair[1]), second = Number(pair[2]);
+      if (mk === "ft") return first + second;
+      if (mk === "h1" && p && (p.actualScoreIsHalf === true || p.period === "h1")) return first + second;
+      if (mk === "team_a" || mk === "h1_team_a") return roleA === "away" ? second : roleA === "home" ? first : null;
+      if (mk === "team_b" || mk === "h1_team_b") return roleA === "away" ? first : roleA === "home" ? second : null;
+      if (mk === "winner" || mk === "handicap") {
+        const homeMargin = first - second;
+        return roleA === "home" ? homeMargin : roleA === "away" ? -homeMargin : null;
+      }
+    }
+    if (mk === "winner" || mk === "handicap") {
+      const m = String(raw).match(/team\s*a\s*margin\s*(-?\d+(?:\.\d+)?)/i);
+      if (m) return Number(m[1]);
+      const m2 = String(raw).match(/(?:margin|by)\s*(-?\d+(?:\.\d+)?)/i);
+      if (m2 && roleA !== "unknown") return Number(m2[1]);
+    }
+    try {
+      if (typeof actualForMarket === "function" && !["winner", "handicap"].includes(mk)) {
+        const v = actualForMarket(Object.assign({}, p, { marketKey: mk, actualScore: raw }));
+        if (Number.isFinite(v)) return Number(v);
+      }
+    } catch (_e) {}
+    return null;
+  }
+  function bbALLegacyResult(p) {
+    const raw = String(p && (p.resultStatus || p.engineResultStatus || p.result || p.outcome) || "").toLowerCase();
+    if (["win", "won", "would_win", "correct"].includes(raw)) return "WIN";
+    if (["loss", "lost", "would_lose", "incorrect"].includes(raw)) return "LOSS";
+    if (["push", "tie", "void_push"].includes(raw)) return "PUSH";
+    if (["void", "cancelled", "canceled", "cancel"].includes(raw)) return "VOID";
+    return null;
+  }
+  function bbALImportLegacyTrackerPick(p) {
+    const rawMk = String(p && p.marketKey || "other").toLowerCase();
+    const mk = bbALLegacyMarketKey(rawMk);
+    const snapshot = p && (p.snapshot || p.predictionSnapshot || p.modelSnapshot) || {};
+    const homeTeam = String(p && (p.homeTeam || p.homeName) || snapshot.homeTeam || "").trim();
+    const awayTeam = String(p && (p.awayTeam || p.awayName) || snapshot.awayTeam || "").trim();
+    const teamAName = String(p && (p.teamAName || p.teamA) || snapshot.teamAName || "").trim();
+    const teamBName = String(p && (p.teamBName || p.teamB) || snapshot.teamBName || "").trim();
+    const roleA = bbALLegacyRoleA(p, teamAName, homeTeam, awayTeam);
+    const eventId = String(p && (p.eventId || p.competitionId || p.gameId) || "").trim();
+    const eventDateRaw = p && (p.eventDate || p.startTimestamp || p.eventTimestamp || p.kickoff || p.gameDate || p.scheduledAt) || snapshot.eventDate || snapshot.startTimestamp || snapshot.kickoff || null;
+    const eventDateMs = bbALDateMs(eventDateRaw);
+    const capturedAtRaw = p && (p.createdAt || p.predictedAt || p.createdAtMs || p.timestamp || p.predictionTimestamp) || null;
+    const capturedAtMs = bbALDateMs(capturedAtRaw);
+    const pickText = String(p && (p.predictionText || p.pick || p.side || p.prediction) || "NO PLAY").trim();
+    const isNoPlay = /^NO\s*PLAY$|^NAN$|^—$|^-$/.test(pickText.toUpperCase()) || !!(p && (p.isNoPlay || p.noPlay));
+    const line = bbALNum(p && (p.lineAtPick != null ? p.lineAtPick : p.line != null ? p.line : snapshot.line));
+    const projection = bbALNum(p && (p.projection != null ? p.projection : p.proj != null ? p.proj : snapshot.projection != null ? snapshot.projection : snapshot.proj));
+    const edge = bbALNum(p && (p.edge != null ? p.edge : snapshot.edge));
+    let side = null;
+    try { side = bbALInferSide({ marketKey: mk, pick: pickText, displayPick: pickText, side: p && p.side, edge }, teamAName || homeTeam, teamBName || awayTeam, roleA); } catch (_e) {}
+    if (!side && p && p.side) {
+      const ss = String(p.side).toUpperCase();
+      if (["OVER", "UNDER", "TEAM_A", "TEAM_B"].includes(ss)) side = ss;
+      else if (ss === "HOME") side = roleA === "home" ? "TEAM_A" : roleA === "away" ? "TEAM_B" : null;
+      else if (ss === "AWAY") side = roleA === "away" ? "TEAM_A" : roleA === "home" ? "TEAM_B" : null;
+    }
+    const result = bbALLegacyResult(p);
+    const actualValue = bbALLegacyActualValue(p, mk, roleA);
+    const stableKey = String(p && (p.pickId || p.signature || p.id || p.trackerKey) || [eventId, mk, p && p.side, line, pickText, capturedAtMs || "no-time"].join("|"));
+    const id = "BBAL-LEGACY-TRACKER-" + bbALHash(stableKey);
+    if (g_bbAL.batches.some((b) => b && b.id === id)) return false;
+    const league = String(p && (p.league || p.competition || p.leagueName) || snapshot.league || "legacy/unknown");
+    const eventIdVerified = !!eventId && !/^manual-/i.test(eventId);
+    const eventDateVerified = !!eventDateMs;
+    const identityVerified = eventIdVerified && eventDateVerified && !!homeTeam && !!awayTeam && bbALNormalizeName(homeTeam) !== bbALNormalizeName(awayTeam) && !(p && (p.homeAwayReversedWarning || p.identityWarning));
+    const evtKey = eventIdVerified ? eventId : (bbALNormalizeName(league) + "|" + bbALNormalizeName(homeTeam || teamAName) + "|" + bbALNormalizeName(awayTeam || teamBName) + "|" + (eventDateMs ? new Date(eventDateMs).toISOString().slice(0, 10) : "legacy-unknown-date"));
+    const settledAtRaw = p && (p.settledAt || p.manualSettledAt || p.updatedAt) || null;
+    const resultStatus = result === "VOID" ? "VOID" : result;
+    const batch = {
+      id, schemaVersion: BB_AL_SCHEMA_VERSION, source: "legacy-tracker-import", eventId: eventIdVerified ? eventId : null, rawEventId: eventId,
+      eventKey: evtKey, eventDate: eventDateMs ? new Date(eventDateMs).toISOString() : null, eventDateMs, eventDateVerified,
+      eventIdVerified, eventIdentityVerified: identityVerified, homeAwayReversedWarning: !!(p && (p.homeAwayReversedWarning || p.identityWarning)),
+      homeTeam, awayTeam, teamAName: teamAName || homeTeam, teamBName: teamBName || awayTeam, roleA,
+      capturedAt: capturedAtMs ? new Date(capturedAtMs).toISOString() : null, capturedAtMs,
+      league, fixtureMeta: { importedLegacy: true, identitySource: "tracked-pick fields/snapshot", originalPickId: stableKey },
+      sourceSnapshots: { legacyTrackedPick: bbALSafeClone(p, 0, { nodes: 0, maxNodes: 1800 }) },
+      modelInputs: { legacySnapshot: bbALSafeClone(snapshot, 0, { nodes: 0, maxNodes: 1400 }) },
+      configSnapshot: { legacyModelVersion: p && p.modelVersion || null, note: "Imported historical tracker record; missing fields are not invented." },
+      markets: [{
+        id: id + "|" + mk, marketKey: mk, marketName: String(p && (p.marketName || p.name) || mk), line,
+        projection, baseProjection: projection, appliedCorrection: 0, edge, rawEdge: edge, side, pick: pickText || "NO PLAY", originalPick: pickText || "NO PLAY",
+        decision: isNoPlay ? "NO PLAY" : "PLAY", gateClass: isNoPlay ? "OTHER_NO_PLAY" : "PLAY",
+        reason: String(p && (p.noPlayReason || p.reason || p.blockReason || p.note) || (isNoPlay ? "Legacy no-play/blocked record" : "Imported tracker pick")),
+        confidence: String(p && (p.confidence || p.confidenceGrade) || "UNRATED"), winProbability: bbALNum(p && p.winProbability), pushProbability: bbALNum(p && p.pushProbability),
+        odds: bbALNum(p && (p.odds || p.priceDecimal || p.price)), baseThreshold: bbALNum(p && (p.baseThreshold || snapshot.baseThreshold)), thresholdUsed: bbALNum(p && (p.effectiveThreshold || p.baseThreshold || snapshot.effectiveThreshold)),
+        thresholdAddon: 0, thresholdMultiplierUsed: 1, result: resultStatus, actualValue, settlementNote: (result && actualValue != null) ? "Imported from existing tracker; verify history if score formatting or team orientation was unusual." : result ? "Outcome imported, but numeric market result unavailable; archived, not eligible for numeric-error training." : null,
+        settledAt: result ? (bbALDateMs(settledAtRaw) ? new Date(bbALDateMs(settledAtRaw)).toISOString() : bbALNowIso()) : null,
+        modelVersion: String(p && p.modelVersion || "legacy"), configFingerprint: String(p && p.configFingerprint || ""), leagueAllowed: true,
+        features: { legacyTrackedPick: bbALSafeClone(p, 0, { nodes: 0, maxNodes: 1400 }), snapshot: bbALSafeClone(snapshot, 0, { nodes: 0, maxNodes: 1000 }) }
+      }],
+      settledMarketCount: result ? 1 : 0, trainingEligibleCount: 0
+    };
+    batch.trainingEligibleCount = bbALRecordPregameEligible(batch, batch.markets[0]) && actualValue != null ? 1 : 0;
+    bbALAddBatch(batch);
+    return true;
+  }
+  function bbALImportLegacyShadow(e, index) {
+    if (!e || typeof e !== "object") return false;
+    const stableKey = [e.eventId || "no-event", e.marketKey || "unknown", e.side || "", e.line == null ? "" : e.line, e.ts || "", index].join("|");
+    const id = "BBAL-LEGACY-SHADOW-" + bbALHash(stableKey);
+    if (g_bbAL.batches.some((b) => b && b.id === id)) return false;
+    const mk = bbALLegacyMarketKey(e.marketKey || "other");
+    const sideRaw = String(e.side || "").toUpperCase();
+    const side = ["OVER", "UNDER", "TEAM_A", "TEAM_B"].includes(sideRaw) ? sideRaw : sideRaw === "HOME" || sideRaw === "AWAY" ? null : sideRaw || null;
+    const oldResult = String(e.result || "").toUpperCase();
+    const result = oldResult === "WOULD_WIN" ? "WIN" : oldResult === "WOULD_LOSE" ? "LOSS" : oldResult === "PUSH" ? "PUSH" : null;
+    const ts = bbALDateMs(e.ts);
+    const idVerified = !!(e.eventId && !/^manual-/i.test(String(e.eventId)));
+    const batch = {
+      id, schemaVersion: BB_AL_SCHEMA_VERSION, source: "legacy-shadow-import", eventId: idVerified ? String(e.eventId) : null, rawEventId: String(e.eventId || ""),
+      eventKey: (idVerified ? String(e.eventId) : "legacy-shadow") + "|" + mk + "|" + sideRaw + "|" + String(e.line == null ? "" : e.line),
+      eventDate: null, eventDateMs: null, eventDateVerified: false, eventIdVerified: false, eventIdentityVerified: false,
+      homeAwayReversedWarning: false, homeTeam: "", awayTeam: "", teamAName: "", teamBName: "", roleA: e.roleA === "home" || e.roleA === "away" ? e.roleA : "unknown",
+      capturedAt: ts ? new Date(ts).toISOString() : null, capturedAtMs: ts, league: String(e.league || "legacy/unknown"),
+      fixtureMeta: { importedLegacy: true, historyOnly: true, reason: "Legacy shadow entries do not retain a verified kickoff time and full pre-game feature snapshot." },
+      sourceSnapshots: { legacyShadowEntry: bbALSafeClone(e, 0, { nodes: 0, maxNodes: 500 }) }, modelInputs: {},
+      configSnapshot: { note: "Historical shadow result preserved as recorded; not a training example without verified pre-game context." },
+      markets: [{
+        id: id + "|" + mk, marketKey: mk, marketName: "Legacy shadow: " + mk, line: bbALNum(e.line), projection: bbALNum(e.proj), baseProjection: bbALNum(e.proj),
+        appliedCorrection: 0, edge: null, rawEdge: null, side: side || sideRaw || null, pick: sideRaw || "BLOCKED", originalPick: sideRaw || "BLOCKED",
+        decision: "BLOCKED", gateClass: "LEGACY_SHADOW", reason: String(e.reason || e.noPlayReason || "Legacy blocked pick"), confidence: "UNRATED",
+        winProbability: null, pushProbability: null, odds: null, baseThreshold: null, thresholdUsed: null, thresholdAddon: 0, thresholdMultiplierUsed: 1,
+        result, actualValue: bbALNum(e.actual), settlementNote: result ? "Imported recorded shadow outcome; history only until the original event time, identity and model inputs can be verified." : "Unsettled legacy shadow entry imported; kickoff context unavailable.",
+        settledAt: result ? bbALNowIso() : null, modelVersion: "legacy-shadow", configFingerprint: "", leagueAllowed: true,
+        features: { legacyShadowEntry: bbALSafeClone(e, 0, { nodes: 0, maxNodes: 500 }) }
+      }], settledMarketCount: result ? 1 : 0, trainingEligibleCount: 0
+    };
+    bbALAddBatch(batch);
+    return true;
+  }
+  async function bbALTryLegacyMigration(finalAttempt) {
+    await bbALInit();
+    let importedTracker = 0, importedShadow = 0, foundTrackerState = false;
+    const tracker = bbALGetLegacyTrackerState();
+    if (tracker && Array.isArray(tracker.activePicks) && Array.isArray(tracker.archivedPicks)) {
+      const active = tracker.activePicks, archived = tracker.archivedPicks;
+      if (active.length + archived.length > 0 || finalAttempt || !g_bbAL.legacyTrackerScanned) {
+        foundTrackerState = true;
+        const seen = new Set();
+        [...active, ...archived].forEach((pick) => {
+          if (!pick || typeof pick !== "object") return;
+          const key = String(pick.pickId || pick.signature || pick.id || [pick.eventId, pick.marketKey, pick.side, pick.lineAtPick ?? pick.line, pick.createdAt, pick.actualScore].join("|"));
+          if (seen.has(key)) return; seen.add(key);
+          try { if (bbALImportLegacyTrackerPick(pick)) importedTracker++; } catch (_e) {}
+        });
+        g_bbAL.legacyTrackerImported += importedTracker;
+        g_bbAL.legacyTrackerScanned = true;
+      }
+    }
+    {
+      let oldShadow = [];
+      try { const raw = localStorage.getItem("BB_SHADOW_BLOCKED"); const parsed = raw ? JSON.parse(raw) : []; if (Array.isArray(parsed)) oldShadow = parsed; } catch (_e) {}
+      if (oldShadow.length > 0 || finalAttempt) {
+        oldShadow.forEach((entry, i) => { try { if (bbALImportLegacyShadow(entry, i)) importedShadow++; } catch (_e) {} });
+        g_bbAL.legacyShadowImported += importedShadow;
+        g_bbAL.legacyShadowScanned = true;
+      }
+    }
+    const hasTracker = g_bbAL.legacyTrackerScanned;
+    const hasShadow = g_bbAL.legacyShadowScanned;
+    if (hasTracker && hasShadow) {
+      g_bbAL.legacyMigrationStatus = "COMPLETE · " + g_bbAL.legacyTrackerImported + " tracker records, " + g_bbAL.legacyShadowImported + " shadow records imported";
+      g_bbAL.lastNotice = "Legacy migration completed before tracker cleanup. Old settled picks and shadow-blocked history are now in the independent learner ledger.";
+      bbALSaveMeta(); bbALRefreshSizeEstimate(); bbALNotify();
+      if (importedTracker + importedShadow > 0) bbALScheduleTraining();
+      return true;
+    }
+    g_bbAL.legacyMigrationStatus = "WAITING FOR ORIGINAL TRACKER HYDRATION · " + (foundTrackerState ? "tracker scanned" : "tracker not ready");
+    bbALSaveMeta(); bbALNotify();
+    return false;
+  }
+  async function bbALForceLegacyMigration() {
+    /* A visible manual retry is intentionally provided for slow Safari hydration and repeat-safe imports. */
+    if (g_bbAL.legacyTrackerImported === 0) g_bbAL.legacyTrackerScanned = false;
+    if (g_bbAL.legacyShadowImported === 0) g_bbAL.legacyShadowScanned = false;
+    const ok = await bbALTryLegacyMigration(true);
+    g_bbAL.lastNotice = "Legacy import check finished. Imported tracker: " + g_bbAL.legacyTrackerImported + "; old shadow log: " + g_bbAL.legacyShadowImported + ". Records without pre-game identity/time remain history-only.";
+    bbALSaveMeta(); bbALNotify();
+    return ok;
+  }
+  function bbALScheduleLegacyMigration() {
+    /* Retry while the original tracker hydrates. This prevents an early empty in-memory state from being mistaken for the archive. */
+    [1800, 5500, 12000, 25000].forEach((delay, idx) => setTimeout(() => {
+      bbALTryLegacyMigration(idx === 3).catch((e) => {
+        g_bbAL.legacyMigrationStatus = "IMPORT WARNING · " + String(e && e.message || e).slice(0, 180);
+        bbALSaveMeta(); bbALNotify();
+      });
+    }, delay));
+  }
+
+  function bbALReadInputNames(meta) {
+    const a = document.getElementById("teamAName")?.value || meta?.teamAName || meta?.homeTeam || "";
+    const b = document.getElementById("teamBName")?.value || meta?.teamBName || meta?.awayTeam || "";
+    return { teamAName: String(a).trim(), teamBName: String(b).trim() };
+  }
+  function bbALInferSide(p, teamAName, teamBName, roleA) {
+    const mk = String(p && p.marketKey || "").toLowerCase();
+    const currentPick = String(p && (p.pick || p.displayPick || p.bufferedPickText) || "").trim();
+    const currentIsPlay = currentPick && !/^NO PLAY$|^NAN$|^—$/.test(currentPick.toUpperCase());
+    const sourceText = currentIsPlay ? currentPick : (p && (p.blockedPick || currentPick) || "");
+    const text = String(sourceText).trim().toUpperCase().replace(/^LEAN\s+/, "");
+    if (/\bOVER\b/.test(text) || text.startsWith("OVER")) return "OVER";
+    if (/\bUNDER\b/.test(text) || text.startsWith("UNDER")) return "UNDER";
+    if (mk === "winner" || mk === "handicap") {
+      /* HOME/AWAY and Team A/B are different namespaces. Map only when the fixture confirms the role. */
+      if (text.startsWith("TEAM A")) return "TEAM_A";
+      if (text.startsWith("TEAM B")) return "TEAM_B";
+      if (text.startsWith("HOME")) return roleA === "home" ? "TEAM_A" : roleA === "away" ? "TEAM_B" : null;
+      if (text.startsWith("AWAY")) return roleA === "away" ? "TEAM_A" : roleA === "home" ? "TEAM_B" : null;
+      const na = bbALNormalizeName(teamAName), nb = bbALNormalizeName(teamBName), pt = bbALNormalizeName(text);
+      if (na && (pt === na || pt.startsWith(na + " ") || na.startsWith(pt + " "))) return "TEAM_A";
+      if (nb && (pt === nb || pt.startsWith(nb + " ") || nb.startsWith(pt + " "))) return "TEAM_B";
+      const e = bbALNum(p && p.edge);
+      if (roleA && roleA !== "unknown" && e != null && e !== 0) return e > 0 ? "TEAM_A" : "TEAM_B";
+      return null;
+    }
+    const side = typeof getPickSideFromText === "function" ? getPickSideFromText(text) : "";
+    if (side === "over") return "OVER";
+    if (side === "under") return "UNDER";
+    const edge = bbALNum(p && (p.edge != null ? p.edge : p.rawEdge));
+    if (edge != null && edge !== 0 && (BB_AL_TOTAL_MARKETS.has(mk) || BB_AL_TEAM_MARKETS.has(mk))) return edge > 0 ? "OVER" : "UNDER";
+    return null;
+  }
+  function bbALReason(p) {
+    return String(p && (p.noPlayReason || p.note || p.whyPick || p.reason || p.gateReason || p.blockReason) || "").slice(0, 500);
+  }
+  function bbALGateClass(p, side, line, edge) {
+    const pick = String(p && (p.pick || p.displayPick || "") || "").trim().toUpperCase();
+    const reason = bbALReason(p).toLowerCase();
+    const dataSuspect = !!(p && (p.dataErrorSuspect || p.marketIntegrity?.dataErrorSuspect));
+    const hasLine = line != null || String(p && p.marketKey || "").toLowerCase() === "winner";
+    const hardFlag = dataSuspect || /implausible|data error|missing\/invalid|invalid market|no projection|probability unavailable|integrity|contradiction|feed failed|period format|not eligible|not supported|insufficient data|injur(?:y|ies)|volatility|blowout|line unavailable|unverified|market disabled|not allowed|safety|lock restricted|stale|unsupported|grade gate|confidence gate|price gate/.test(reason);
+    if (!hasLine || edge == null || !side) return "INPUT_OR_SIDE_MISSING";
+    if (hardFlag) return "SAFETY_OR_DATA_BLOCK";
+    if (pick && pick !== "NO PLAY" && pick !== "NAN" && pick !== "—") return "PLAY";
+    if (/edge|threshold|below required|did not clear|absolute margin|edge[_ -]?(low|below)|minimum edge/.test(reason)) return "THRESHOLD_BLOCK";
+    const usedThreshold = bbALNum(p && (p.effectiveThreshold != null ? p.effectiveThreshold : p.baseThreshold));
+    if (hasLine && side && edge != null && usedThreshold != null && usedThreshold > 0 && Math.abs(edge) + 1e-9 < usedThreshold) return "THRESHOLD_BLOCK";
+    return "OTHER_NO_PLAY";
+  }
+  function bbALCaptureVisibleInputs() {
+    const out = [];
+    try {
+      const nodes = document.querySelectorAll ? Array.from(document.querySelectorAll("input,textarea,select")) : [];
+      nodes.forEach((el) => {
+        if (!el) return;
+        const type = String(el.type || "").toLowerCase();
+        if (["password", "hidden", "file", "submit", "button", "reset"].includes(type)) return;
+        const ident = [el.id, el.name, el.getAttribute && el.getAttribute("aria-label"), el.placeholder, el.type].filter(Boolean).join(" ").slice(0, 180);
+        if (/api.?key|access.?token|refresh.?token|password|secret|authorization|auth.?token|e-?mail|phone|session.?id|cookie/i.test(ident)) return;
+        let visible = true;
+        try { if (typeof el.getClientRects === "function") visible = el.getClientRects().length > 0; } catch (_e) {}
+        /* Include hidden app-controlled textareas only if their identifiers clearly denote model inputs. */
+        const relevant = /team|score|history|series|form|h2h|line|market|player|injur|pace|offen|defen|quarter|period|recency|league|fixture|handicap|total|project|predict/i.test(ident);
+        if (!visible && !relevant) return;
+        const value = el.value == null ? "" : String(el.value);
+        if (!value.trim()) return;
+        out.push({ id: String(el.id || "").slice(0, 120), name: String(el.name || "").slice(0, 120), label: ident, type: type || "text", value: value.length > 1800 ? value.slice(0, 1800) + "…[truncated]" : value, checked: typeof el.checked === "boolean" ? el.checked : null });
+      });
+    } catch (_e) {}
+    return out.slice(0, 140);
+  }
+  function bbALCapturePredictionBatch(args) {
+    try {
+      args = args || {};
+      const finalPicks = Array.isArray(args.finalPicks) ? args.finalPicks : [];
+      /* Even a run where every market failed to produce a pick must leave a run-level audit record. */
+      const meta = args.fixtureMeta || (typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : {}) || {};
+      const league = String(args.league || window.__lastRunLeague || document.getElementById("leagueSelect")?.value || "unknown");
+      const names = bbALReadInputNames(meta);
+      const roleA = (function () {
+        try { const r = typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : ""; if (r === "home" || r === "away") return r; } catch (_e) {}
+        if (bbALNormalizeName(names.teamAName) && bbALNormalizeName(names.teamAName) === bbALNormalizeName(meta.homeTeam)) return "home";
+        if (bbALNormalizeName(names.teamAName) && bbALNormalizeName(names.teamAName) === bbALNormalizeName(meta.awayTeam)) return "away";
+        return "unknown";
+      })();
+      const capturedAtMs = Date.now();
+      const eventDateMs = bbALDateMs(meta.eventDate || meta.startTimestamp || meta.eventTimestamp);
+      const rawEventId = String(meta.eventId || "");
+      const verifiedEventId = rawEventId && !/^manual-/i.test(rawEventId) ? rawEventId : "";
+      const eventKey = verifiedEventId || (bbALNormalizeName(league) + "|" + bbALNormalizeName(names.teamAName) + "|" + bbALNormalizeName(names.teamBName) + "|" + (eventDateMs ? new Date(eventDateMs).toISOString().slice(0, 10) : new Date(capturedAtMs).toISOString().slice(0, 10)));
+      const identityWarning = !!meta.homeAwayReversedWarning;
+      const runId = "BBAL-" + capturedAtMs.toString(36) + "-" + (++bbALRunCounter).toString(36) + "-" + Math.random().toString(36).slice(2, 7);
+      const finalLines = bbALSafeClone(args.finalLines || {}, 0, { nodes: 0, maxNodes: 1800 }) || {};
+      const diagnostics = bbALSafeClone(args.diagnostics || {}, 0, { nodes: 0, maxNodes: 2500 }) || {};
+      const marketRows = finalPicks.map((p, index) => {
+        if (!p || typeof p !== "object") return null;
+        const mk = String(p.marketKey || "unknown").toLowerCase();
+        const lineRaw = p.displayLineUsed != null && p.displayLineUsed !== "" ? p.displayLineUsed : p.line != null ? p.line : finalLines[mk];
+        const line = bbALNum(lineRaw);
+        const projection = bbALNum((mk === "winner" || mk === "handicap") && p.marginProjection != null ? p.marginProjection : p.proj != null ? p.proj : p.projection != null ? p.projection : p.expectedPoints);
+        const rawProjection = bbALNum(p.bbALRawProjection != null ? p.bbALRawProjection : projection);
+        const edge = bbALNum(p.edge != null ? p.edge : p.rawEdge);
+        const pick = String(p.pick || p.displayPick || "NO PLAY").trim() || "NO PLAY";
+        const side = bbALInferSide(p, names.teamAName, names.teamBName, roleA);
+        const baseThreshold = (function () {
+          try { if (bbALOriginalGetLeagueEdgePointThreshold) { const v = bbALOriginalGetLeagueEdgePointThreshold(league, mk); return bbALNum(v); } } catch (_e) {}
+          return bbALNum(p.baseThreshold != null ? p.baseThreshold : p.effectiveThreshold);
+        })();
+        const multiplier = bbALActiveMultiplier(bbALBucket(mk) || "ft");
+        const thresholdUsed = bbALNum(p.effectiveThreshold != null ? p.effectiveThreshold : p.baseThreshold);
+        const thresholdAddon = baseThreshold != null && thresholdUsed != null ? thresholdUsed - baseThreshold * multiplier : 0;
+        const reason = bbALReason(p);
+        const gateClass = bbALGateClass(p, side, line, edge);
+        const keys = ["edge", "rawEdge", "line", "displayLineUsed", "proj", "projection", "marginProjection", "preAdjustmentProj", "winProbability", "pushProbability", "lossProbability", "confidence", "confidenceDisplay", "confidenceGrade", "volatility", "volatilityRatio", "volLimit", "effectiveThreshold", "baseThreshold", "edgeVsMarket", "evPerUnit", "price", "odds", "priceDecimal", "priceAmerican", "noVigProb", "overProbability", "underProbability", "isLock", "lockRestricted", "modelType", "modelScope", "modelVersion", "sampleTier", "settledResults", "requiredResults", "hasH2H", "h2hCount", "trap", "trapEffectMethod", "injuryBucket", "injuryAdjustment", "gamePaceGapRisk", "gameDefensiveFloorFlag", "gameBlowoutGap", "gameVolatilityBlock", "marketIntegrity", "confidenceTrace", "blockedPick", "noPlayReason", "note", "whyPick", "pick", "displayPick", "bufferedPickText", "validationStatus", "validationErrors", "validationWarnings", "nearThresholdGradeC", "nearThresholdShortfallPoints", "lineSanityWarnings", "configSnapshot", "snapshot", "dataSnapshotId", "featureSchemaHash", "configFingerprint", "underEdgeFactorUsed", "adjustmentDependence", "teamAName", "teamBName", "homeTeam", "awayTeam", "pace", "net", "restDays", "restDaysA", "restDaysB", "injuryCountA", "injuryCountB", "foulRisk", "form", "h2h", "recencyWeights", "featureValues", "diagnostics"];
+        const features = {};
+        keys.forEach((k) => { if (Object.prototype.hasOwnProperty.call(p, k)) features[k] = bbALSafeClone(p[k], 0, { nodes: 0, maxNodes: 300 }); });
+        if (p.marketIntegrity) features.marketIntegrity = bbALSafeClone(p.marketIntegrity, 0, { nodes: 0, maxNodes: 300 });
+        const marketAllowed = (function () { try { return typeof getAllowedMarketsForLeague === "function" ? getAllowedMarketsForLeague(league).has(mk) : true; } catch (_e) { return true; } })();
+        return {
+          id: runId + "|" + mk + "|" + index,
+          marketKey: mk,
+          marketName: String(p.name || p.marketName || mk),
+          line,
+          projection,
+          baseProjection: rawProjection,
+          appliedCorrection: bbALNum(p.bbALAppliedCorrection) || 0,
+          edge,
+          rawEdge: bbALNum(p.rawEdge),
+          side,
+          pick,
+          originalPick: String(p.bbALOriginalPick || pick),
+          decision: pick.toUpperCase() === "NO PLAY" || pick.toUpperCase() === "NAN" ? "NO PLAY" : "PLAY",
+          gateClass,
+          reason,
+          confidence: String(p.confidence || p.confidenceDisplay || "UNRATED"),
+          winProbability: bbALNum(p.winProbability),
+          pushProbability: bbALNum(p.pushProbability),
+          odds: bbALNum(p.priceDecimal != null ? p.priceDecimal : p.odds != null ? p.odds : p.price),
+          baseThreshold,
+          thresholdUsed,
+          thresholdAddon: Number.isFinite(thresholdAddon) ? thresholdAddon : 0,
+          thresholdMultiplierUsed: multiplier,
+          result: null,
+          actualValue: null,
+          settlementNote: null,
+          settledAt: null,
+          modelVersion: String(p.modelVersion || ""),
+          configFingerprint: String(p.configFingerprint || ""),
+          leagueAllowed: marketAllowed,
+          features
+        };
+      }).filter(Boolean);
+      const configSnapshot = {
+        tunables: bbALConfigInventory(),
+        thresholdMultipliers: Object.assign({}, g_bbAL.thresholdMultipliers),
+        appliedThresholds: marketRows.reduce((a, m) => { if (m.baseThreshold != null) a[m.marketKey] = { base: m.baseThreshold, used: m.thresholdUsed, multiplier: m.thresholdMultiplierUsed, addon: m.thresholdAddon }; return a; }, {}),
+        modelVersions: Object.keys(g_bbAL.models).reduce((a, k) => { a[k] = g_bbAL.models[k] && g_bbAL.models[k].version || null; return a; }, {}),
+        diagnostics
+      };
+      const batch = {
+        id: runId,
+        schemaVersion: BB_AL_SCHEMA_VERSION,
+        eventId: verifiedEventId || null,
+        rawEventId,
+        eventKey,
+        eventDate: eventDateMs ? new Date(eventDateMs).toISOString() : null,
+        eventDateMs,
+        eventDateVerified: !!eventDateMs,
+        eventIdVerified: !!verifiedEventId,
+        eventIdentityVerified: !!verifiedEventId && !identityWarning && !!names.teamAName && !!names.teamBName && bbALNormalizeName(names.teamAName) !== bbALNormalizeName(names.teamBName),
+        homeAwayReversedWarning: identityWarning,
+        teamAId: String(roleA === "away" ? (meta.awayId || meta.awayTeamId || "") : roleA === "home" ? (meta.homeId || meta.homeTeamId || "") : (meta.teamAId || "")),
+        teamBId: String(roleA === "away" ? (meta.homeId || meta.homeTeamId || "") : roleA === "home" ? (meta.awayId || meta.awayTeamId || "") : (meta.teamBId || "")),
+        eventDateSourceField: meta.eventDateSourceField || null,
+        capturedAt: new Date(capturedAtMs).toISOString(),
+        capturedAtMs,
+        league,
+        homeTeam: String(meta.homeTeam || names.teamAName || ""),
+        awayTeam: String(meta.awayTeam || names.teamBName || ""),
+        teamAName: names.teamAName,
+        teamBName: names.teamBName,
+        roleA,
+        seasonType: meta.seasonType || null,
+        fixtureMeta: bbALSafeClone(meta, 0, { nodes: 0, maxNodes: 700 }),
+        predictionIntegrity: bbALSafeClone(window.__lastPredictionIntegrity || null, 0, { nodes: 0, maxNodes: 250 }),
+        sourceSnapshots: {
+          appContext: bbALSafeClone(window.AppState && window.AppState.context ? window.AppState.context.data || null : null, 0, { nodes: 0, maxNodes: 1000 }),
+          visibleModelInputs: bbALSafeClone(bbALCaptureVisibleInputs(), 0, { nodes: 0, maxNodes: 900 }),
+          autoFetchEventMeta: bbALSafeClone(window.__autoFetchEventMeta || null, 0, { nodes: 0, maxNodes: 500 }),
+          sportBookLineSummary: bbALSafeClone(window.__bbSportyLast || null, 0, { nodes: 0, maxNodes: 350 }),
+          lastPredictionIntegrity: bbALSafeClone(window.__lastPredictionIntegrity || null, 0, { nodes: 0, maxNodes: 350 })
+        },
+        modelInputs: {
+          finalLines,
+          diagnostics,
+          appliedConfig: diagnostics.appliedConfig || null,
+          recencyWeightsByMarket: diagnostics.recencyWeightsByMarket || null,
+          ftHasH2H: diagnostics.ftHasH2H ?? null,
+          h1HasH2H: diagnostics.h1HasH2H ?? null,
+          ftFullModel: diagnostics.ftFullModel ?? null,
+          h1FullModel: diagnostics.h1FullModel ?? null,
+          netA: diagnostics.netA ?? null,
+          netB: diagnostics.netB ?? null,
+          injuryAdjustment: diagnostics.injuryAdjustment || null,
+          injMultA: diagnostics.injMultA ?? null,
+          injMultB: diagnostics.injMultB ?? null
+        },
+        configSnapshot,
+        marketCount: marketRows.length,
+        markets: marketRows,
+        status: "PENDING",
+        settledMarketCount: 0,
+        trainingEligibleCount: 0
+      };
+      batch.contentHash = bbALHash(bbALCanonicalJson({ eventKey, league, capturedAtMs, markets: marketRows.map((m) => [m.marketKey, m.line, m.pick, m.edge]) }));
+      bbALAddBatch(batch);
+      g_bbAL.lastNotice = "Saved " + marketRows.length + " markets from " + (names.teamAName || "Team A") + " vs " + (names.teamBName || "Team B") + ", including NO PLAY decisions.";
+      bbALSaveMeta();
+      return batch;
+    } catch (e) {
+      g_bbAL.lastNotice = "Prediction capture warning: " + String(e && e.message || e);
+      try { if (typeof engineDebug === "function") engineDebug("BBAL: prediction capture failed", { error: String(e && e.message || e) }); } catch (_e) {}
+      return null;
+    }
+  }
+  function bbALResolveTeamARole(batch, competition) {
+    if (batch && (batch.roleA === "home" || batch.roleA === "away")) return batch.roleA;
+    const comps = competition && Array.isArray(competition.competitors) ? competition.competitors : [];
+    const home = comps.find((c) => c.homeAway === "home") || comps[0];
+    const away = comps.find((c) => c.homeAway === "away") || comps[1];
+    if (!home || !away) return "unknown";
+    const name = (c) => c && (c.team?.displayName || c.team?.name || c.displayName || c.name || "");
+    const aid = String(batch && (batch.metaTeamAId || batch.teamAId) || "");
+    if (aid && [String(home.id || ""), String(home.team?.id || "")].includes(aid)) return "home";
+    if (aid && [String(away.id || ""), String(away.team?.id || "")].includes(aid)) return "away";
+    const a = bbALNormalizeName(batch && (batch.teamAName || batch.homeTeam));
+    const hn = bbALNormalizeName(name(home)), an = bbALNormalizeName(name(away));
+    if (a && (a === hn || (typeof bbScNameMatch === "function" && bbScNameMatch(a, home)))) return "home";
+    if (a && (a === an || (typeof bbScNameMatch === "function" && bbScNameMatch(a, away)))) return "away";
+    return "unknown";
+  }
+  function bbALCompetitionScores(batch, competition) {
+    const comps = Array.isArray(competition && competition.competitors) ? competition.competitors : [];
+    const home = comps.find((c) => c.homeAway === "home") || comps[0];
+    const away = comps.find((c) => c.homeAway === "away") || comps[1];
+    if (!home || !away) return null;
+    const n = (v) => Number(v && typeof v === "object" ? (v.value != null ? v.value : v.displayValue) : v);
+    const h = n(home.score), a = n(away.score);
+    if (!Number.isFinite(h) || !Number.isFinite(a)) return null;
+    const lh = (home.linescores || []).map(n), la = (away.linescores || []).map(n);
+    const has4 = lh.length >= 4 && la.length >= 4 && lh.slice(0, 4).every(Number.isFinite) && la.slice(0, 4).every(Number.isFinite);
+    const aRole = bbALResolveTeamARole(batch, competition);
+    const teamAIsHome = aRole === "home";
+    const teamA = teamAIsHome ? h : a;
+    const teamB = teamAIsHome ? a : h;
+    const sum = (arr, i, j) => arr.slice(i, j).reduce((x, y) => x + y, 0);
+    return {
+      home, away, homeScore: h, awayScore: a, linesHome: lh, linesAway: la, has4, roleA: aRole,
+      teamAScore: teamA, teamBScore: teamB, teamAMargin: teamA - teamB,
+      fullTotal: h + a,
+      h1Total: has4 ? sum(lh, 0, 2) + sum(la, 0, 2) : NaN,
+      h2Total: has4 ? sum(lh, 2, 4) + sum(la, 2, 4) : NaN,
+      teamAH1: has4 ? sum(teamAIsHome ? lh : la, 0, 2) : NaN,
+      teamBH1: has4 ? sum(teamAIsHome ? la : lh, 0, 2) : NaN,
+      teamAH2: has4 ? sum(teamAIsHome ? lh : la, 2, 4) : NaN,
+      teamBH2: has4 ? sum(teamAIsHome ? la : lh, 2, 4) : NaN,
+      quarterTotals: has4 ? [0, 1, 2, 3].map((i) => lh[i] + la[i]) : null
+    };
+  }
+  function bbALActualForMarket(m, scores, competition) {
+    const mk = String(m && m.marketKey || "").toLowerCase();
+    if (!scores) return null;
+    if (mk === "ft") return scores.fullTotal;
+    if (mk === "h1") return scores.h1Total;
+    if (mk === "h2") return scores.h2Total;
+    if (["team_a", "team_b", "h1_team_a", "h1_team_b", "winner", "handicap"].includes(mk) && scores.roleA === "unknown") return null;
+    if (mk === "team_a") return scores.teamAScore;
+    if (mk === "team_b") return scores.teamBScore;
+    if (mk === "h1_team_a") return scores.teamAH1;
+    if (mk === "h1_team_b") return scores.teamBH1;
+    if (mk === "winner" || mk === "handicap") return scores.teamAMargin;
+    if (/^q[1-4]$/.test(mk)) return scores.quarterTotals ? scores.quarterTotals[Number(mk.slice(1)) - 1] : null;
+    if (mk === "hq" || mk === "lq") {
+      if (!scores.quarterTotals || !scores.quarterTotals.length) return null;
+      return mk === "hq" ? Math.max.apply(null, scores.quarterTotals) : Math.min.apply(null, scores.quarterTotals);
+    }
+    return null;
+  }
+  function bbALScoreResult(m, actualValue) {
+    const side = String(m && m.side || "").toUpperCase();
+    const line = bbALNum(m && m.line);
+    if (actualValue == null || !Number.isFinite(Number(actualValue))) return null;
+    if (side === "OVER" || side === "UNDER") {
+      if (line == null) return null;
+      if (Math.abs(Number(actualValue) - line) < 1e-9) return "PUSH";
+      const overWins = Number(actualValue) > line;
+      return ((side === "OVER") === overWins) ? "WIN" : "LOSS";
+    }
+    if (side === "TEAM_A" || side === "TEAM_B") {
+      const mk = String(m.marketKey || "").toLowerCase();
+      if (mk === "winner" || mk === "handicap") {
+        /* The engine stores handicap as the signed Team-A line; grade the margin after that spread is applied. */
+        const judgedMargin = mk === "handicap" ? Number(actualValue) + (line == null ? 0 : line) : Number(actualValue);
+        if (Math.abs(judgedMargin) < 1e-9) return "PUSH";
+        const aWins = judgedMargin > 0;
+        return ((side === "TEAM_A") === aWins) ? "WIN" : "LOSS";
+      }
+    }
+    return null;
+  }
+  function bbALSettleFromCompetition(eventId, competition, gameFinal) {
+    try {
+      const final = !!(gameFinal || (typeof bbIsCompetitionFinalStatus === "function" && bbIsCompetitionFinalStatus(competition)));
+      if (!final || !eventId || !competition) return false;
+      try { if (typeof bbEspnNotPlayed === "function" && bbEspnNotPlayed(competition.status)) return false; } catch (_e) {}
+      const eid = String(eventId);
+      const matching = g_bbAL.batches.filter((b) => String(b.eventId || "") === eid && b.markets && b.markets.some((m) => !m.result && !m.settlementNote));
+      if (!matching.length) return false;
+      const changed = [];
+      matching.forEach((batch) => {
+        const scores = bbALCompetitionScores(batch, competition);
+        if (!scores) return;
+        batch.markets.forEach((m) => {
+          if (m.result || m.settlementNote) return;
+          const actual = bbALActualForMarket(m, scores, competition);
+          if (actual == null || !Number.isFinite(Number(actual))) {
+            m.settlementNote = "Final event found; this market needs unsupported period/player data or a manual market value.";
+            return;
+          }
+          m.actualValue = Number(actual);
+          m.settledAt = bbALNowIso();
+          const res = bbALScoreResult(m, actual);
+          m.result = res || "OBSERVED";
+          if (!res) m.settlementNote = "Actual market value recorded; no directional side/line was available to grade.";
+          else m.settlementNote = null;
+        });
+        batch.settledMarketCount = batch.markets.filter((m) => !!m.result).length;
+        batch.trainingEligibleCount = batch.markets.filter((m) => bbALRecordPregameEligible(batch, m) && m.actualValue != null).length;
+        batch.status = batch.markets.every((m) => !!m.result || !!m.settlementNote) ? "SETTLED / REVIEWED" : (batch.settledMarketCount ? "PARTLY SETTLED" : "PENDING");
+        changed.push(batch);
+      });
+      changed.forEach((b) => bbALSaveBatch(b));
+      if (changed.length) {
+        g_bbAL.lastNotice = "Auto-settled " + changed.length + " saved prediction run(s) for event " + eid + ". NO PLAY markets were graded too.";
+        bbALSaveMeta();
+        bbALScheduleTraining();
+        bbALNotify();
+      }
+      return changed.length > 0;
+    } catch (e) {
+      try { if (typeof engineDebug === "function") engineDebug("BBAL: settlement failed", { error: String(e && e.message || e), eventId }); } catch (_e) {}
+      return false;
+    }
+  }
+  function bbALRecordPregameEligible(batch, market) {
+    if (!batch || !market || batch.eventDateMs == null || batch.capturedAtMs == null) return false;
+    if (batch.capturedAtMs >= batch.eventDateMs) return false;
+    if (!batch.eventDateVerified || !batch.eventIdVerified || batch.eventIdentityVerified === false || batch.homeAwayReversedWarning) return false;
+    if (!market.marketKey || !BB_AL_MARKETS.has(String(market.marketKey).toLowerCase())) return false;
+    if (["team_a", "team_b", "h1_team_a", "h1_team_b", "winner", "handicap"].includes(String(market.marketKey).toLowerCase()) && !["home", "away"].includes(batch.roleA)) return false;
+    return true;
+  }
+  function bbALLatestByEventMarket(markets, predicate) {
+    const by = new Map();
+    markets.forEach((row) => {
+      if (!row || !predicate(row.batch, row.market)) return;
+      const k = row.batch.eventKey + "|" + row.market.marketKey;
+      const prior = by.get(k);
+      if (!prior || row.batch.capturedAtMs > prior.batch.capturedAtMs) by.set(k, row);
+    });
+    return Array.from(by.values()).sort((a, b) => a.batch.eventDateMs - b.batch.eventDateMs);
+  }
+  function bbALAllMarketRows() {
+    const out = [];
+    g_bbAL.batches.forEach((batch) => (batch.markets || []).forEach((market) => out.push({ batch, market })));
+    return out;
+  }
+  function bbALAllTrainingRows(marketKey) {
+    const rows = bbALLatestByEventMarket(bbALAllMarketRows(), (b, m) => {
+      if (!bbALRecordPregameEligible(b, m)) return false;
+      if (marketKey && String(m.marketKey).toLowerCase() !== String(marketKey).toLowerCase()) return false;
+      return m.actualValue != null && bbALNum(m.baseProjection) != null && !!m.settledAt;
+    });
+    return rows;
+  }
+  function bbALGateAllowedForThreshold(m) {
+    return !!m && (m.gateClass === "PLAY" || m.gateClass === "THRESHOLD_BLOCK") && m.side && bbALNum(m.edge) != null && bbALNum(m.baseThreshold) != null && ["WIN", "LOSS", "PUSH"].includes(String(m.result || "").toUpperCase());
+  }
+  function bbALGetThresholdEvents(bucket) {
+    const rows = bbALLatestByEventMarket(bbALAllMarketRows(), (b, m) => {
+      if (!bbALRecordPregameEligible(b, m) || !bbALGateAllowedForThreshold(m)) return false;
+      return bbALBucket(m.marketKey) === bucket;
+    });
+    const by = new Map();
+    rows.forEach((r) => {
+      const k = r.batch.eventKey;
+      if (!by.has(k)) by.set(k, { key: k, eventDateMs: r.batch.eventDateMs, records: [] });
+      by.get(k).records.push(r);
+    });
+    return Array.from(by.values()).sort((a, b) => a.eventDateMs - b.eventDateMs);
+  }
+  function bbALReturnForOutcome(outcome) {
+    const r = String(outcome || "").toUpperCase();
+    return r === "WIN" ? 1 : r === "LOSS" ? -1 : 0;
+  }
+  function bbALScoreEventAtMultiplier(event, multiplier) {
+    let sum = 0, selected = 0, win = 0, loss = 0;
+    const recs = event.records || [];
+    recs.forEach((r) => {
+      const m = r.market;
+      const base = bbALNum(m.baseThreshold), edge = bbALNum(m.edge), addon = bbALNum(m.thresholdAddon) || 0;
+      if (base == null || edge == null) return;
+      const threshold = base * multiplier + addon;
+      if (Math.abs(edge) + 1e-9 < threshold) return;
+      selected++;
+      const ret = bbALReturnForOutcome(m.result);
+      sum += ret;
+      if (ret > 0) win++; else if (ret < 0) loss++;
+    });
+    return { score: sum / Math.max(1, recs.length), selected, win, loss };
+  }
+  function bbALBootCi(diffs, nBoot) {
+    if (!Array.isArray(diffs) || !diffs.length) return { mean: 0, low: 0, high: 0 };
+    const mean = diffs.reduce((a, b) => a + b, 0) / diffs.length;
+    const boots = [];
+    let seed = 1234567 + diffs.length * 31;
+    const rnd = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+    const count = Math.max(200, Number(nBoot) || 400);
+    for (let j = 0; j < count; j++) {
+      let s = 0;
+      for (let k = 0; k < diffs.length; k++) s += diffs[Math.floor(rnd() * diffs.length)];
+      boots.push(s / diffs.length);
+    }
+    boots.sort((a, b) => a - b);
+    return { mean, low: boots[Math.floor(count * 0.025)] ?? mean, high: boots[Math.floor(count * 0.975)] ?? mean };
+  }
+  function bbALEvaluateMultiplier(events, multiplier) {
+    const eventScores = events.map((e) => bbALScoreEventAtMultiplier(e, multiplier));
+    const active = eventScores.filter((e) => e.selected > 0);
+    return {
+      utility: eventScores.reduce((s, e) => s + e.score, 0) / Math.max(1, eventScores.length),
+      selectedEvents: active.length,
+      selectedMarkets: active.reduce((s, e) => s + e.selected, 0),
+      hitRate: active.reduce((s, e) => s + e.win, 0) / Math.max(1, active.reduce((s, e) => s + e.win + e.loss, 0)),
+      eventScores
+    };
+  }
+  function bbALAnalyzeThresholdBucket(bucket) {
+    const events = bbALGetThresholdEvents(bucket);
+    const current = bbALActiveMultiplier(bucket);
+    if (events.length < BB_AL_MIN_THRESHOLD_EVENTS) return { bucket, status: "GATHERING", eventCount: events.length, required: BB_AL_MIN_THRESHOLD_EVENTS, currentMultiplier: current, reason: "Guard needs " + BB_AL_MIN_THRESHOLD_EVENTS + " distinct, pre-game settled events in this market family." };
+    const cut = Math.max(1, Math.min(events.length - 1, Math.floor(events.length * 0.70)));
+    const train = events.slice(0, cut), test = events.slice(cut);
+    if (test.length < 25) return { bucket, status: "GATHERING", eventCount: events.length, required: BB_AL_MIN_THRESHOLD_EVENTS, currentMultiplier: current, reason: "Not enough chronological holdout events." };
+    const grid = Array.from(new Set([current - 0.10, current - 0.05, current, current + 0.05, current + 0.10].map((v) => Math.round(Math.max(BB_AL_THRESHOLD_MULT_MIN, Math.min(BB_AL_THRESHOLD_MULT_MAX, v)) * 100) / 100))).sort((a, b) => a - b);
+    const baselineTrain = bbALEvaluateMultiplier(train, current);
+    let best = { multiplier: current, ...baselineTrain };
+    grid.forEach((mult) => {
+      const ev = bbALEvaluateMultiplier(train, mult);
+      if (ev.utility > best.utility + 1e-9) best = { multiplier: mult, ...ev };
+    });
+    if (Math.abs(best.multiplier - current) < 0.001) return { bucket, status: "NO_CHANGE", eventCount: events.length, trainCount: train.length, testCount: test.length, currentMultiplier: current, candidateMultiplier: current, reason: "Current multiplier performed best on the training period." };
+    const baseTest = bbALEvaluateMultiplier(test, current);
+    const candTest = bbALEvaluateMultiplier(test, best.multiplier);
+    const diffs = candTest.eventScores.map((x, i) => x.score - baseTest.eventScores[i].score);
+    const ci = bbALBootCi(diffs, 500);
+    const enoughSelections = baseTest.selectedEvents >= 18 && candTest.selectedEvents >= 18;
+    const promote = enoughSelections && (ci.mean >= 0.035) && (ci.low > 0);
+    return {
+      bucket, status: promote ? "PROVEN" : "HOLDOUT_FAILED", eventCount: events.length, trainCount: train.length, testCount: test.length,
+      currentMultiplier: current, candidateMultiplier: best.multiplier,
+      trainUtilityCurrent: baselineTrain.utility, trainUtilityCandidate: best.utility,
+      testUtilityCurrent: baseTest.utility, testUtilityCandidate: candTest.utility,
+      testDelta: ci.mean, ciLow: ci.low, ciHigh: ci.high,
+      baselineSelectedEvents: baseTest.selectedEvents, candidateSelectedEvents: candTest.selectedEvents,
+      baselineHitRate: baseTest.hitRate, candidateHitRate: candTest.hitRate,
+      reason: promote ? "Candidate improved chronological holdout performance; paired event bootstrap lower bound is above zero." : "Not proven: Guard requires ≥18 selected holdout events on each strategy, mean event-utility lift ≥0.035, and a positive 95% paired-bootstrap lower bound."
+    };
+  }
+  function bbALMarketFamily(mk) {
+    const k = String(mk || "").toLowerCase();
+    if (BB_AL_TOTAL_MARKETS.has(k)) return "total";
+    if (BB_AL_TEAM_MARKETS.has(k)) return "team";
+    if (k === "winner" || k === "handicap") return "margin";
+    return "other";
+  }
+  function bbALTeamKeys(sample) {
+    return [bbALNormalizeName(sample.teamAName), bbALNormalizeName(sample.teamBName)];
+  }
+  function bbALPairKey(sample) {
+    const [a, b] = bbALTeamKeys(sample);
+    if (!a || !b) return null;
+    if (String(sample.marketKey || "") === "winner" || String(sample.marketKey || "") === "handicap") return a + "::" + b;
+    return [a, b].sort().join("::");
+  }
+  function bbALClamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+  function bbALMean(values) { return values.length ? values.reduce((a, b) => a + b, 0) / values.length : 0; }
+  function bbALFitBias(rows) {
+    const residuals = rows.map((r) => Number(r.actualValue) - Number(r.baseProjection)).filter(Number.isFinite);
+    const rawGlobal = bbALMean(residuals);
+    const model = { version: "bias-1", enabled: false, n: rows.length, trainedAt: bbALNowIso(), globalBias: bbALClamp(rawGlobal * rows.length / (rows.length + 30), -6, 6), leagueBiases: {}, teamEffects: {}, matchupEffects: {}, validation: null };
+    const byLeague = new Map();
+    rows.forEach((r) => {
+      const lk = String(r.league || "unknown");
+      if (!byLeague.has(lk)) byLeague.set(lk, []);
+      byLeague.get(lk).push(r);
+    });
+    byLeague.forEach((list, lk) => {
+      if (list.length < 8) return;
+      const residual = bbALMean(list.map((r) => Number(r.actualValue) - Number(r.baseProjection) - model.globalBias));
+      model.leagueBiases[lk] = { value: bbALClamp(residual * list.length / (list.length + 18), -4, 4), n: list.length };
+    });
+    const teamAgg = new Map();
+    rows.forEach((r) => {
+      const a = bbALNormalizeName(r.teamAName), b = bbALNormalizeName(r.teamBName);
+      const mk = String(r.marketKey || "").toLowerCase();
+      const leagueBias = model.leagueBiases[String(r.league || "unknown")]?.value || 0;
+      const baseResidual = Number(r.actualValue) - Number(r.baseProjection) - model.globalBias - leagueBias;
+      if (!Number.isFinite(baseResidual)) return;
+      const add = (name, value) => {
+        if (!name) return;
+        if (!teamAgg.has(name)) teamAgg.set(name, []);
+        teamAgg.get(name).push(value);
+      };
+      if (BB_AL_TOTAL_MARKETS.has(mk)) { add(a, baseResidual / 2); add(b, baseResidual / 2); }
+      else if (BB_AL_TEAM_MARKETS.has(mk)) {
+        const isA = mk.endsWith("team_a") || mk === "team_a";
+        add(isA ? a : b, baseResidual);
+      } else if (mk === "winner" || mk === "handicap") { add(a, baseResidual / 2); add(b, -baseResidual / 2); }
+    });
+    teamAgg.forEach((list, name) => {
+      if (list.length < 6) return;
+      const mean = bbALMean(list);
+      model.teamEffects[name] = { value: bbALClamp(mean * list.length / (list.length + 18), -3, 3), n: list.length };
+    });
+    const pairAgg = new Map();
+    rows.forEach((r) => {
+      const pair = bbALPairKey(r);
+      if (!pair) return;
+      const mk = String(r.marketKey || "").toLowerCase();
+      const [a, b] = bbALTeamKeys(r);
+      const lb = model.leagueBiases[String(r.league || "unknown")]?.value || 0;
+      let predicted = model.globalBias + lb;
+      if (BB_AL_TOTAL_MARKETS.has(mk)) predicted += (model.teamEffects[a]?.value || 0) + (model.teamEffects[b]?.value || 0);
+      else if (BB_AL_TEAM_MARKETS.has(mk)) predicted += model.teamEffects[mk.endsWith("team_a") || mk === "team_a" ? a : b]?.value || 0;
+      else if (mk === "winner" || mk === "handicap") predicted += (model.teamEffects[a]?.value || 0) - (model.teamEffects[b]?.value || 0);
+      const remainder = Number(r.actualValue) - Number(r.baseProjection) - predicted;
+      if (!Number.isFinite(remainder)) return;
+      if (!pairAgg.has(pair)) pairAgg.set(pair, []);
+      pairAgg.get(pair).push(remainder);
+    });
+    pairAgg.forEach((list, pair) => {
+      if (list.length < 4) return;
+      model.matchupEffects[pair] = { value: bbALClamp(bbALMean(list) * list.length / (list.length + 8), -3, 3), n: list.length };
+    });
+    return model;
+  }
+  function bbALEstimateCorrection(model, sample) {
+    if (!model || !sample) return 0;
+    const mk = String(sample.marketKey || "").toLowerCase();
+    const [a, b] = bbALTeamKeys(sample);
+    let value = Number(model.globalBias) || 0;
+    value += Number(model.leagueBiases && model.leagueBiases[String(sample.league || "unknown")]?.value) || 0;
+    if (BB_AL_TOTAL_MARKETS.has(mk)) value += (Number(model.teamEffects && model.teamEffects[a]?.value) || 0) + (Number(model.teamEffects && model.teamEffects[b]?.value) || 0);
+    else if (BB_AL_TEAM_MARKETS.has(mk)) value += Number(model.teamEffects && model.teamEffects[mk.endsWith("team_a") || mk === "team_a" ? a : b]?.value) || 0;
+    else if (mk === "winner" || mk === "handicap") value += (Number(model.teamEffects && model.teamEffects[a]?.value) || 0) - (Number(model.teamEffects && model.teamEffects[b]?.value) || 0);
+    const pair = bbALPairKey(sample);
+    if (pair && model.matchupEffects && model.matchupEffects[pair]) value += Number(model.matchupEffects[pair].value) || 0;
+    return bbALClamp(value, -8, 8);
+  }
+  function bbALFitBiasWithValidation(marketKey) {
+    const rows = bbALAllTrainingRows(marketKey).map((r) => ({
+      eventKey: r.batch.eventKey, eventDateMs: r.batch.eventDateMs, capturedAtMs: r.batch.capturedAtMs,
+      league: r.batch.league, marketKey: r.market.marketKey, teamAName: r.batch.teamAName, teamBName: r.batch.teamBName,
+      roleA: r.batch.roleA, actualValue: Number(r.market.actualValue), baseProjection: Number(r.market.baseProjection),
+      result: r.market.result, batchId: r.batch.id
+    })).filter((r) => Number.isFinite(r.actualValue) && Number.isFinite(r.baseProjection));
+    if (rows.length < 60) return { status: "GATHERING", marketKey, n: rows.length, required: 60, reason: "Need 60 verified pre-game settled projections for this exact market before testing residual correction." };
+    const cut = Math.max(1, Math.min(rows.length - 1, Math.floor(rows.length * 0.72)));
+    const train = rows.slice(0, cut), test = rows.slice(cut);
+    if (test.length < 18) return { status: "GATHERING", marketKey, n: rows.length, reason: "Need at least 18 chronological holdout records." };
+    const candidate = bbALFitBias(train);
+    const diffs = test.map((r) => {
+      const residual = r.actualValue - r.baseProjection;
+      const correction = bbALEstimateCorrection(candidate, r);
+      return Math.abs(residual) - Math.abs(residual - correction);
+    });
+    const ci = bbALBootCi(diffs, 500);
+    const baselineMae = bbALMean(test.map((r) => Math.abs(r.actualValue - r.baseProjection)));
+    const correctedMae = bbALMean(test.map((r) => Math.abs((r.actualValue - r.baseProjection) - bbALEstimateCorrection(candidate, r))));
+    const valid = test.length >= 18 && ci.mean >= 0.25 && ci.low > 0;
+    let fullModel = null;
+    if (valid) {
+      fullModel = bbALFitBias(rows);
+      fullModel.enabled = true;
+      fullModel.marketKey = marketKey;
+      fullModel.validation = { trainN: train.length, holdoutN: test.length, baselineMae, correctedMae, meanMaeImprovement: ci.mean, ciLow: ci.low, ciHigh: ci.high, validatedAt: bbALNowIso(), testMethod: "chronological 72/28 split + paired event bootstrap" };
+    }
+    return { status: valid ? "PROVEN" : "HOLDOUT_FAILED", marketKey, n: rows.length, trainN: train.length, holdoutN: test.length, baselineMae, correctedMae, meanMaeImprovement: ci.mean, ciLow: ci.low, ciHigh: ci.high, reason: valid ? "Residual correction reduced absolute projection error on unseen, later-dated games; full fit ready for Guard." : "Correction did not beat the unadjusted model convincingly on the later holdout. No new correction activated.", model: fullModel };
+  }
+  function bbALBuildSampleFromPick(p, league, meta) {
+    const mk = String(p && p.marketKey || "").toLowerCase();
+    return {
+      marketKey: mk, league: String(p && p.league || league || "unknown"),
+      teamAName: String(p && (p.teamAName || p.teamA || p.team_a) || meta?.teamAName || document.getElementById("teamAName")?.value || ""),
+      teamBName: String(p && (p.teamBName || p.teamB || p.team_b) || meta?.teamBName || document.getElementById("teamBName")?.value || ""),
+      roleA: (function () { try { return typeof getFixtureSideRole === "function" ? getFixtureSideRole("A") : "unknown"; } catch (_e) { return "unknown"; } })()
+    };
+  }
+  function bbALRecalcProbability(p, league) {
+    try {
+      const mk = String(p.marketKey || "").toLowerCase();
+      const side = typeof getPickSideFromText === "function" ? getPickSideFromText(p.pick) : "";
+      if (!side || !bbALNum(p.edge)) return;
+      const selectedEdge = typeof selectedSideEdgeForProbability === "function" ? selectedSideEdgeForProbability(Number(p.edge), side) : Number(p.edge);
+      const result = typeof bbSignalOutcomeProbabilities === "function" ? bbSignalOutcomeProbabilities(selectedEdge, p.league || league, mk, ["winner", "handicap"].includes(mk) ? null : p.line, side) : null;
+      if (result && Number.isFinite(Number(result.win))) {
+        p.winProbability = Number(result.win);
+        p.pushProbability = Number(result.push) || 0;
+        p.lossProbability = Number(result.loss);
+        p.probabilitySource = result.source || "BBAL corrected projection recalibration";
+        const grade = typeof resolveConfidenceGradeFromWinProbability === "function" ? resolveConfidenceGradeFromWinProbability(bbConditionalWinProbability(p.winProbability, p.pushProbability), p.league || league, mk, p) : null;
+        if (grade && /^[ABCD]$/.test(String(grade))) p.confidence = grade;
+        else { p.confidence = null; p.confidenceDisplay = "UNRATED"; }
+        p.confidenceDisplay = p.confidence || "UNRATED";
+      }
+    } catch (_e) {}
+  }
+  function bbALBuildPickForEdge(p, edge, roleA) {
+    const mk = String(p && p.marketKey || "").toLowerCase();
+    if (mk === "winner") {
+      if (roleA === "home") return edge >= 0 ? "HOME" : "AWAY";
+      if (roleA === "away") return edge >= 0 ? "AWAY" : "HOME";
+      return edge >= 0 ? "TEAM A" : "TEAM B";
+    }
+    if (mk === "handicap") {
+      const line = bbALNum(p && (p.displayLineUsed != null ? p.displayLineUsed : p.line));
+      if (line == null) return edge >= 0 ? "TEAM A" : "TEAM B";
+      return edge >= 0
+        ? "TEAM A " + (line > 0 ? "+" : "") + line
+        : "TEAM B " + (line > 0 ? "-" : "+") + Math.abs(line);
+    }
+    return edge >= 0 ? "OVER" : "UNDER";
+  }
+  function bbALCanReviveNoPlay(p) {
+    const reason = bbALReason(p).toLowerCase();
+    const pick = String(p && (p.pick || p.displayPick || "NO PLAY")).toUpperCase();
+    const hardBlock = !!(p && (p.dataErrorSuspect || p.marketIntegrity?.status === "BLOCKED" || p.lockRestricted || p.gameVolatilityBlock));
+    /* A correction may only reconsider a threshold-only abstention. It may never bypass data,
+       market eligibility, injury, volatility, integrity, confidence, odds, or safety vetoes. */
+    if (hardBlock || pick === "NO PLAY" && !reason) return false;
+    if (/implausible|data error|integrity|contradiction|missing\/invalid|probability unavailable|not supported|unverified|insufficient data|sample|injur(?:y|ies)|volatility|blowout|feed|stale|safety|lock|disabled|not allowed|not eligible|unsupported|confidence|grade gate|price gate|line unavailable|period format/.test(reason)) return false;
+    return /edge|threshold|did not clear|below required|absolute margin|minimum edge/.test(reason);
+  }
+  function bbALApplyProjectionCorrections(picks, league, meta) {
+    if (g_bbAL.mode !== "GUARD" || !Array.isArray(picks) || !picks.length) return;
+    picks.forEach((p) => {
+      if (!p || typeof p !== "object") return;
+      const mk = String(p.marketKey || "").toLowerCase();
+      const model = g_bbAL.models[mk] || BB_AL_HARDCODED_DEFAULTS.projectionModels?.[mk];
+      if (!model || !model.enabled) return;
+      const projection = bbALNum((mk === "winner" || mk === "handicap") && p.marginProjection != null ? p.marginProjection : p.proj != null ? p.proj : p.projection);
+      if (projection == null) return;
+      const sample = bbALBuildSampleFromPick(p, league, meta);
+      const delta = bbALEstimateCorrection(model, sample);
+      if (!Number.isFinite(delta) || Math.abs(delta) < 0.15) return;
+      p.bbALRawProjection = projection;
+      p.bbALAppliedCorrection = Number(delta.toFixed(3));
+      p.bbALModelVersion = model.version || "bias-1";
+      p.bbALOriginalPick = String(p.pick || p.displayPick || "NO PLAY");
+      p.proj = projection + delta;
+      if (p.projection != null) p.projection = p.proj;
+      if (p.marginProjection != null || mk === "winner" || mk === "handicap") p.marginProjection = p.proj;
+      if (bbALNum(p.edge) != null) p.edge = Number(p.edge) + delta;
+      else if (bbALNum(p.line) != null) p.edge = p.proj - Number(p.line);
+      if (bbALNum(p.rawEdge) != null) p.rawEdge = Number(p.rawEdge) + delta;
+      p.displayEdge = p.edge;
+      p.learnerAdjustment = { version: model.version || "bias-1", correction: p.bbALAppliedCorrection, marketKey: mk, reason: "validated out-of-sample residual correction", n: model.n, holdoutMaeImprovement: model.validation?.meanMaeImprovement ?? null };
+      const isNoPlay = String(p.pick || "").toUpperCase() === "NO PLAY" || String(p.pick || "").toUpperCase() === "NAN";
+      const newSidePick = bbALBuildPickForEdge(p, Number(p.edge), sample.roleA);
+      if (!isNoPlay) {
+        const oldSide = bbALInferSide(p, sample.teamAName, sample.teamBName, sample.roleA);
+        const newSide = bbALInferSide(Object.assign({}, p, { pick: newSidePick, blockedPick: null }), sample.teamAName, sample.teamBName, sample.roleA);
+        if (oldSide && newSide && oldSide !== newSide) {
+          p.pick = newSidePick;
+          p.displayPick = newSidePick;
+          p.bufferedPickText = newSidePick;
+          p.note = (p.note ? String(p.note) + " · " : "") + "Validated learner correction changed direction.";
+        }
+      } else if (bbALCanReviveNoPlay(p)) {
+        let threshold = bbALNum(p.effectiveThreshold);
+        if (threshold == null) {
+          try { threshold = typeof getLeagueEdgePointThreshold === "function" ? Number(getLeagueEdgePointThreshold(league, mk)) : null; } catch (_e) {}
+        }
+        if (threshold != null && Math.abs(Number(p.edge)) >= threshold + 0.25 && bbALNum(p.line) != null && p.marketIntegrity?.status !== "BLOCKED") {
+          p.pick = newSidePick;
+          p.displayPick = newSidePick;
+          p.bufferedPickText = newSidePick;
+          p.note = null;
+          p.noPlayReason = "Validated learner correction cleared the projection-edge threshold; remaining safety gates still apply.";
+        }
+      }
+      if (String(p.pick || "").toUpperCase() !== "NO PLAY") bbALRecalcProbability(p, league);
+    });
+  }
+  function bbALSortRows(rows) { return rows.sort((a, b) => Number(a.eventDateMs || 0) - Number(b.eventDateMs || 0)); }
+  function bbALBuildInsights() {
+    const out = { batches: g_bbAL.batches.length, markets: 0, settled: 0, pending: 0, plays: 0, noPlays: 0, wins: 0, losses: 0, pushes: 0, observed: 0, uniqueEvents: new Set(), leagueCounts: {}, marketCounts: {}, noIdCount: 0, pregameEligible: 0, trainingRows: 0, changes: g_bbAL.changes.length, activeCorrectionMarkets: 0, activeThresholdBuckets: 0 };
+    g_bbAL.batches.forEach((b) => {
+      out.uniqueEvents.add(b.eventKey);
+      if (!b.eventIdVerified) out.noIdCount++;
+      (b.markets || []).forEach((m) => {
+        out.markets++;
+        if (m.decision === "PLAY") out.plays++; else out.noPlays++;
+        if (m.result) out.settled++;
+        else out.pending++;
+        if (m.result === "WIN") out.wins++;
+        if (m.result === "LOSS") out.losses++;
+        if (m.result === "PUSH") out.pushes++;
+        if (m.result === "OBSERVED") out.observed++;
+        if (bbALRecordPregameEligible(b, m) && m.actualValue != null) out.pregameEligible++;
+        out.leagueCounts[b.league] = (out.leagueCounts[b.league] || 0) + 1;
+        out.marketCounts[m.marketKey] = out.marketCounts[m.marketKey] || { logged: 0, settled: 0, wins: 0, losses: 0, noPlay: 0 };
+        out.marketCounts[m.marketKey].logged++;
+        if (m.result) out.marketCounts[m.marketKey].settled++;
+        if (m.result === "WIN") out.marketCounts[m.marketKey].wins++;
+        if (m.result === "LOSS") out.marketCounts[m.marketKey].losses++;
+        if (m.decision !== "PLAY") out.marketCounts[m.marketKey].noPlay++;
+      });
+    });
+    out.uniqueEvents = out.uniqueEvents.size;
+    out.trainingRows = g_bbAL.batches.reduce((s, b) => s + (b.trainingEligibleCount || 0), 0);
+    out.activeCorrectionMarkets = Object.keys(g_bbAL.models).filter((k) => g_bbAL.models[k] && g_bbAL.models[k].enabled).length;
+    out.activeThresholdBuckets = Object.keys(g_bbAL.thresholdMultipliers).filter((k) => Math.abs((Number(g_bbAL.thresholdMultipliers[k]) || 1) - 1) > 0.001).length;
+    return out;
+  }
+  function bbALScheduleTraining() {
+    if (bbALLastTrainingTimer) clearTimeout(bbALLastTrainingTimer);
+    bbALLastTrainingTimer = setTimeout(function () { bbALTrainAll().catch(function (e) { g_bbAL.lastNotice = "Learning pass warning: " + String(e && e.message || e); bbALSaveMeta(); }); }, 1100);
+  }
+  async function bbALTrainAll(force) {
+    if (bbALTrainingBusy || g_bbAL.mode === "OFF") return null;
+    await bbALInit();
+    const settledRows = bbALAllMarketRows().filter((r) => bbALRecordPregameEligible(r.batch, r.market) && r.market.actualValue != null && !!r.market.settledAt);
+    const uniqueKeys = new Set(settledRows.map((r) => r.batch.eventKey + "|" + r.market.marketKey));
+    if (!force && uniqueKeys.size < g_bbAL.lastTrainingSettledKeys + BB_AL_MIN_NEW_SETTLED) return null;
+    if (uniqueKeys.size < 60) {
+      g_bbAL.lastTrainingSummary = { status: "GATHERING", eligibleRows: uniqueKeys.size, nextTrainingAt: Math.max(60, g_bbAL.lastTrainingSettledKeys + BB_AL_MIN_NEW_SETTLED), note: "Recording all predictions; automatic promotion waits for enough verified pre-game settlements." };
+      g_bbAL.lastNotice = "Learning: gathering verified pre-game settlements (" + uniqueKeys.size + "). No configuration changed.";
+      g_bbAL.lastTrainingBatchCount = g_bbAL.batches.length;
+      g_bbAL.lastTrainingSettledKeys = uniqueKeys.size;
+      g_bbAL.lastTrainingAt = bbALNowIso();
+      bbALSaveMeta(); bbALNotify();
+      return g_bbAL.lastTrainingSummary;
+    }
+    bbALTrainingBusy = true;
+    try {
+      const tests = {};
+      const marketKeys = Array.from(new Set(settledRows.map((r) => String(r.market.marketKey || "").toLowerCase()))).filter((mk) => BB_AL_MARKETS.has(mk));
+      marketKeys.forEach((mk) => {
+        const result = bbALFitBiasWithValidation(mk);
+        tests["projection:" + mk] = Object.assign({}, result, { model: undefined });
+        if (result.status === "PROVEN" && result.model) {
+          const previous = g_bbAL.models[mk];
+          g_bbAL.models[mk] = result.model;
+          if (!previous || previous.version !== result.model.version || previous.enabled !== result.model.enabled || Math.abs(Number(previous.globalBias || 0) - Number(result.model.globalBias || 0)) > 0.25 || Math.abs(Number(previous.validation?.meanMaeImprovement || 0) - Number(result.model.validation?.meanMaeImprovement || 0)) > 0.25) {
+            g_bbAL.changes.push({ id: "PROJ-" + Date.now().toString(36) + "-" + mk, at: bbALNowIso(), type: "PROJECTION_CORRECTION_VALIDATED", scope: mk, oldValue: previous ? { enabled: !!previous.enabled, globalBias: previous.globalBias } : { enabled: false }, newValue: { enabled: true, globalBias: result.model.globalBias, n: result.model.n }, evidence: { holdoutN: result.holdoutN, baselineMae: result.baselineMae, correctedMae: result.correctedMae, meanMaeImprovement: result.meanMaeImprovement, ciLow: result.ciLow, ciHigh: result.ciHigh }, rollbackAvailable: true, codeHint: "hard-code this market model via BB_AL_HARDCODED_DEFAULTS.projectionModels." });
+          }
+        }
+      });
+      let thresholdAnalyses = [];
+      const thresholdBuckets = ["ft", "h1", "team", "h1team", "winner", "quarter", "qext"];
+      thresholdBuckets.forEach((bucket) => { thresholdAnalyses.push(bbALAnalyzeThresholdBucket(bucket)); });
+      tests.thresholdBuckets = thresholdAnalyses.map((x) => Object.assign({}, x));
+      if (g_bbAL.mode === "GUARD") {
+        const proposals = thresholdAnalyses.filter((x) => x.status === "PROVEN" && Math.abs(Number(x.candidateMultiplier) - Number(x.currentMultiplier)) >= 0.049);
+        proposals.sort((a, b) => Number(b.testDelta || 0) - Number(a.testDelta || 0));
+        if (proposals.length) {
+          const p = proposals[0];
+          g_bbAL.thresholdMultipliers[p.bucket] = Number(p.candidateMultiplier);
+          const change = { id: "THR-" + Date.now().toString(36) + "-" + p.bucket, at: bbALNowIso(), type: "THRESHOLD_MULTIPLIER_AUTO_APPLIED", scope: p.bucket, oldValue: p.currentMultiplier, newValue: p.candidateMultiplier, evidence: { distinctEvents: p.eventCount, trainEvents: p.trainCount, holdoutEvents: p.testCount, holdoutDelta: p.testDelta, ciLow: p.ciLow, ciHigh: p.ciHigh, baselineSelectedEvents: p.baselineSelectedEvents, candidateSelectedEvents: p.candidateSelectedEvents, baselineHitRate: p.baselineHitRate, candidateHitRate: p.candidateHitRate }, rollbackAvailable: true, codeHint: "Copy the multiplier into BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers." };
+          g_bbAL.changes.push(change);
+          g_bbAL.canaries.push({ id: change.id, type: "threshold", bucket: p.bucket, oldValue: p.currentMultiplier, newValue: p.candidateMultiplier, appliedAt: change.at, checkedEventKeys: [], status: "WATCHING", reason: "Auto-rollback if forward results convincingly underperform the previous multiplier." });
+          g_bbAL.lastNotice = "GUARD auto-applied proven " + p.bucket + " threshold multiplier " + p.currentMultiplier.toFixed(2) + " → " + p.candidateMultiplier.toFixed(2) + ". Forward canary started.";
+        } else {
+          const provenProjection = Object.keys(g_bbAL.models).filter((k) => g_bbAL.models[k] && g_bbAL.models[k].enabled).length;
+          g_bbAL.lastNotice = "Guard pass complete. No threshold change passed every holdout test. Active validated projection corrections: " + provenProjection + ".";
+        }
+      } else {
+        g_bbAL.lastNotice = "LEARN mode: test reports updated; no runtime changes applied.";
+      }
+      g_bbAL.lastTrainingSummary = { status: "COMPLETE", at: bbALNowIso(), eligibleUniqueMarketEvents: uniqueKeys.size, projectionTests: tests, thresholdAnalyses };
+      g_bbAL.lastTrainingAt = bbALNowIso();
+      g_bbAL.lastTrainingBatchCount = g_bbAL.batches.length;
+      g_bbAL.lastTrainingSettledKeys = uniqueKeys.size;
+      g_bbAL.changes = g_bbAL.changes.slice(-BB_AL_MAX_CHANGE_LOG);
+      bbALCheckCanaries();
+      bbALSaveMeta();
+      bbALNotify();
+      return g_bbAL.lastTrainingSummary;
+    } finally { bbALTrainingBusy = false; }
+  }
+  function bbALCheckCanaries() {
+    g_bbAL.canaries.forEach((canary) => {
+      if (!canary || canary.status !== "WATCHING" || canary.type !== "threshold") return;
+      const evs = bbALGetThresholdEvents(canary.bucket).filter((event) => {
+        if (!event.records.length) return false;
+        const hasFresh = event.records.some((r) => r.batch.capturedAtMs >= bbALDateMs(canary.appliedAt));
+        if (hasFresh && !canary.checkedEventKeys.includes(event.key)) canary.checkedEventKeys.push(event.key);
+        return hasFresh && canary.checkedEventKeys.includes(event.key);
+      });
+      if (evs.length < 35) return;
+      const base = bbALEvaluateMultiplier(evs, canary.oldValue), active = bbALEvaluateMultiplier(evs, canary.newValue);
+      const diffs = active.eventScores.map((x, i) => x.score - base.eventScores[i].score);
+      const ci = bbALBootCi(diffs, 500);
+      if (evs.length >= 35 && active.selectedEvents >= 15 && base.selectedEvents >= 15 && ci.high < -0.025) {
+        g_bbAL.thresholdMultipliers[canary.bucket] = canary.oldValue;
+        canary.status = "AUTO_ROLLED_BACK";
+        canary.resolvedAt = bbALNowIso();
+        canary.forwardDelta = ci.mean; canary.ciLow = ci.low; canary.ciHigh = ci.high;
+        g_bbAL.changes.push({ id: "ROLLBACK-" + Date.now().toString(36), at: bbALNowIso(), type: "AUTO_ROLLBACK", scope: canary.bucket, oldValue: canary.newValue, newValue: canary.oldValue, evidence: { forwardEvents: evs.length, delta: ci.mean, ciLow: ci.low, ciHigh: ci.high }, reason: "Post-promotion canary showed statistically persuasive deterioration; previous multiplier restored." });
+        g_bbAL.lastNotice = "CANARY AUTO-ROLLBACK: restored previous " + canary.bucket + " threshold multiplier after forward underperformance.";
+      } else if (evs.length >= 60) {
+        canary.status = "CANARY_CLOSED";
+        canary.resolvedAt = bbALNowIso(); canary.forwardDelta = ci.mean; canary.ciLow = ci.low; canary.ciHigh = ci.high;
+        g_bbAL.changes.push({ id: "CANARY-" + Date.now().toString(36), at: bbALNowIso(), type: "CANARY_CLOSED", scope: canary.bucket, oldValue: canary.oldValue, newValue: canary.newValue, evidence: { forwardEvents: evs.length, delta: ci.mean, ciLow: ci.low, ciHigh: ci.high }, reason: "Forward canary reached its review window; no decisive auto-rollback condition was met." });
+      }
+    });
+  }
+  function bbALManualSettleRecord(batchId, marketKey, actualValue) {
+    const b = g_bbAL.batches.find((x) => x.id === batchId);
+    const m = b && (b.markets || []).find((x) => x.marketKey === marketKey);
+    const actual = bbALNum(actualValue);
+    if (!m || actual == null) return { ok: false, reason: "Choose a saved market and enter its actual settled value." };
+    m.actualValue = actual; m.settledAt = bbALNowIso(); m.settlementNote = "Manually settled market value.";
+    m.result = bbALScoreResult(m, actual) || "OBSERVED";
+    b.settledMarketCount = b.markets.filter((x) => !!x.result).length;
+    b.trainingEligibleCount = b.markets.filter((x) => bbALRecordPregameEligible(b, x) && x.actualValue != null).length;
+    b.status = b.markets.every((x) => !!x.result || !!x.settlementNote) ? "SETTLED / REVIEWED" : "PARTLY SETTLED";
+    bbALSaveBatch(b); bbALScheduleTraining(); bbALNotify();
+    return { ok: true, result: m.result };
+  }
+  function bbALSetMode(mode) {
+    const value = String(mode || "").toUpperCase();
+    if (!["GUARD", "LEARN", "OFF"].includes(value)) return;
+    g_bbAL.mode = value;
+    g_bbAL.lastNotice = value === "GUARD" ? "Guard mode active: only holdout-validated changes are applied automatically, with canary rollback." : value === "LEARN" ? "Learn-only active: records and experiments continue; live corrections and auto-promotions are paused." : "Learning application off: existing records are retained, but training/promotion/serving are paused.";
+    bbALSaveMeta(); bbALNotify();
+  }
+  function bbALExport() {
+    const payload = {
+      format: "BB_AUTONOMOUS_LEARNER_BACKUP",
+      schemaVersion: BB_AL_SCHEMA_VERSION,
+      exportedAt: bbALNowIso(),
+      note: "Contains every captured run and market decision available in this browser database, including NO PLAY and blocked records. Keep this backup before clearing Safari website data.",
+      learner: { mode: g_bbAL.mode, thresholdMultipliers: g_bbAL.thresholdMultipliers, models: g_bbAL.models, changes: g_bbAL.changes, canaries: g_bbAL.canaries, lastTrainingAt: g_bbAL.lastTrainingAt, lastTrainingSettledKeys: g_bbAL.lastTrainingSettledKeys, lastTrainingSummary: g_bbAL.lastTrainingSummary },
+      batches: g_bbAL.batches,
+      currentTunableRegistry: bbALConfigInventory(),
+      hardcodeSnippet: bbALBuildCodeSnippet()
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = "bb-autonomous-learning-backup-" + new Date().toISOString().slice(0, 10) + ".json"; a.style.display = "none";
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 3000);
+    g_bbAL.lastNotice = "Full learner backup export started."; bbALNotify();
+  }
+  function bbALImportFile(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async function () {
+      try {
+        const data = JSON.parse(String(reader.result || "{}"));
+        if (!data || data.format !== "BB_AUTONOMOUS_LEARNER_BACKUP" || !Array.isArray(data.batches)) throw new Error("This is not a valid BB learner backup.");
+        await bbALInit();
+        const known = new Set(g_bbAL.batches.map((b) => b.id));
+        let imported = 0;
+        data.batches.forEach((b) => { if (b && b.id && !known.has(b.id)) { g_bbAL.batches.push(b); known.add(b.id); bbALSaveBatch(b); imported++; } });
+        if (data.learner && typeof data.learner === "object") {
+          g_bbAL.thresholdMultipliers = Object.assign({}, g_bbAL.thresholdMultipliers, data.learner.thresholdMultipliers || {});
+          g_bbAL.models = Object.assign({}, g_bbAL.models, data.learner.models || {});
+          if (Array.isArray(data.learner.changes)) g_bbAL.changes = g_bbAL.changes.concat(data.learner.changes).slice(-BB_AL_MAX_CHANGE_LOG);
+          if (Array.isArray(data.learner.canaries)) g_bbAL.canaries = g_bbAL.canaries.concat(data.learner.canaries);
+        }
+        g_bbAL.lastNotice = "Imported " + imported + " new prediction runs. Existing records were retained; duplicates were skipped.";
+        bbALSaveMeta(); bbALScheduleTraining(); bbALNotify();
+      } catch (e) { alert("Learner import failed: " + String(e && e.message || e)); }
+      finally { try { input.value = ""; } catch (_e) {} }
+    };
+    reader.onerror = function () { alert("Could not read that backup file."); };
+    reader.readAsText(file);
+  }
+  function bbALBuildCodeSnippet() {
+    const multiplier = Object.assign({}, BB_AL_HARDCODED_DEFAULTS.thresholdMultipliers || {}, g_bbAL.thresholdMultipliers || {});
+    const models = Object.assign({}, BB_AL_HARDCODED_DEFAULTS.projectionModels || {}, g_bbAL.models || {});
+    return "/* BB autonomous learner — hard-code only after reviewing the evidence log. */\nlet BB_AL_HARDCODED_DEFAULTS = {\n  thresholdMultipliers: " + JSON.stringify(multiplier, null, 2).replace(/^/gm, "  ") + ",\n  projectionModels: " + JSON.stringify(models, null, 2).replace(/^/gm, "  ") + "\n};\n";
+  }
+  function bbALCopyCode() {
+    const text = bbALBuildCodeSnippet();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(() => { g_bbAL.lastNotice = "Hard-code snippet copied. It includes only currently active learner multipliers and validated projection models."; bbALNotify(); }).catch(() => bbALPromptCopy(text));
+    } else bbALPromptCopy(text);
+  }
+  function bbALPromptCopy(text) {
+    const el = document.getElementById("bbALCodeOutput");
+    if (el) { el.value = text; el.focus(); el.select(); }
+    try { if (document.execCommand("copy")) { g_bbAL.lastNotice = "Hard-code snippet copied to clipboard."; bbALNotify(); return; } } catch (_e) {}
+    alert("Copy the code from the text box at the bottom of the learner page.");
+  }
+  function bbALRenderStatusPill() {
+    if (g_bbAL.mode === "GUARD") return '<span class="bbal-pill live">AUTONOMOUS GUARD</span>';
+    if (g_bbAL.mode === "LEARN") return '<span class="bbal-pill learn">LEARN ONLY</span>';
+    return '<span class="bbal-pill off">APPLICATION OFF</span>';
+  }
+  function bbALRenderPage() {
+    const stats = bbALBuildInsights();
+    const allMarkets = {};
+    Object.keys(stats.marketCounts).sort().forEach((k) => { allMarkets[k] = stats.marketCounts[k]; });
+    const latest = g_bbAL.batches.slice().sort((a, b) => Number(b.capturedAtMs || 0) - Number(a.capturedAtMs || 0)).slice(0, BB_AL_MAX_VISIBLE_ROWS);
+    const recentRows = [];
+    latest.forEach((b) => (b.markets || []).forEach((m) => recentRows.push({ batch: b, market: m })));
+    recentRows.sort((a, b) => Number(b.batch.capturedAtMs || 0) - Number(a.batch.capturedAtMs || 0));
+    const visibleRows = recentRows.slice(0, BB_AL_MAX_VISIBLE_ROWS);
+    const recentHtml = visibleRows.map(({ batch: b, market: m }) => {
+      const result = m.result || "PENDING";
+      const resultClass = result === "WIN" ? "win" : result === "LOSS" ? "loss" : result === "PUSH" ? "push" : result === "PENDING" ? "pending" : "observed";
+      return '<tr><td><b>' + bbALEscape(b.teamAName || b.homeTeam || "Team A") + ' <i>vs</i> ' + bbALEscape(b.teamBName || b.awayTeam || "Team B") + '</b><small>' + bbALEscape(b.league || "unknown") + ' · ' + bbALEscape(b.eventDate ? new Date(b.eventDate).toLocaleString() : "event time unverified") + '</small></td><td>' + bbALEscape(m.marketKey) + '<small>line ' + bbALEscape(m.line == null ? "—" : m.line) + '</small></td><td><strong>' + bbALEscape(m.pick || "NO PLAY") + '</strong><small>edge ' + bbALEscape(m.edge == null ? "—" : Number(m.edge).toFixed(2)) + ' · proj ' + bbALEscape(m.projection == null ? "—" : Number(m.projection).toFixed(2)) + '</small></td><td><span class="bbal-result ' + resultClass + '">' + bbALEscape(result) + '</span><small>' + bbALEscape(m.reason || m.settlementNote || "Captured") + '</small></td><td>' + (m.actualValue == null ? '<span class="muted">—</span>' : bbALEscape(m.actualValue)) + '</td><td><button class="bbal-mini" onclick="bbALPromptManualSettle(\'' + bbALEscape(b.id) + '\',\'' + bbALEscape(m.marketKey) + '\')">Settle</button></td></tr>';
+    }).join("") || '<tr><td colspan="6" class="bbal-empty">No prediction runs captured yet. Run a game once; all markets from that run will be archived here.</td></tr>';
+    const marketStatsRows = Object.keys(allMarkets).map((k) => {
+      const r = allMarkets[k]; const acc = r.wins + r.losses ? (r.wins / (r.wins + r.losses) * 100).toFixed(1) + "%" : "—";
+      return '<tr><td>' + bbALEscape(k) + '</td><td>' + r.logged + '</td><td>' + r.settled + '</td><td>' + r.noPlay + '</td><td>' + acc + '</td></tr>';
+    }).join("") || '<tr><td colspan="5" class="bbal-empty">Waiting for data.</td></tr>';
+    const changeRows = g_bbAL.changes.slice().reverse().slice(0, 20).map((c) => {
+      const e = c.evidence || {};
+      return '<div class="bbal-change"><div><span class="bbal-change-type">' + bbALEscape(c.type || "CHANGE") + '</span><b>' + bbALEscape(c.scope || "global") + '</b></div><p>' + bbALEscape(c.oldValue == null ? "—" : JSON.stringify(c.oldValue)) + ' <span>→</span> ' + bbALEscape(c.newValue == null ? "—" : JSON.stringify(c.newValue)) + '</p><small>' + bbALEscape(new Date(c.at || Date.now()).toLocaleString()) + ' · ' + bbALEscape(c.reason || "Validated holdout promotion") + '</small>' + (e.holdoutN || e.distinctEvents ? '<small>evidence: ' + bbALEscape(e.distinctEvents || e.holdoutN) + ' holdout/events · delta ' + bbALEscape(e.holdoutDelta == null ? (e.meanMaeImprovement == null ? "—" : Number(e.meanMaeImprovement).toFixed(3) + " MAE") : Number(e.holdoutDelta).toFixed(3)) + ' · lower CI ' + bbALEscape(e.ciLow == null ? "—" : Number(e.ciLow).toFixed(3)) + '</small>' : '') + '</div>';
+    }).join("") || '<div class="bbal-empty">No automatic changes have passed validation yet. This is correct while the evidence is thin.</div>';
+    const modelRows = Object.keys(g_bbAL.models).sort().map((mk) => {
+      const m = g_bbAL.models[mk]; if (!m) return "";
+      const v = m.validation || {};
+      return '<tr><td>' + bbALEscape(mk) + '</td><td>' + (m.enabled ? '<span class="bbal-result win">ACTIVE</span>' : '<span class="bbal-result pending">OFF</span>') + '</td><td>' + (Number(m.n) || 0) + '</td><td>' + (v.holdoutN || "—") + '</td><td>' + (v.baselineMae == null ? "—" : Number(v.baselineMae).toFixed(2)) + '</td><td>' + (v.correctedMae == null ? "—" : Number(v.correctedMae).toFixed(2)) + '</td><td>' + (v.meanMaeImprovement == null ? "—" : Number(v.meanMaeImprovement).toFixed(2)) + '</td></tr>';
+    }).join("") || '<tr><td colspan="7" class="bbal-empty">Projection corrections remain inactive until chronological holdout tests prove they reduce forecast error.</td></tr>';
+    const thresholdRows = (g_bbAL.lastTrainingSummary.thresholdAnalyses || []).map((t) => {
+      const status = t.status === "PROVEN" ? "win" : t.status === "HOLDOUT_FAILED" ? "loss" : "pending";
+      return '<tr><td>' + bbALEscape(t.bucket) + '</td><td><span class="bbal-result ' + status + '">' + bbALEscape(t.status) + '</span></td><td>' + (t.eventCount || 0) + '</td><td>' + (t.currentMultiplier == null ? bbALActiveMultiplier(t.bucket).toFixed(2) : Number(t.currentMultiplier).toFixed(2)) + '</td><td>' + (t.candidateMultiplier == null ? "—" : Number(t.candidateMultiplier).toFixed(2)) + '</td><td>' + (t.testDelta == null ? "—" : Number(t.testDelta).toFixed(3)) + '</td><td>' + bbALEscape(t.reason || "") + '</td></tr>';
+    }).join("") || '<tr><td colspan="7" class="bbal-empty">Threshold experiments begin once the market family has enough distinct, verified, pre-game settlements.</td></tr>';
+    const tunables = bbALConfigInventory();
+    const configRows = tunables.map((p) => '<tr><td><b>' + bbALEscape(p.key) + '</b><small>' + bbALEscape(p.description) + '</small></td><td><code>' + bbALEscape(JSON.stringify(p.value)) + '</code></td><td><code>' + bbALEscape(JSON.stringify(p.runtime)) + '</code></td><td>' + bbALEscape(p.scope) + '</td><td>' + bbALEscape(p.min == null ? "—" : p.min) + ' / ' + bbALEscape(p.max == null ? "—" : p.max) + '</td></tr>').join("");
+    const recentPct = stats.wins + stats.losses ? (stats.wins / (stats.wins + stats.losses) * 100).toFixed(1) + "%" : "—";
+    const modeNotice = g_bbAL.mode === "GUARD" ? "Records continuously · validated projection corrections can change a projection or side · only statistically proven threshold changes auto-apply · forward canaries can roll them back." : g_bbAL.mode === "LEARN" ? "Records and evaluates everything, but does not alter live projections or promote thresholds." : "The ledger keeps recording and settling, but live learning effects and training are paused.";
+    const bytes = g_bbAL.storageBytesEstimate > 1024 * 1024 ? (g_bbAL.storageBytesEstimate / 1024 / 1024).toFixed(1) + " MB" : (g_bbAL.storageBytesEstimate / 1024).toFixed(0) + " KB";
+    return `<style>
+      .bbal{--ink:#eaf0f8;--muted:#99a8ba;--surface:#101824;--surface2:#151f2e;--stroke:#2a3749;--cyan:#55d6ff;--green:#4bdd9a;--amber:#ffc66d;--red:#ff6d7a;color:var(--ink);font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;display:grid;gap:14px}
+      .bbal *{box-sizing:border-box}.bbal-hero{position:relative;overflow:hidden;border-radius:18px;padding:20px;background:radial-gradient(ellipse at 85% 15%,rgba(85,214,255,.17),transparent 35%),linear-gradient(135deg,#111a28,#172638 55%,#111723);border:1px solid #314256;box-shadow:0 12px 30px rgba(0,0,0,.14)}.bbal-hero:after{content:"";position:absolute;right:-40px;bottom:-95px;width:230px;height:230px;border:1px solid rgba(85,214,255,.16);border-radius:50%;box-shadow:0 0 0 18px rgba(85,214,255,.03),0 0 0 40px rgba(85,214,255,.025)}
+      .bbal-overline{font-size:10px;letter-spacing:2px;text-transform:uppercase;color:var(--cyan);font-weight:900}.bbal-title{font-size:clamp(23px,4vw,32px);font-weight:950;letter-spacing:-.7px;margin:7px 0 8px}.bbal-intro{color:#bdc9d8;font-size:13px;line-height:1.55;max-width:760px}.bbal-hero-top{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;position:relative;z-index:1}.bbal-pill{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;font-size:10px;font-weight:900;letter-spacing:.6px;border-radius:99px;padding:7px 10px;border:1px solid}.bbal-pill.live{color:#6ff0ae;background:rgba(47,193,123,.12);border-color:rgba(75,221,154,.45)}.bbal-pill.learn{color:#ffcf86;background:rgba(255,198,109,.09);border-color:rgba(255,198,109,.42)}.bbal-pill.off{color:#ff8994;background:rgba(255,109,122,.08);border-color:rgba(255,109,122,.4)}
+      .bbal-modebar{display:flex;gap:7px;flex-wrap:wrap;margin-top:17px;position:relative;z-index:1}.bbal button{font:inherit;cursor:pointer;border-radius:10px;border:1px solid #39485d;background:#1b2939;color:var(--ink);padding:9px 12px;font-size:11px;font-weight:850}.bbal button:hover{border-color:var(--cyan)}.bbal button.primary{background:var(--cyan);color:#07121e;border-color:var(--cyan)}.bbal button.selected{border-color:var(--green);background:rgba(75,221,154,.12);color:#8df4be}.bbal button.danger{border-color:#7a3541;color:#ffabb1;background:#351c25}.bbal button:disabled{opacity:.45;cursor:not-allowed}
+      .bbal-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px}.bbal-stat{padding:14px;border:1px solid var(--stroke);border-radius:13px;background:linear-gradient(150deg,var(--surface2),var(--surface));min-width:0}.bbal-stat .label{font-size:9px;letter-spacing:1px;font-weight:900;color:var(--muted);text-transform:uppercase}.bbal-stat .value{font-size:25px;font-weight:950;letter-spacing:-.8px;margin-top:7px;line-height:1.1;overflow-wrap:anywhere}.bbal-stat .sub{font-size:10px;color:var(--muted);margin-top:6px;line-height:1.35}.bbal-stat.accent .value{color:var(--cyan)}.bbal-stat.good .value{color:var(--green)}.bbal-stat.warn .value{color:var(--amber)}
+      .bbal-card{background:var(--surface);border:1px solid var(--stroke);border-radius:15px;overflow:hidden}.bbal-card-head{padding:14px 16px;border-bottom:1px solid var(--stroke);background:#131d2a;display:flex;align-items:center;justify-content:space-between;gap:10px}.bbal-card-title{font-size:13px;font-weight:900}.bbal-card-sub{font-size:10px;line-height:1.45;color:var(--muted);margin-top:4px}.bbal-card-body{padding:13px 15px}.bbal-section-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.bbal-notice{border-radius:11px;padding:12px 13px;background:#152635;border:1px solid #2d5366;font-size:11px;line-height:1.55;color:#cfe8f3}.bbal-warning{background:#2b2519;border-color:#66502d;color:#ffe1aa}.bbal-error{background:#2d1b25;border-color:#68313f;color:#ffd5d9}.bbal-keyline{display:flex;justify-content:space-between;gap:10px;padding:8px 0;border-bottom:1px solid #243143;font-size:11px}.bbal-keyline:last-child{border-bottom:0}.bbal-keyline b{color:#fff;text-align:right}.bbal-small{color:var(--muted);font-size:10px;line-height:1.45}.bbal-tablewrap{overflow:auto;max-width:100%}.bbal table{border-collapse:separate;border-spacing:0;width:100%;font-size:10px;min-width:760px}.bbal th{position:sticky;top:0;text-align:left;color:#b8c8da;background:#192536;padding:9px;border-bottom:1px solid #34445a;text-transform:uppercase;letter-spacing:.5px;font-size:9px;z-index:1}.bbal td{padding:9px;border-bottom:1px solid #222f40;vertical-align:top;line-height:1.4;color:#d9e3ef}.bbal td small{display:block;color:var(--muted);font-size:9px;margin-top:4px;overflow-wrap:anywhere;max-width:300px}.bbal tr:last-child td{border-bottom:0}.bbal i{font-style:normal;color:var(--muted);font-weight:500}.bbal .bbal-empty{padding:20px;text-align:center;color:var(--muted)}.bbal code{background:#0a111b;padding:3px 5px;border-radius:5px;color:#99eaff;font-size:9px;overflow-wrap:anywhere}.bbal .muted{color:var(--muted)}
+      .bbal-result{display:inline-flex;padding:4px 6px;border-radius:6px;font-size:9px;font-weight:900;white-space:nowrap}.bbal-result.win{background:#123e30;color:#7ef0b8}.bbal-result.loss{background:#411e29;color:#ff9ba6}.bbal-result.push{background:#273449;color:#b5c6da}.bbal-result.pending{background:#3a3020;color:#ffd38f}.bbal-result.observed{background:#202e47;color:#b1c8ff}.bbal-mini{padding:5px 7px!important;font-size:9px!important}.bbal-change{padding:11px 12px;border:1px solid #2a384b;background:#131d2a;border-radius:11px;margin-bottom:8px}.bbal-change:last-child{margin-bottom:0}.bbal-change>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.bbal-change b{font-size:12px}.bbal-change-type{font-size:8px;font-weight:950;letter-spacing:.8px;color:#96e8ff}.bbal-change p{font-size:11px;font-weight:800;margin:7px 0;color:#f0f6ff;overflow-wrap:anywhere}.bbal-change p span{color:var(--green);padding:0 3px}.bbal-change small{display:block;color:var(--muted);font-size:9px;line-height:1.45;margin-top:4px;overflow-wrap:anywhere}.bbal-textarea{width:100%;min-height:160px;resize:vertical;background:#080e16;border:1px solid #34445a;border-radius:10px;padding:12px;color:#b7f0ff;font:10px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}.bbal-footer{font-size:10px;color:var(--muted);line-height:1.6;padding:0 2px}.bbal .dot{display:inline-block;width:6px;height:6px;border-radius:100%;background:var(--green);margin-right:5px}.bbal-stat .value.smallvalue{font-size:20px}
+      @media(max-width:760px){.bbal-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.bbal-section-grid{grid-template-columns:1fr}.bbal-hero{padding:16px}.bbal-hero-top{display:block}.bbal-hero-top .bbal-pill{margin-top:8px}.bbal-stat .value{font-size:22px}.bbal-modebar button{flex:1 1 auto}.bbal-card-head{align-items:flex-start}.bbal-card-head button{font-size:10px;padding:8px}.bbal table{min-width:700px}}
+    </style>
+    <div class="bbal">
+      <section class="bbal-hero"><div class="bbal-hero-top"><div><div class="bbal-overline">Basketball intelligence · permanent learning ledger</div><div class="bbal-title">Autonomous Learning Core</div><div class="bbal-intro">Every run becomes evidence: picks, NO PLAY, blocked markets, lines, projections, confidence, gate reasons, available model inputs, configuration fingerprint, and the later market outcome. Guard mode only serves validated corrections and only promotes threshold changes after chronological holdout tests.</div></div><div>${bbALRenderStatusPill()}</div></div><div class="bbal-modebar"><button class="${g_bbAL.mode === "GUARD" ? "selected" : ""}" onclick="bbALSetMode('GUARD')">⚡ Guard · auto-apply proven</button><button class="${g_bbAL.mode === "LEARN" ? "selected" : ""}" onclick="bbALSetMode('LEARN')">Learn only</button><button class="${g_bbAL.mode === "OFF" ? "selected" : ""}" onclick="bbALSetMode('OFF')">Pause learning effects</button><button onclick="bbALExport()">⇩ Export full brain</button><button onclick="bbALForceLegacyMigration()">⇄ Import old history</button><button onclick="document.getElementById('bbALImportInput').click()">⇧ Import / restore</button><input id="bbALImportInput" type="file" accept="application/json,.json" style="display:none" onchange="bbALImportFile(this)"><button class="primary" onclick="bbALForceTrain()">Run validation pass</button></div></section>
+      <div class="bbal-grid"><div class="bbal-stat accent"><div class="label">Prediction runs saved</div><div class="value">${stats.batches}</div><div class="sub">Stored independently of the normal tracker</div></div><div class="bbal-stat"><div class="label">Market decisions logged</div><div class="value">${stats.markets}</div><div class="sub">${stats.plays} picks · ${stats.noPlays} NO PLAY / blocked</div></div><div class="bbal-stat good"><div class="label">Markets settled / observed</div><div class="value">${stats.settled}</div><div class="sub">${stats.wins} would-win · ${stats.losses} would-lose · ${stats.pushes} pushes</div></div><div class="bbal-stat warn"><div class="label">Waiting for result</div><div class="value">${stats.pending}</div><div class="sub">Directional results: ${recentPct} wins on graded picks (descriptive, not a guarantee)</div></div><div class="bbal-stat"><div class="label">Distinct game keys</div><div class="value">${stats.uniqueEvents}</div><div class="sub">Repeated runs are saved; training de-duplicates event / market</div></div><div class="bbal-stat accent"><div class="label">Pre-game training rows</div><div class="value">${stats.pregameEligible}</div><div class="sub">Verified event ID + kickoff time + prediction before start</div></div><div class="bbal-stat good"><div class="label">Live correction models</div><div class="value">${stats.activeCorrectionMarkets}</div><div class="sub">Projection corrections that passed later-game validation</div></div><div class="bbal-stat"><div class="label">Learner store</div><div class="value smallvalue">${bbALEscape(g_bbAL.dbStatus)}</div><div class="sub">Approx. ${bytes} held in this browser · ${stats.changes} logged changes</div></div></div>
+      <div class="bbal-notice ${g_bbAL.fallbackWarning ? "bbal-warning" : ""}"><b>Current operating state:</b> ${bbALEscape(modeNotice)}<br><b>Legacy archive migration:</b> ${bbALEscape(g_bbAL.legacyMigrationStatus || "Checking old tracker and shadow history…")} (${g_bbAL.legacyTrackerImported} tracker records · ${g_bbAL.legacyShadowImported} legacy shadow records imported)<br><b>Latest engine note:</b> ${bbALEscape(g_bbAL.lastNotice || "No notice.")}<br><b>Data rule:</b> only predictions created before a verifiable event start may train automatic models. Manual/fuzzy fixture IDs are still archived but excluded from automatic promotion until a valid event match is available.</div>
+      <section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Core configuration control room</div><div class="bbal-card-sub">Runtime settings that matter to prediction quality, their source of truth, and whether the learner can safely tune them with available counterfactual data.</div></div></div><div class="bbal-card-body"><div class="bbal-keyline"><span>Recent-form / H2H blend</span><b>65% / 35% · base engine currently fixed</b></div><div class="bbal-keyline"><span>Scored / allowed blend</span><b>50% / 50% · base engine currently fixed</b></div><div class="bbal-keyline"><span>Recency weighting</span><b>Flat [1, 1, 1, 1, 1] in the base engine</b></div><div class="bbal-notice bbal-warning" style="margin-top:10px"><b>What is and is not auto-tuned:</b> Guard can currently auto-promote validated market-family threshold multipliers and residual projection corrections, and automatically roll a threshold change back if the forward canary degrades. The fixed blend and recency routines have no exact stored counterfactual replay contract in the supplied engine, so this build deliberately does not claim to tune them yet. It archives the model inputs needed to improve replay coverage. Until an exact per-game replay exists, changing those weights based on win-rate correlation would risk leakage and false confidence.</div></div></section>
+      ${g_bbAL.fallbackWarning ? '<div class="bbal-notice bbal-error"><b>Storage warning:</b> ' + bbALEscape(g_bbAL.fallbackWarning) + '</div>' : ''}
+      <div class="bbal-section-grid"><section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Auto-change audit trail</div><div class="bbal-card-sub">Every promotion, tested effect, canary, and rollback stays visible here.</div></div><button onclick="bbALCopyCode()">Copy hard-code</button></div><div class="bbal-card-body">${changeRows}</div></section><section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Safeguards & data quality</div><div class="bbal-card-sub">What Guard is allowed to do, and when it must refuse to learn.</div></div></div><div class="bbal-card-body"><div class="bbal-keyline"><span>Guard auto-apply</span><b>${g_bbAL.mode === "GUARD" ? "ON" : "PAUSED"}</b></div><div class="bbal-keyline"><span>Prediction capture</span><b>ALL final market rows</b></div><div class="bbal-keyline"><span>NO PLAY capture</span><b>ON · shadow-side retained when known</b></div><div class="bbal-keyline"><span>Event settlement</span><b>Final scoreboard feed + manual market fallback</b></div><div class="bbal-keyline"><span>Promotion test</span><b>Chronological holdout + paired bootstrap</b></div><div class="bbal-keyline"><span>Threshold rollback</span><b>Forward canary monitored</b></div><div class="bbal-keyline"><span>Tracker wipe</span><b>Does not delete this IndexedDB ledger</b></div><div class="bbal-keyline"><span>Predictions with no verified ID</span><b>${stats.noIdCount} runs · stored, not silently guessed</b></div><div class="bbal-notice bbal-warning" style="margin-top:10px">The engine does not promise a team will “always” go over. It looks for conditional edges by market, line, league, side, team context, and sample size; small samples are shrunk toward zero or left inactive.</div></div></section></div>
+      <section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Market-level results coverage</div><div class="bbal-card-sub">All logged decision types, with NO PLAY records counted separately.</div></div><button onclick="bbALRefreshPage()">Refresh view</button></div><div class="bbal-tablewrap"><table><thead><tr><th>Market</th><th>Logged</th><th>Settled / observed</th><th>NO PLAY</th><th>Graded hit rate</th></tr></thead><tbody>${marketStatsRows}</tbody></table></div></section>
+      <section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Projection correction validation</div><div class="bbal-card-sub">A correction is enabled only when it improves absolute error on chronologically later games with a positive paired-bootstrap lower bound.</div></div></div><div class="bbal-tablewrap"><table><thead><tr><th>Market</th><th>Serving</th><th>Rows</th><th>Holdout</th><th>Baseline MAE</th><th>Corrected MAE</th><th>Mean improvement</th></tr></thead><tbody>${modelRows}</tbody></table></div></section>
+      <section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Threshold experiments</div><div class="bbal-card-sub">Uses PLAY and threshold-blocked NO PLAY records; hard safety/data blocks are excluded from threshold promotion.</div></div></div><div class="bbal-tablewrap"><table><thead><tr><th>Family</th><th>Test state</th><th>Events</th><th>Current ×</th><th>Candidate ×</th><th>Holdout lift</th><th>Decision</th></tr></thead><tbody>${thresholdRows}</tbody></table></div></section>
+      <section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Recent prediction ledger</div><div class="bbal-card-sub">Tap Settle only for a market that the scoreboard cannot resolve; enter the actual numeric market value, not a scoreline, for that row.</div></div><button onclick="bbALExport()">Export all rows</button></div><div class="bbal-tablewrap"><table><thead><tr><th>Game / league</th><th>Market / line</th><th>Captured prediction</th><th>Result / gate detail</th><th>Actual</th><th>Fallback</th></tr></thead><tbody>${recentHtml}</tbody></table></div></section>
+      <details class="bbal-card"><summary class="bbal-card-head" style="cursor:pointer;list-style:none"><div><div class="bbal-card-title">Complete runtime tunable inventory (${tunables.length} registered values)</div><div class="bbal-card-sub">Baseline and currently resolved registry values. The runtime Guard multipliers and learned corrections are displayed above and below separately.</div></div><span>＋</span></summary><div class="bbal-tablewrap"><table><thead><tr><th>Parameter</th><th>Registered value</th><th>Resolved default</th><th>Scope</th><th>Min / max</th></tr></thead><tbody>${configRows}</tbody></table></div></details>
+      <section class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Hard-code export / current Guard state</div><div class="bbal-card-sub">Copies the runtime multipliers and validated market correction maps. Keep using the learner; hard-coding is a durable snapshot, not a substitute for ongoing settlement.</div></div><button onclick="bbALCopyCode()">Copy snippet</button></div><div class="bbal-card-body"><textarea id="bbALCodeOutput" class="bbal-textarea" spellcheck="false">${bbALEscape(bbALBuildCodeSnippet())}</textarea><div class="bbal-small" style="margin-top:8px">For safety, the snippet is not injected into the main HTML automatically. Review the audit evidence and paste the values into the single BB_AL_HARDCODED_DEFAULTS object in this file when ready.</div></div></section>
+      <div class="bbal-footer"><b>Important persistence boundary:</b> this learner uses a separate IndexedDB database on this website origin, so clearing the prediction tracker inside the app will not erase the learner’s history. Clearing Safari website data, deleting the app’s site storage, or opening a different origin can still remove local browser data. Use <b>Export full brain</b> backups. No browser-only script can guarantee that data survives a deliberate browser storage wipe without a server/cloud database.</div>
+    </div>`;
+  }
+  function bbALPromptManualSettle(batchId, marketKey) {
+    const batch = g_bbAL.batches.find((b) => b.id === batchId);
+    const market = batch && (batch.markets || []).find((m) => m.marketKey === marketKey);
+    if (!batch || !market) return;
+    const title = (batch.teamAName || batch.homeTeam || "Team A") + " vs " + (batch.teamBName || batch.awayTeam || "Team B") + " · " + marketKey;
+    const raw = prompt("Manual fallback for " + title + "\nEnter the final actual value for this specific market (e.g. game total, 1H total, team total, quarter total, or Team A minus Team B margin). Do not enter a scoreline unless the market itself is a margin.", market.actualValue == null ? "" : String(market.actualValue));
+    if (raw == null) return;
+    const n = bbALNum(String(raw).trim());
+    if (n == null) { alert("Enter one valid numeric value."); return; }
+    const result = bbALManualSettleRecord(batchId, marketKey, n);
+    if (!result.ok) alert(result.reason || "Manual settlement failed.");
+    else { g_bbAL.lastNotice = "Manual market settlement saved: " + title + " → " + result.result + "."; bbALNotify(); }
+  }
+  function bbALRefreshPage() { bbALNotify(); }
+  function bbALForceTrain() {
+    if (g_bbAL.mode === "OFF") { alert("Set mode to Guard or Learn only before running training."); return; }
+    bbALTrainAll(true).then(() => { g_bbAL.lastNotice = "Manual validation pass finished; only changes that passed the holdout rules were activated."; bbALSaveMeta(); bbALNotify(); }).catch((e) => alert("Validation pass failed: " + String(e && e.message || e)));
+  }
+  function bbRenderLearnerPage() { return bbALRenderPage(); }
+  function bbRenderLearnerSection() {
+    const s = bbALBuildInsights();
+    return '<div class="bbal"><div class="bbal-card"><div class="bbal-card-head"><div><div class="bbal-card-title">Autonomous Learning Core</div><div class="bbal-card-sub">' + bbALEscape(g_bbAL.mode) + ' · ' + s.markets + ' markets archived · ' + s.settled + ' graded/observed · ' + s.changes + ' changes logged</div></div>' + bbALRenderStatusPill() + '</div><div class="bbal-card-body"><button class="primary" onclick="bbALOpenConfigPage()">Open learning dashboard</button> <button onclick="bbALExport()">Export brain</button></div></div></div>';
+  }
+  function bbALOpenConfigPage() {
+    try { if (typeof setTrackerModalView === "function") setTrackerModalView("configs"); else if (typeof renderConfigsPanel === "function") renderConfigsPanel(); } catch (_e) {}
+  }
+
+  /* Threshold wrapper: preserve each league's base threshold and add only validated runtime multipliers. */
+  const bbALOriginalGetLeagueEdgePointThreshold = typeof window.getLeagueEdgePointThreshold === "function" ? window.getLeagueEdgePointThreshold : (typeof getLeagueEdgePointThreshold === "function" ? getLeagueEdgePointThreshold : null);
+  if (bbALOriginalGetLeagueEdgePointThreshold) {
+    window.getLeagueEdgePointThreshold = function (league, marketKey) {
+      const base = Number(bbALOriginalGetLeagueEdgePointThreshold.apply(this, arguments));
+      if (!Number.isFinite(base) || base <= 0 || g_bbAL.mode !== "GUARD") return base;
+      const bucket = bbALBucket(marketKey);
+      if (!bucket) return base;
+      return base * bbALActiveMultiplier(bucket);
+    };
+  }
+
+  /* This hook executes immediately before the original safety/market gate. Learned corrections can move sides;
+     the existing safety gates still run afterward and may veto the result. */
+  const bbALOriginalApplyBBMarketGate = typeof window.applyBBMarketGate === "function" ? window.applyBBMarketGate : null;
+  if (bbALOriginalApplyBBMarketGate) {
+    window.applyBBMarketGate = function (picks, rawInputs, league, parsed) {
+      try { bbALApplyProjectionCorrections(picks, league, typeof getCurrentFixtureMeta === "function" ? getCurrentFixtureMeta() : null); }
+      catch (e) { try { if (typeof engineDebug === "function") engineDebug("BBAL: pre-gate correction failed", { error: String(e && e.message || e) }); } catch (_e) {} }
+      return bbALOriginalApplyBBMarketGate.apply(this, arguments);
+    };
+  }
+
+  /* Save the whole final market array before buildResultRows filters NO PLAY and non-actionable rows. */
+  const bbALOriginalBuildResultRows = typeof window.buildResultRows === "function" ? window.buildResultRows : null;
+  if (bbALOriginalBuildResultRows) {
+    window.buildResultRows = function (args) {
+      try { bbALCapturePredictionBatch(args); } catch (_e) {}
+      return bbALOriginalBuildResultRows.apply(this, arguments);
+    };
+  }
+
+  /* Feed settlement is invoked for final scoreboard competitions even when no tracked pick exists. */
+  const bbALOriginalSettlePending = typeof window.settlePendingPicksFromCompetition === "function" ? window.settlePendingPicksFromCompetition : null;
+  if (bbALOriginalSettlePending) {
+    window.settlePendingPicksFromCompetition = function (eventId, competition, gameFinal) {
+      try { bbALSettleFromCompetition(eventId, competition, !!gameFinal); } catch (_e) {}
+      return bbALOriginalSettlePending.apply(this, arguments);
+    };
+  }
+
+  window.bbRenderLearnerPage = bbRenderLearnerPage;
+  window.bbRenderLearnerSection = bbRenderLearnerSection;
+  window.bbLrCompute = function () {
+    const s = bbALBuildInsights();
+    return { disabled: false, version: "BBAL-1.0", state: { active: g_bbAL.mode === "GUARD", mode: g_bbAL.mode, disabled: false, nObs: s.settled, epochs: g_bbAL.lastTrainingAt ? 1 : 0, params: { thresholdMultipliers: g_bbAL.thresholdMultipliers }, proven: g_bbAL.models, history: g_bbAL.changes }, perPick: [] };
+  };
+  window.bbLrGetState = function () { return window.bbLrCompute().state; };
+  window.bbALSetMode = bbALSetMode;
+  window.bbALExport = bbALExport;
+  window.bbALImportFile = bbALImportFile;
+  window.bbALForceTrain = bbALForceTrain;
+  window.bbALForceLegacyMigration = bbALForceLegacyMigration;
+  window.bbALMigrateLegacyNow = bbALForceLegacyMigration;
+  window.bbALPromptManualSettle = bbALPromptManualSettle;
+  window.bbALCopyCode = bbALCopyCode;
+  window.bbALRefreshPage = bbALRefreshPage;
+  window.bbALOpenConfigPage = bbALOpenConfigPage;
+  window.bbALGetState = function () { return g_bbAL; };
+  window.bbALGetDiagnostics = function () { return { summary: bbALBuildInsights(), dbStatus: g_bbAL.dbStatus, warning: g_bbAL.fallbackWarning, mode: g_bbAL.mode, lastTrainingSummary: g_bbAL.lastTrainingSummary }; };
+  window.bbALSettleFromCompetition = bbALSettleFromCompetition;
+  window.bbALCapturePredictionBatch = bbALCapturePredictionBatch;
+
+  /* Replace the legacy read-only disabled card with the full autonomous control room. */
+  window.renderConfigsPanel = function () {
+    const panel = document.getElementById("trackerAnalyticsPanel");
+    if (!panel) return;
+    try { if (typeof syncTrackerModalView === "function") syncTrackerModalView(); } catch (_e) {}
+    try { panel.classList.remove("tracker-hidden"); } catch (_e) {}
+    if (panel.style) panel.style.display = "block";
+    panel.innerHTML = bbRenderLearnerPage();
+  };
+  /* Export hard-code defaults on window for diagnostics without making them part of tracker storage. */
+  window.__bbALHardcodedDefaults = BB_AL_HARDCODED_DEFAULTS;
+  bbALInit().then(() => {
+    if (bbALPendingWrites.length) {
+      const pending = bbALPendingWrites.splice(0);
+      pending.forEach((b) => bbALPutBatch(b));
+    }
+    if (g_bbAL.batches.length) bbALScheduleTraining();
+    bbALScheduleLegacyMigration();
   });
 })();
 
