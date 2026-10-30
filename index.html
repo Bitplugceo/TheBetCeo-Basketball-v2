@@ -1,3 +1,4 @@
+XX
 <!DOCTYPE html>
 <html lang="en">
 <!-- >> BB-HTML-0002 | <head> -->
@@ -55089,6 +55090,18 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
 #apAllTbl .apTop td:first-child{box-shadow:inset 3px 0 0 #1f9d55}
 #apAllTbl .apWarn{color:#b45309}
 .apSectionTitle .apTool{padding:4px 10px;font-size:11px;margin-left:6px}
+/* [AP-V24] "All predictions (C+)" toggle: a tiny icon button beside Book on SportyBet. Book is slimmer to make room. */
+#apBookBar .apTool{line-height:1.15}
+#apBookBar #apBook{flex:1 1 auto;min-width:0;padding:11px 6px;font-size:12.5px}
+#apBookBar #apCopySlip{flex:0 0 25%;padding:11px 4px;font-size:12px;white-space:normal}
+#apBookBar #apAllToggle{flex:0 0 auto;width:auto;min-width:38px;padding:8px 7px;gap:2px;font-size:15px;line-height:1;background:#2b2f3a;border-color:#2b2f3a;color:#fff;flex-direction:column}
+#apBookBar #apAllToggle small{font-size:8.5px;font-weight:800;letter-spacing:.2px;line-height:1}
+#apBookBar #apAllToggle.on{background:#2563eb;border-color:#2563eb}
+#apForget{flex:0 1 auto;max-width:30%;font-size:12px}
+/* [AP-V24] full list rows: each game's main pick, then its backups right under it */
+#apAllTbl.apFull tr.apMain td{border-top:2px solid #8a8f9c}
+#apAllTbl tr.apSub td{background:rgba(127,127,127,.10)}
+#apAllTbl tr.apSub td:first-child{font-weight:800;color:#6b7280;box-shadow:inset 3px 0 0 #9aa1ad}
 </style>
 
 <!-- >> BB-HTML-0783 | <div #apModal> -->
@@ -56378,7 +56391,7 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     var showAll = ctx.showAll === true && bench.length > 0;
 
     if (!all.length) { wrap.innerHTML = '<div class="apEmpty">No games scanned yet for this day.</div>'; return; }
-    if (!slipItems.length && !bench.length && !rk.needOdds.length && !statusRows.length) {
+    if (ctx.fullView !== true && !slipItems.length && !bench.length && !rk.needOdds.length && !statusRows.length) {
       wrap.innerHTML = '<div class="apEmpty">No qualifying plays yet'
         + (filteredBySettings ? " · " + filteredBySettings + " excluded by grade / start-time rules" : "")
         + (noplayN ? " · " + noplayN + " no-play" : "")
@@ -56413,6 +56426,101 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
         + '<td class="apWin">' + Math.round(it.p * 100) + "%" + winExtra + "</td>"
         + "</tr>";
     }
+    /* [AP-V24] FULL LIST (C+) VIEW. Opened by the small icon beside "Book on SportyBet".
+       It lists EVERY qualifying prediction of every upcoming game with grade C and above (whatever the Min grade setting is):
+       the main pick of the game first, then every other market of the same game (the backups) directly under it, then the games that are not in the slip
+       (negative EV, weak after calibration, beyond the leg count, below the min grade, no price yet). Nothing is hidden here.
+       It is display only: Book / Copy slip keep using the normal slip (ctx.tableSel), which this view never changes. */
+    function fullListHtml() {
+      var nowMs = Date.now(), cFloor = gradeRank("C"), needMin = needG;
+      var minLbl = needMin >= gradeRank("A") ? "A" : needMin >= gradeRank("B") ? "B+" : "C+";
+      var inMode = mode === "TIME" ? "WIN" : mode, slipPos = {}, primary = {}, groups = [], startedN = 0, nMk = 0;
+      slipItems.forEach(function (it, i) { slipPos[it.g.key] = i + 1; });
+      rk.items.forEach(function (it) { primary[it.g.key] = candKey(it.c); }); /* the pick the normal table uses for that game */
+      rk.needOdds.forEach(function (it) { if (!primary[it.g.key]) primary[it.g.key] = candKey(it.c); });
+      all.forEach(function (g) {
+        if (!g || g.status !== "play" || !g.best) return;
+        var st = startMs(g);
+        if (!isFinite(st) || st <= nowMs) { startedN++; return; } /* started / unknown kickoff: cannot be bet */
+        if (S.cfg.ttlH > 0 && !(g.at > 0 && nowMs - g.at <= S.cfg.ttlH * 3600000)) return;
+        var alts = (Array.isArray(g.alts) && g.alts.length) ? g.alts : [g.best], tier = leagueTier(g.league), list = [], seenCk = {};
+        alts.forEach(function (c, idx) {
+          if (!c || !fin(c.win) || gradeRank(c.grade) < cFloor) return; /* C+ floor */
+          var ck = candKey(c); if (seenCk[ck]) return; seenCk[ck] = 1;
+          var o = oddsOf(g, c), priced = isFinite(o) && o > 1, dir = dirOfCand(c);
+          var cal = calibrate(T, g.league, c.marketKey, dir, Number(c.win), tier);
+          var it = { g: g, c: c, idx: idx, o: priced ? o : NaN, cal: cal, p: cal.p, raw: Number(c.win), ev: priced ? cal.p * o - 1 : NaN, tier: tier, dir: dir, why: "", nAlts: alts.length, backup: null };
+          if (priced) it.why = cal.p < CAL.MIN_LEG_P ? "weak" : (S.cfg.skipNegEv && cal.p * o < 1 ? "negev" : "");
+          list.push(it);
+        });
+        if (!list.length) return;
+        list.sort(function (a, b) { return cmpItems(a, b, inMode); });
+        var main = null, pk = primary[g.key];
+        if (pk) main = list.filter(function (x) { return candKey(x.c) === pk; })[0] || null;
+        if (!main) main = list.filter(function (x) { return isFinite(x.o) && !x.why; })[0] || list.filter(function (x) { return isFinite(x.o); })[0] || list[0];
+        groups.push({ main: main, subs: list.filter(function (x) { return x !== main; }), n: list.length });
+        nMk += list.length;
+      });
+      groups.sort(function (a, b) {
+        var pa = slipPos[a.main.g.key] || 0, pb = slipPos[b.main.g.key] || 0;
+        if (pa && pb) return pa - pb; /* the slip legs first, in slip order */
+        if (pa) return -1; if (pb) return 1;
+        var ua = isFinite(a.main.o) ? 0 : 1, ub = isFinite(b.main.o) ? 0 : 1;
+        if (ua !== ub) return ua - ub; /* unpriced games last, like the normal table */
+        return cmpItems(a.main, b.main, mode);
+      });
+      function whyOf(it, isMain, inSlip) {
+        if (isMain && inSlip) return "";
+        var priced = isFinite(it.o) && it.o > 1;
+        if (gradeRank(it.c.grade) < needMin) return "not in slip: below " + minLbl + " min grade";
+        if (priced && it.why === "weak") return "not in slip: under " + Math.round(CAL.MIN_LEG_P * 100) + "% after calibration";
+        if (priced && it.why === "negev") return "not in slip: negative EV at this price";
+        if (isMain && priced) return "not in slip: beyond " + legLimit + " legs";
+        return "";
+      }
+      function fRow(it, o) {
+        var g = it.g, b = it.c, priced = isFinite(it.o) && it.o > 1;
+        var base = priced ? (oddsSrc(g, b) === "auto" && fin(b.noVig) ? b.noVig : 1 / it.o) : NaN;
+        var edge = isFinite(base) ? it.p - base : NaN;
+        var matchExtra = (o.sub ? tag("↺ backup " + o.k + " · same game") : (o.n > 1 ? tag(o.n + " markets (C+)") : ""))
+          + (o.why ? tag(o.why, "apWarn") : "")
+          + (!priced ? tag("⚠ " + (o.sub ? "NO PRICE" : "NEEDS ODDS") + (b.nop ? " — " + b.nop : "") + (o.sub ? "" : " · not in slip until priced"), "apWarn") + oddsBox(it) : "");
+        var winExtra = (priced ? tag("@" + it.o.toFixed(2) + (oddsSrc(g, b) === "manual" ? " ✎" : "") + " · EV " + (it.ev >= 0 ? "+" : "") + Math.round(it.ev * 100) + "%" + (isFinite(edge) ? " · edge " + (edge >= 0 ? "+" : "") + (edge * 100).toFixed(1) + "pts" : ""), it.ev >= 0 ? "apEdgePos" : "apEdgeNeg") : "")
+          + tag("model " + Math.round(it.raw * 100) + "%" + (it.cal.n ? " · n" + it.cal.n : ""));
+        return '<tr class="' + o.cls + '">'
+          + (o.sub ? "<td>↳</td><td></td>" : "<td><b>" + esc(o.label) + "</b><br>" + esc(fmtTime(g)) + "</td><td>" + esc(g.leagueLabel || g.league) + "</td>")
+          + "<td>" + (o.sub ? "" : esc(g.home) + " vs " + esc(g.away)) + matchExtra + "</td>"
+          + "<td>" + esc(marketLabel(b, g)) + "</td>"
+          + "<td>" + esc(lineOf(b)) + "</td>"
+          + "<td>" + esc(pickLabel(b, g)) + "</td>"
+          + "<td>" + esc(b.grade || "—") + "</td>"
+          + '<td class="apWin">' + Math.round(it.p * 100) + "%" + winExtra + "</td>"
+          + "</tr>";
+      }
+      var inSlipN = 0;
+      var rowsF = groups.map(function (gr) {
+        var m = gr.main, inSlip = !!slipPos[m.g.key], parts = [];
+        if (inSlip) inSlipN++;
+        parts.push(fRow(m, { label: inSlip ? "#" + slipPos[m.g.key] : "·", cls: "apMain " + (inSlip ? "apTop" : "apBench"), n: gr.n, why: whyOf(m, true, inSlip) }));
+        gr.subs.forEach(function (sx, i) { parts.push(fRow(sx, { sub: true, k: i + 1, cls: "apSub" + (inSlip ? "" : " apBench"), why: whyOf(sx, false, inSlip) })); });
+        return parts.join("");
+      }).join("");
+      rowsF += statusRows.map(function (g) {
+        var st = g.status === "pending" ? "PENDING" : g.status === "error" ? "ERROR" : String(g.status || "").toUpperCase();
+        return "<tr><td>" + esc(fmtTime(g)) + "</td><td>" + esc(g.leagueLabel || g.league) + "</td><td>" + esc(g.home) + " vs " + esc(g.away) + "</td>"
+          + '<td colspan="4" style="opacity:.65">' + st + (g.err ? " · " + esc(g.err) : "") + "</td><td>—</td></tr>";
+      }).join("");
+      var head = '<div class="apSectionTitle">All predictions · C+ · ' + groups.length + " game" + (groups.length === 1 ? "" : "s") + " · " + nMk + " market" + (nMk === 1 ? "" : "s")
+        + ' <span class="apMuted">· ' + inSlipN + " in slip</span>"
+        + (noplayN ? ' <span class="apMuted">· ' + noplayN + " no-play</span>" : "")
+        + (startedN ? ' <span class="apMuted">· ' + startedN + " started, not listed</span>" : "")
+        + "</div>"
+        + '<div class="apMuted" style="padding:0 12px 8px">Every market that passed at grade C or better. Backups sit under their main pick. Book / Copy slip still use your normal slip (' + slipItems.length + " leg" + (slipItems.length === 1 ? "" : "s") + ", " + minLbl + " min grade). Tap ☰ again to go back.</div>";
+      if (!rowsF) return head + '<div class="apEmpty">No C+ plays yet' + (running ? " · still running…" : "") + "</div>";
+      return head + '<div class="apTblWrap"><table id="apAllTbl" class="apFull"><thead><tr>'
+        + "<th>Time</th><th>League</th><th>Match</th><th>Market</th><th>Line</th><th>Pick</th><th>Grade</th><th>Win%</th>"
+        + "</tr></thead><tbody>" + rowsF + "</tbody></table></div>";
+    }
     var rows = slipItems.map(function (it, i) { return playRow(it, "#" + (i + 1), "", i === 0 ? "apTop" : ""); }).join("");
     if (showAll) {
       rows += bench.map(function (it) {
@@ -56428,7 +56536,7 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
 
     var slipLegs = ctx.tableSel, st2 = slipStats(slipLegs);
     var statLine = slipLegs.length ? "Combined win chance ≈ " + fmtPct(st2.combined) + " (independent legs) · " + slipEvLine(slipLegs, st2) : "";
-    wrap.innerHTML = '<div class="apSectionTitle">Plays · ' + slipLegs.length + " of " + rk.items.length + " ranked · " + RANK_LABEL[mode]
+    var normalHtml = '<div class="apSectionTitle">Plays · ' + slipLegs.length + " of " + rk.items.length + " ranked · " + RANK_LABEL[mode]
       + (bench.length ? ' <button type="button" class="apTool" id="apShowAll">' + (showAll ? "Hide extra" : "Show " + bench.length + " more") + "</button>" : "")
       + (rk.needOdds.length ? ' <span class="apMuted apWarn">· ' + rk.needOdds.length + " need odds</span>" : "")
       + (filteredBySettings ? ' <span class="apMuted">· ' + filteredBySettings + " hidden by grade / start-time</span>" : "")
@@ -56438,6 +56546,7 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
       + '<div class="apTblWrap"><table id="apAllTbl"><thead><tr>'
       + "<th>Time</th><th>League</th><th>Match</th><th>Market</th><th>Line</th><th>Pick</th><th>Grade</th><th>Win%</th>"
       + "</tr></thead><tbody>" + rows + "</tbody></table></div>";
+    wrap.innerHTML = ctx.fullView === true ? fullListHtml() : normalHtml; /* [AP-V24] icon beside Book switches between the slip table and the full C+ list */
     /* odds typed in the table are saved per game + market and the whole panel is re-rendered so the play moves into (or out of) the slip. */
     Array.prototype.forEach.call(wrap.querySelectorAll(".apOdds"), function (inp) {
       inp.addEventListener("change", function () {
@@ -56472,7 +56581,25 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
     var sel = Array.isArray(ctx.tableSel) ? ctx.tableSel : [];
     var snapshot = makeSlipSnapshot(sel), key = slipSnapshotKey(snapshot);
     if (ctx.bookKey !== key) { ctx.bookKey = key; if (out) out.innerHTML = ""; } /* a different slip: an old booking code must not stay on screen */
-    if (!sel.length) { bar.dataset.h = ""; bar.innerHTML = ""; if (sum) sum.textContent = ""; return; }
+    /* [AP-V24] the "all predictions (C+)" toggle stays reachable even when the normal slip is empty (for example when only C-grade plays exist) */
+    var anyPlay = false;
+    try { anyPlay = scopeGames(dayKeyOf(S.cfg.day)).some(function (g) { return g && g.status === "play"; }); } catch (eAp) { anyPlay = false; }
+    var layout = "3|" + (sel.length ? "slip" : "none") + "|" + (anyPlay ? "t" : "-");
+    if (bar.dataset.h !== layout) {
+      bar.dataset.h = layout;
+      var togHtml = anyPlay ? '<button type="button" class="apTool" id="apAllToggle" title="All predictions (C+), backups included" aria-label="All predictions, grade C and above, backups included" aria-pressed="false"><span>☰</span><small>C+</small></button>' : "";
+      bar.innerHTML = sel.length
+        ? '<button type="button" class="apTool pri" id="apBook">🎫 Book on SportyBet</button>' + togHtml + '<button type="button" class="apTool" id="apCopySlip">📋 Copy slip</button>'
+        : togHtml;
+    }
+    var tg = $("apAllToggle");
+    if (tg) {
+      var onNow = ctx.fullView === true;
+      tg.className = "apTool" + (onNow ? " on" : "");
+      tg.setAttribute("aria-pressed", onNow ? "true" : "false");
+      tg.onclick = function () { ctx.fullView = ctx.fullView !== true; render(); };
+    }
+    if (!sel.length) { if (sum) sum.textContent = ""; return; }
     var priced = sel.filter(function (g) { var o = oddsOf(g, g.best); return isFinite(o) && o > 1; });
     var dec = priced.length === sel.length ? sel.reduce(function (p, g) { return p * oddsOf(g, g.best); }, 1) : NaN;
     var st = slipStats(sel), ev = isFinite(dec) ? st.combined * dec - 1 : NaN;
@@ -56480,10 +56607,6 @@ body.dark-mode #apAllTbl td.apSt-pending,html.dark-mode #apAllTbl td.apSt-pendin
       + (isFinite(dec) ? " · total odds " + dec.toFixed(2) : "")
       + " · win chance ≈ " + fmtPct(st.combined)
       + (isFinite(ev) ? " · EV " + (ev >= 0 ? "+" : "") + Math.round(ev * 100) + "%" : "");
-    if (bar.dataset.h !== "2") {
-      bar.dataset.h = "2";
-      bar.innerHTML = '<button type="button" class="apTool pri" id="apBook">🎫 Book on SportyBet</button><button type="button" class="apTool" id="apCopySlip">📋 Copy slip</button>';
-    }
     var bk = $("apBook");
     if (bk) bk.onclick = function () { bookSlip(snapshot, bk, $("apBookOut"), key); };
     var cp = $("apCopySlip");
